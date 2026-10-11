@@ -1,39 +1,49 @@
-# 模块之间的接口契约
+# Interface reference
 
-> 并行开发唯一需要协调的东西。改它 = 改所有调用方：PR 标题以 `contract:` 开头，lead 合并，合并后通知依赖方。优先向后兼容（加字段不删字段）。
-> 版本号：**v3**（每改一次加 1，写进「变更记录」；现在 v3.11）。
+The interfaces between RippleTwin's modules: the static data files, the sign-reading call, the plan format, the engine API and the HTTP API. During the event this was the one document the five team members had to agree on before working in parallel; every module codes against it.
 
-## 谁调谁
+- **Version:** v3.15 (final, 11 October 2026). The [changelog](#changelog) lists every revision.
+- **Origin:** everything is served from one origin. The web page, `/engine/public/`, `/roads/public/`, `/params/public/`, `/sumo/public/` and `/api/*` sit under the same host, so no endpoint sends CORS headers.
+- **Field paths:** when this document and the code disagree, the code wins. Check against the tests named in each section.
 
-| 调用方 | 被调方 | 接口 | 见节 |
+> **Status after the event.** The SUMO container and its `hackathon-sumo` Worker were deleted after the hackathon, so `/api/sumo/*` now answers 502 `sumo_down`. Step 02 then plays the pre-computed (baked) replay in `/sumo/public/real/`, and step 04's per-plan SUMO cells show "—". The `LLM_API_KEY` secret was also removed, so `/api/health` reports `llm.mode: "rules"`: the 92 pre-computed LLM readings in `apps/api/public/answers/demo.json` still ship, and any other wording is read by keyword rules. Everything else in this document is live. See [Deployment](../architecture/deployment.md).
+
+## Who calls whom
+
+| Caller | Callee | Interface | Section |
 |---|---|---|---|
-| web | api | HTTP + WebSocket | §HTTP、§WS |
-| engine、web | roads | 静态 JSON 文件（随网页一起发布，线上不调接口） | §路网数据文件 |
-| engine | api | 浏览器里的 `readSigns()`（背后是 `POST /api/read`） | §路人读数 |
-| web | engine | 浏览器里的 `createEngine(...).evaluate(方案)`（T9 骨架） | §施工方案、§evaluate |
-| web | api | 施工登记表 `worksites.js`（背后是 `/api/worksites`）、AI 解读 `explain.js`（背后是 `POST /api/explain`）、执行包 `pack.js`（纯函数，不走接口） | §施工方案、§HTTP API |
+| web | api | HTTP | [HTTP API](#http-api) |
+| engine, web | roads | Static JSON files, published with the site (no runtime data API) | [Road data files](#road-data-files-roads--engine-web) |
+| engine | api | `readSigns()` in the browser (backed by `POST /api/read`) | [Sign reading](#sign-reading-api--engine) |
+| web | engine | `connect()` from `backend.js`, then `be.run(plan)` and friends | [Worksite plan](#worksite-plan-web--engine), [Engine API](#engine-api-engine--web) |
+| web | api | Worksite register `worksites.js` (backed by `/api/worksites`), AI explanation `explain.js` (backed by `POST /api/explain`), execution pack `pack.js` (pure functions, no HTTP) | [Worksite plan](#worksite-plan-web--engine), [HTTP API](#http-api) |
+| web | sumo | `createSumoClient()` from `sumo-client.js` (backed by `/api/sumo/v1/*`, falling back to static replays) | [HTTP API](#http-api), [SUMO results](#sumo-results-format-v2-real-network) |
 
-## 路网数据文件（roads → engine、web）
+## Road data files (roads → engine, web)
 
-T3 产出，放在 `apps/roads/public/cbd/`，本地和线上都从 `/roads/public/cbd/<文件>` 读（lead 部署时把每个模块的 `public/` 原样挂到 `/<模块>/public/`）。字段细则和生成方法见 `apps/roads/PRD.md` 第 5 节，校验见 `apps/roads/tests/test_roads.py`。
+Built offline by `apps/roads/tools/` and committed under `apps/roads/public/cbd/`. Locally and in production they are read from `/roads/public/cbd/<file>`: the site Worker mounts every module's `public/` directory at `/<module>/public/`. Field details and how each file is built are in [`apps/roads/PRD.md`](../../apps/roads/PRD.md) §5 and [`apps/roads/PRD-2.md`](../../apps/roads/PRD-2.md); the checks are in [`apps/roads/tests/`](../../apps/roads/tests/). Sources and licences are in [Data sources](../data/sources.md).
 
-| 文件 | 顶层字段 | 要点 |
+| File | Top-level fields | Notes |
 |---|---|---|
-| `network.json` | `version, area, bbox[南,西,北,东], generated, sources, assumptions, nodes[], links[]` | 路段有方向；`links[]`：`id, from, to, name, highway, len_m, lanes, speed_kmh, cap_vph, t0_s, tram, bike_lane, osm_way, geometry[[lat,lon]]`；`nodes[]`：`id, lat, lon, osm, signal` |
-| `flows.json` | `version, unit="veh/h", period, days{wd,we}{路段 id: 24 个数}, method{路段 id}, coverage{links, measured, estimated}` | 下标 = 小时；`method` ∈ `detector_map / site_split / street_interp / class_default` |
-| `signals.json` | `version, sites[{site, name, type, lat, lon, node, dist_m}]` | `node` 是 30 米内最近的节点，没有就 `null` |
-| `transit.json` | `version, sources, service_dates{wd,we}, assumptions, routes[], stops[], coverage` | PTV GTFS 电车 / 公交。`routes[]`：`id, mode (tram / bus), short, dirs[{dir, headsign, links[], stops[], trips{wd,we}[24], offnet_m, geometry}]`，`links` 是匹配到的路段 id（按 10 米采样，路口里的短路段可能缺）；`stops[]`：`id, name, lat, lon, mode, road_link, routes[]`。引擎的 `transit.js` 读它（T16） |
-| `walk.json` | `version, area, bbox, sources, assumptions, nodes[{id, lat, lon}], links[]` | 人行道路网（不分方向）：`links[]`：`id, a, b, len_m, kind (sidewalk / other / path / crossing / mall), crossing (null / signal / uncontrolled / zebra), road_link, side (left / right / null), geometry`；`side` 相对 `road_link` 的行车方向 |
-| `peds.json` | `version, unit="ped/h", period, days{wd,we}{walk link id: 24 个数}, method{walk link id}, sensors[{id, name, lat, lon, walk_link, road_link}], coverage` | `method` ∈ `sensor / street_interp / class_default`；只有 `sensor` 是实测 |
+| `network.json` | `version, area, bbox[S,W,N,E], generated, sources, assumptions, nodes[], links[]` | Links are directed. `links[]`: `id, from, to, name, highway, len_m, lanes, speed_kmh, cap_vph, t0_s, tram, bike_lane, osm_way, geometry[[lat,lon]]`. `nodes[]`: `id, lat, lon, osm, signal` |
+| `flows.json` | `version, unit="veh/h", period, days_used, sources, assumptions, days{wd,we}{link id: 24 values}, method{link id}, coverage{links, measured, estimated}` | Array index = hour of day. `method` ∈ `detector_map / site_split / street_interp / class_default` |
+| `signals.json` | `version, sites[{site, name, type, lat, lon, node, dist_m}]` | `node` is the nearest node within 30 m, otherwise `null` |
+| `transit.json` | `version, sources, service_dates{wd,we}, assumptions, routes[], stops[], coverage` | PTV GTFS trams and buses. `routes[]`: `id, mode (tram / bus), short, dirs[{dir, headsign, links[], stops[], trips{wd,we}[24], offnet_m, geometry}]`; `links` are the matched link ids (sampled every 10 m, so very short links inside junctions can be missing). `stops[]`: `id, name, lat, lon, mode, road_link, routes[]`. Read by the engine's `transit.js` |
+| `walk.json` | `version, area, bbox, sources, assumptions, nodes[{id, lat, lon}], links[]` | Footpath network (undirected). `links[]`: `id, a, b, len_m, kind (sidewalk / other / path / crossing / mall), crossing (null / signal / uncontrolled / zebra), road_link, side (left / right / null), geometry`. `side` is relative to the direction of travel on `road_link` |
+| `peds.json` | `version, unit="ped/h", period, days{wd,we}{walk link id: 24 values}, method{walk link id}, sensors[{id, name, lat, lon, walk_link, road_link}], coverage` | `method` ∈ `sensor / street_interp / class_default`; only `sensor` is measured |
+| `buildings.json` | `version, area, bbox, generated, sources, assumptions, buildings[]` | `buildings[]`: `id, name, use, height_m, levels, height_src, footprint[[lat,lon]], frontage[{link, dist_m}]`. Read by the web map |
+| `equipment.json` | `version, sources, categories, effects, items[]` | Equipment catalogue: `items[]` carry `id, category, name, effect`, specifications, `qty, day_rate_aud, assumed[], url`. `qty` and `day_rate_aud` are assumptions. The VMS `chars_per_line` (10) must match the sign-text limit of `readSigns()`. Read by the engine's `options()` and by `pack.js` |
+| `vectormap.json` | `version, area, bbox, generated, zoom, tile_source, sources, assumptions, polygons[{kind, polys}], lines[{kind, pts}]` | Basemap layers (water, green space, land use, rail and tram lines) in lat/lon, decoded from vector tiles at build time. Read by the web map; the page never contacts the tile server |
+| `weather_hourly.json`, `weather_backtest.json` | — | Offline weather back-test only; no application code reads them. See [Assumptions and validation](../data/assumptions-and-validation.md#weather-back-test) |
 
-- 加字段随时可以；改名、删字段、改单位要开 `contract:` PR，并把文件里的 `version` 加 1
-- 路段 id 从 OSM id 派生，重跑时保持稳定（T2 会用它存用户选的施工路段）
+- New fields can be added at any time. Renaming or removing a field, or changing a unit, is a breaking change: bump the file's `version` and follow [Changing an interface](#changing-an-interface).
+- Link ids are derived from OSM ids and stay stable across rebuilds, because worksite plans store them.
 
-## 路人读数（api → engine）
+## Sign reading (api → engine)
 
-D-0929-1435：大模型只「读懂」屏上的字，比例由引擎算。T5 在 `apps/api/public/js/reader.js` 导出 `readSigns(请求) → Promise<读数>`，引擎只调这一个函数。背后按顺序：随网页发布的答案文件 → `POST /api/read`（Cloudflare Worker，先查 KV）→ 大模型 → 任何一步失败都用关键词规则（`src: "rule"`）。
+Decision D-0929-1435: the LLM only *reads* the words on a sign; the engine computes every share. The api module exports `readSigns(request) → Promise<reading>` from `apps/api/public/js/reader.js`, and the engine calls nothing else. Behind it, in order: the answers file shipped with the site → `POST /api/read` (Cloudflare Worker, cache first) → LLM → keyword rules (`src: "rule"`) if any step fails.
 
-**请求**（一类人 × 一串标志）：
+**Request** (one road-user type × an ordered list of signs):
 
 ```json
 {
@@ -47,13 +57,14 @@ D-0929-1435：大模型只「读懂」屏上的字，比例由引擎算。T5 在
 }
 ```
 
-- `persona` ∈ `commuter / local / tourist / delivery`；`signs` 按经过的先后顺序；`read_s` 是引擎按「可读距离 ÷ 车速」算好的秒数，超过 120 按 120 算（排队时车速 5 km/h 会算出约 137 秒）
-- `signs[].kind` ∈ `vms / sign / arrow`；`arrow`（箭头板）的 `text` 可以省；护栏 `barrier` 不进请求。路名字符和引擎的 `cleanName()` 一致（字母、数字、空格和 `. , ' & / ( ) -`）
-- 请求不合规范时 `readSigns()` 抛 `SignError`（`.code` 是短码）。引擎把抛错记成 `prepare()` 的 `failed` 和 `evaluate` 结果的 `missing`（那一类人按「没人被说动」算），界面要显示出来；T2 在用户输入屏上文字时先用 `apps/api/public/js/check.js` 的 `checkSigns()` 挡住（不抛错，回 `{ ok, error?, warnings[] }`）
-- `roads` = 当前路 + 候选绕行路的名字，只用来把「叫你走哪条」对到路名
-- 请求里**没有**各条路的耗时和排队：读数只取决于「字 + 人」，所以同一句话每类人只问一次，缓存一直有效
+- `persona` ∈ `commuter / local / tourist / delivery`. `signs` are in the order the driver passes them. `read_s` is the reading time the engine computes as legible distance ÷ speed; values above 120 are capped at 120 (a queue at 5 km/h gives about 137 s).
+- `signs[].kind` ∈ `vms / sign / arrow`. An arrow board (`arrow`) may omit `text`. Barriers are never part of a request. Road names use the same characters as the engine's `cleanName()`: letters, digits, spaces and `. , ' & / ( ) -`.
+- Limits (`LIMITS` in `apps/api/public/js/signs.js`): at most 8 signs and 8 roads; a VMS has at most 2 frames × 4 lines × 10 characters and 8 words in total; a static sign or arrow board message is at most 40 characters; `kmh` is 0–130.
+- An invalid request makes `readSigns()` throw `SignError` (`.code` is a short machine-readable code). The engine records the throw as `failed` in `prepare()` and as `missing` in the result, counting that road-user type as "nobody persuaded", and the page must show it. While the user is typing sign text, the web page checks it first with `checkSigns()` from `apps/api/public/js/check.js`, which never throws and returns `{ ok, error?, warnings[] }`.
+- `roads` = the current road plus the candidate detours. They are used only to map "which road the sign sends you to" onto road names.
+- The request deliberately carries **no** travel times or queues: a reading depends only on the words and the reader, so each wording is asked once per road-user type and the cached reading stays valid.
 
-**读数**：
+**Reading**:
 
 ```json
 {
@@ -72,31 +83,31 @@ D-0929-1435：大模型只「读懂」屏上的字，比例由引擎算。T5 在
 }
 ```
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `notice` | 这类人里注意到标志的比例，0–1 |
-| `understand` | 注意到的人里看懂的比例，0–1 |
-| `advice` | 标志叫你走（`use`）或别走（`avoid`）的路；没提到的路不出现 |
-| `saving_min` / `delay_min` | 标志上说走推荐路能省几分钟 / 原路要多堵几分钟；没写就 `null` |
-| `trust` | 看懂的人里相信这句话的程度，0–1 |
-| `why` | 一句理由（英文，界面显示用 `textContent`） |
-| `range` | 问 3 次的最小到最大；规则兜底时没有这个字段 |
-| `src` | `file`（随网页发布的 `demo.json`）/ `kv`（Worker 的缓存：内存、KV 或 Cache API）/ `llm`（刚问的大模型）/ `rule`（关键词规则） |
-| `model` | 大模型名（= Worker 变量 `LLM_MODEL`，例 `deepseek-flash`）；规则读数是 `"rules"` |
-| `prompt_v` | 提示词版本（`apps/api/prompts.md`，例 `r2`）；规则读数是规则版本（例 `k1`） |
-| `note` | 可选，只在 `POST /api/read` 的规则兜底时出现：为什么没用大模型的短码（例 `llm_fallback: 1/3 valid (timeout)`、`llm_rate_limited`）。`readSigns()` 会丢掉它，引擎看不到 |
+| `notice` | Share of this road-user type who notice the sign, 0–1 |
+| `understand` | Share of those who noticed it who understand it, 0–1 |
+| `advice` | Roads the sign tells you to take (`use`) or avoid (`avoid`); roads it does not mention are absent |
+| `saving_min` / `delay_min` | Minutes the sign says the recommended road saves / the current road adds; `null` if the sign gives no number |
+| `trust` | How far those who understood it believe it, 0–1 |
+| `why` | A one-sentence reason (English; the page renders it with `textContent`) |
+| `range` | Minimum to maximum over 3 samples; absent on rule readings |
+| `src` | `file` (the shipped `demo.json`) / `kv` (the Worker's cache: memory, KV or Cache API) / `llm` (a fresh LLM call) / `rule` (keyword rules) |
+| `model` | LLM model name (= Worker variable `LLM_MODEL`, e.g. `deepseek-flash`); `"rules"` for rule readings |
+| `prompt_v` | Prompt version (`apps/api/prompts.md`, e.g. `r2`); for rule readings, the rule version (e.g. `k1`) |
+| `note` | Optional; only on a rule fallback from `POST /api/read`: a short code saying why the LLM was not used (e.g. `llm_fallback: 1/3 valid (timeout)`, `llm_rate_limited`). `readSigns()` drops it, so the engine never sees it |
 
-- 引擎拿读数 + 每类人的参数算各条路的比例（选择模型和两点校准归 T4）；**大模型不回比例**
-- 加字段随时可以；改名、删字段、改取值范围要开 `contract:` PR
+- The engine combines the reading with each road-user type's parameters to compute route shares (choice model and two-point calibration, see [Traffic engine](../architecture/engine.md)). **The LLM never returns shares.**
+- New fields can be added at any time; renaming or removing a field, or changing a value range, is a breaking change.
 
-## 施工方案（web → engine）
+## Worksite plan (web → engine)
 
-一条施工 = 一个对象，web 画出来交给引擎。存进登记表 `/api/worksites` 时原样用这个格式，另加登记表字段（见本节末「登记表字段」）。引擎侧见 `apps/engine/public/js/worksite.js` 开头。
+One worksite is one object, drawn by the web page and handed to the engine. The worksite register (`/api/worksites`) stores exactly this format plus the register fields listed at the end of this section. The engine side is documented at the top of `apps/engine/public/js/worksite.js`.
 
 ```json
 {
   "id": "A",
-  "links": ["<network.json 的路段 id，按行车方向>"],
+  "links": ["<network.json link ids, in the direction of travel>"],
   "closes": { "lanes": 1, "footpath": "left" },
   "time": { "from": "2026-10-05", "to": "2026-10-09", "hours": [7, 19] },
   "equipment": [
@@ -106,36 +117,36 @@ D-0929-1435：大模型只「读懂」屏上的字，比例由引擎算。T5 在
 }
 ```
 
-- `links` 同方向连着的算一段；双向施工两个方向都列。`closes.lanes` ≥ 车道数 = 全封；没全封时剩下车道的通行能力再 × 0.9
-- `closes.footpath`（T17，可选）∈ `left / right / both`：封哪一侧人行道。相对施工路段的行车方向，和 `walk.json` 的 `side` 同口径（靠左行驶，`left` = 挨着被封车道那边的路缘）；不写 / `null` / `"none"` = 人行道不封。别的值（`"LEFT"`、`"north"`、`1` …）`validatePlan()` 报错，`backend.run / advise` 抛 `code: "bad_plan"`（`.errors` 是每条原因；页面可先调 `be.validate(方案)` → 错误列表）。只影响行人（`summary.peds`），不改车的数字
-- `time.hours` = 每天 `[开始, 结束)`；`equipment[].at_m` = 在施工起点上游多少米（负数 = 施工起点下游，如摆在施工段末端的 END ROADWORK；引擎只把 `at_m ≥ 0` 的牌交给读屏，下游的牌只进清单和租金）；`type` ∈ `vms / sign / arrow / barrier`（`barrier` 不进读数请求）；`dir` 可选，只给这个方向的车看
-- 屏上文字（`frames`）：≤ 2 帧 × ≤ 4 行 × ≤ 10 字符、合计 ≤ 8 个词、大写（校验归 T5 / T2）
-- 「什么时候」= `when: { date: "YYYY-MM-DD", hour: 0–23, day?: "wd" | "we" }`；`hour` 是 `flows.json` 的下标
-- `equipment[].item`、`equipment[].qty`（#55，可选）：`item` = `apps/roads` 的 `equipment.json` 条目 id，`qty` = 件数（1–500），给报价和库存检查用（`apps/api/public/js/pack.js` 的 `quote()` / `stockCheck()`）；**引擎不看这两个字段**。不写时按类型和牌上的字自动对到库存条目，对不上的不算钱
+- Consecutive `links` in the same direction form one stretch; works in both directions list both directions. `closes.lanes` ≥ the link's lane count is a full closure; on a partial closure the remaining lanes' capacity is further multiplied by 0.9.
+- `closes.footpath` (optional) ∈ `left / right / both`: which footpath is closed, relative to the direction of travel on the works links and with the same meaning as `side` in `walk.json` (traffic keeps left, so `left` is the kerb next to the closed lane). Absent, `null` or `"none"` means the footpath stays open. Any other value (`"LEFT"`, `"north"`, `1` …) fails `validatePlan()`, and `backend.run / advise` throw `code: "bad_plan"` with `.errors` listing each reason (the page can call `be.validate(plan)` first to get the list). It affects pedestrians only (`summary.peds`), not the vehicle numbers.
+- `time.hours` = each day's `[start, end)`. `equipment[].at_m` = metres upstream of the start of the works (negative = downstream, e.g. an END ROADWORK sign at the far end; only signs with `at_m ≥ 0` are sent for reading, downstream ones only count towards the equipment list and hire cost). `type` ∈ `vms / sign / arrow / barrier` (barriers are never read). `dir` is optional and limits a sign to traffic in that direction.
+- VMS text (`frames`): at most 2 frames × 4 lines × 10 characters, at most 8 words in total, upper case (validated by `signs.js` and the page).
+- "When" = `when: { date: "YYYY-MM-DD", hour: 0–23, day?: "wd" | "we" }`; `hour` indexes the 24 values in `flows.json`.
+- `equipment[].item` and `equipment[].qty` (optional): `item` is an `equipment.json` item id and `qty` a count (1–500), used for the hire quote and stock check (`quote()` / `stockCheck()` in `apps/api/public/js/pack.js`). **The engine ignores both fields.** Without them, items are matched to the catalogue by type and sign text; unmatched items are not priced.
 
-登记表字段（#53，只加不改；细节和错误短码见 `apps/api/README.md`「施工登记表」）：
+Register fields (additive only; details and error codes in [`apps/api/README.md`](../../apps/api/README.md#worksite-register)):
 
-| 字段 | 谁给 | 说明 |
+| Field | Set by | Rules |
 |---|---|---|
-| `title` | 客户端 | ≤ 80 字，不许有 `< >` 和控制字符 |
-| `kind` | 客户端 | `road / utility / building / event / other`，默认 `other` |
-| `status` | 客户端 | `draft / assessed / decided / exported / withdrawn`，默认 `draft`；`decided` / `exported` 必须有 `decision`；没有删除，要撤就改成 `withdrawn` |
-| `decision` | 客户端（`at` 由服务端盖） | `{ option, by: "contractor" \| "council", reason ≤ 280 字, at }` |
-| `id` `seed` `created` `updated` | 服务端 | 客户端给的不算；白名单以外的字段一律丢掉 |
+| `title` | Client | ≤ 80 characters; no `<`, `>` or control characters |
+| `kind` | Client | `road / utility / building / event / other`, default `other` |
+| `status` | Client | `draft / assessed / decided / exported / withdrawn`, default `draft`. `decided` and `exported` require a `decision`. There is no delete: set `withdrawn` instead |
+| `decision` | Client (`at` is stamped by the server) | `{ option, by: "contractor" \| "council", reason ≤ 280 characters, at }` |
+| `id` `seed` `created` `updated` | Server | Client values are ignored; fields outside the whitelist are dropped |
 
-- `options[]`（D-0929-2011 ③，按库存出的 3 套方案）的形状见下一小节（T22）；登记表现在不存它，只存人选定后的 `decision.option`
+- The register does not store `options[]` (next section), only the `decision.option` someone chose.
 
-### 按库存出方案 `options[]`（T22，v3.7，只加字段）
+### Equipment options: `options[]`
 
-`be.options(施工 | 方案, { n = 3, when?, worksite? })`（`apps/engine/public/js/backend.js`）→ 一处施工配 3 套方案，每套都用引擎跑同一个小时。`options()` 本身不调大模型（引导那一帧用规则顾问的写法）；每套的读数走 `run()` 同一条读屏链（T5 答案文件 → `/api/read` → 规则），读数一样时结果逐字一样。演示前要把 `options()` 生成的屏上文字（END ROADWORK、FOOTPATH CLOSED、DETOUR AHEAD、引导帧等）预算进 T5 答案文件，否则正式环境会现场问 `/api/read`，数字也可能和规则读数不同。引擎侧见 `apps/engine/README.md`「按库存出方案」。
+`be.options(worksite | plan, { n = 3, when?, worksite? })` in `apps/engine/public/js/backend.js` builds three equipment plans for one worksite and runs each through the engine for the same hour. `options()` itself never calls the LLM (the guidance frame uses the rule-based advisor's wording); each plan's signs are read through the same chain as `run()`, so identical readings give identical results. Wordings that `options()` generates (END ROADWORK, FOOTPATH CLOSED, DETOUR AHEAD, the guidance frame and so on) get an LLM reading only if they are in the shipped answers file; otherwise they go to `/api/read`, which since the event answers with keyword rules, so the numbers can differ from LLM-read ones. Engine details are in [`apps/engine/README.md`](../../apps/engine/README.md).
 
 ```json
 { "worksite": "B-12", "when": { "date": "2026-10-06", "hour": 8 }, "days": 5,
   "site": { "len_m": 43, "lanes": 2, "close_lanes": 1, "full": false, "footpath": "none" },
   "inventory": { "src": "fetched", "version": 1, "assumed": true },
   "options": [{
-    "id": "o1", "label": "Minimum", "label_zh": "最省",
-    "plan": { "when": {}, "worksites": [{ "…": "原施工，equipment 换成这一套；每件带 item + qty" }] },
+    "id": "o1", "label": "Minimum", "label_zh": "…",
+    "plan": { "when": {}, "worksites": [{ "…": "the original worksite with this kit's equipment; every item carries item + qty" }] },
     "hire": { "lines": [{ "item": "barrier_water", "name": "…", "qty": 22, "day_rate_aud": 4, "days": 5, "cost_aud": 440 }],
               "days": 5, "per_day_aud": 103, "total_aud": 515, "unpriced": [], "assumed": true, "note": "…" },
     "stock": { "ok": true, "short": [], "shared_with": [] },
@@ -146,217 +157,241 @@ D-0929-1435：大模型只「读懂」屏上的字，比例由引擎算。T5 在
 }
 ```
 
-- `id` 固定 `o1` Minimum（护栏 + 静态标志，没有 VMS）/ `o2` Standard（+ 箭头板 + **两块** VMS 报延误、不点名路线，如「EXPECT / DELAYS ▸ 10 MIN」，N = 最省那套走原路每车多等的整分钟，另带 `delay: { min, frames }`，不到 1 分钟写「ROADWORK / AHEAD」、`flags.no_delay_min`；最贵）/ `o3` Guided（+ 箭头板 + **一块** VMS 点名引擎算出的最快绕行和省几分钟，另带 `guide: { frames, at_m, why }`；比 `o2` 少租一块 VMS）（T50）
-- `plan` 是完整的 §施工方案 方案，可以直接交给 `run / compare`；每件设备带 `item`（`equipment.json` 的 id）和 `qty`，和 `equipment[].item / qty` 同口径
-- `hire.assumed` 恒为 `true`：库存件数和日租价是假设值，界面要标「假设值」（D-0929-1536）；天数 = `time.from`–`time.to` 日历天数含两头
-- 每种设备件数 + 同一份方案里时间重叠（`overlaps()`：日期和每天时段都有交集）的其他施工已经带的件数（按它们 `equipment[].item / qty` 数）≤ 库存；不够的只摆剩下的，缺口进 `stock.short[{ equipment, item, need, got, stock, why }]`，`flags.ok = false`；`stock.shared_with` = 共用库存的那些施工 id
-- `flags.vms_read` = VMS 有没有进读数请求（T5 一次最多读离施工最近的 6 块，被挤掉就是 `false`，`flags.guided` 和 `flags.ok` 跟着 `false`）；`flags.inactive` = 这处施工在 `when` 那个小时不施工（数字都是 0，`flags.ok = false`）
-- `vs` = 和 `o1` 比（后 − 前）：`{ id, delay_min, affected_min, queue_m, hire_aud }`；哪套更少堵以引擎结果为准，不保证 `o3` 最好
-- 错误：方案不合格 / 有路段不在路网（哪怕只一条）/ 没 `time` 又没 `when` / `time.from`、`to` 不是真实日期或 `from` 晚于 `to` / `time.hours` 不是 `[开始, 结束)`（0 ≤ 开始 < 结束 ≤ 24）/ `when` 不是 `{ date, hour: 0–23 }` → `code: "bad_plan"`；库存取不到 → `code: "no_inventory"`
+- The ids are fixed (final revision of 1 October 2026):
+  - `o1` Minimum: barriers and static signs, no VMS.
+  - `o2` Standard: adds an arrow board and **two** VMS that announce the delay without naming a route, e.g. `EXPECT / DELAYS ▸ 10 MIN`. N is the whole number of minutes each vehicle loses on the original route under the Minimum kit; the option also carries `delay: { min, frames }`. Under one minute the text is `ROADWORK / AHEAD` and `flags.no_delay_min` is set. This is the most expensive kit.
+  - `o3` Guided: adds an arrow board and **one** VMS that names the fastest detour the engine found and the minutes it saves; the option also carries `guide: { frames, at_m, why }`. It hires one VMS fewer than `o2`.
+  - The page labels them A, B and C.
+- `plan` is a complete [worksite plan](#worksite-plan-web--engine) that can go straight to `run / compare`. Every item carries `item` (an `equipment.json` id) and `qty`, with the same meaning as `equipment[].item / qty`.
+- `hire.assumed` is always `true`: stock counts and day rates are assumptions, and the page must label them so (decision D-0929-1536). Days = calendar days from `time.from` to `time.to`, inclusive.
+- For each item, the count in this plan plus the counts already held by other worksites in the same plan whose times overlap (`overlaps()`: both the dates and the daily hours intersect; counted from their `equipment[].item / qty`) must not exceed stock. When stock runs short, only what is left is placed, the shortfall goes into `stock.short[{ equipment, item, need, got, stock, why }]` and `flags.ok = false`. `stock.shared_with` lists the worksites sharing the stock.
+- `flags.vms_read` says whether the VMS made it into the reading request (the reader takes at most the 6 signs nearest the works; if the VMS is crowded out, `vms_read`, `flags.guided` and `flags.ok` are `false`). `flags.inactive` means the works are not active at the `when` hour (all numbers 0, `flags.ok = false`).
+- `vs` = the difference from `o1` (after − before): `{ id, delay_min, affected_min, queue_m, hire_aud }`. Which plan queues least is whatever the engine says; `o3` is not guaranteed to be best.
+- Errors: an invalid plan, any link not in the network, no `time` and no `when`, `time.from` / `to` not real dates or `from` after `to`, `time.hours` not `[start, end)` with 0 ≤ start < end ≤ 24, or `when` not `{ date, hour: 0–23 }` → `code: "bad_plan"`. Inventory cannot be loaded → `code: "no_inventory"`.
 
-## evaluate（engine → web）
+## Engine API (engine → web)
 
-D-0929-1435 定稿（T9 骨架）。**网页只 import 接线层 `/engine/public/js/backend.js`**（D-0929-1540，lead 接好了路网 + 车流 + 参数 + T5 读屏）：
+Settled by decision D-0929-1435. **The web page imports only the wiring layer, `/engine/public/js/backend.js`** (decision D-0929-1540), which loads the road network, flows, parameters and the sign reader for it:
 
 ```js
 const be = await (await import('/engine/public/js/backend.js')).connect();
-const s = await be.run(方案);          // 能直接显示的数字：queue_m mean_delay_s routes by_type hot flags …；引擎原始结果（下表）在 s.raw
-const c = await be.compare(前, 后);     // 前后对比，c.delta 负数 = 变好；be.advise(方案) 顾问改法；be.check(方案) 屏上文字规范
+const s = await be.run(plan);           // display-ready numbers: queue_m, mean_delay_s, routes, by_type, hot, flags …; the raw engine result (table below) is s.raw
+const c = await be.compare(before, after);  // c.delta: negative = better. Also be.advise(plan) for advisor fixes, be.check(plan) for sign-text rules
 ```
 
-**叠加冲突 `be.clash` / `be.stagger`**（T21，v3.8，只加方法；D-0929-2011 ②）：
+`connect()` returns `{ engine, run, compare, advise, check, validate, options, clash, stagger, status, pedsReady, aiLog, onAiLog, readingsOf, lastReadings, demo, demos }`. It never throws except when the road network or flows cannot be loaded: parameters fall back to built-in assumptions, the sign reader to the engine's keyword rules and transit to "not computed", and `status()` reports what each part is using. The summary fields (`street, approaches, main, routes, detour_share, queue_m, vehicles, mean_delay_s, by_type, why, hot, blocked_vph, active, transit, peds, flags, raw` …) and how the page uses them are described in the archived wiring spec, [`docs/hackathon/specs/T13-web-wiring-PRD.md`](../hackathon/specs/T13-web-wiring-PRD.md) §5, and in the header of `backend.js`.
+
+### Overlapping works: `be.clash` and `be.stagger`
+
+Added in v3.8 (decision D-0929-2011):
 
 ```js
-const k = await be.clash(a, b, { hours?, when? });   // a、b = §施工方案的一条施工，或整份方案（取 worksites[0]）
-// k = { a, b, ab, cost,                    // 显示用，永远 ≥ 0：D(A) / D(B) / D(A+B) / 冲突成本 D(A+B) − D(A) − D(B)，单位 车·分钟，按采样小时加总
-//       raw: { a, b, ab, cost },           // 引擎原始数（可能 < 0）
+const k = await be.clash(a, b, { hours?, when? });   // a, b = one worksite (see Worksite plan) or a whole plan (worksites[0] is used)
+// k = { a, b, ab, cost,                    // for display, never negative: D(A) / D(B) / D(A+B) / clash cost D(A+B) − D(A) − D(B), vehicle-minutes summed over the sampled hours
+//       raw: { a, b, ab, cost },           // raw engine numbers (can be < 0)
 //       whens, hours, truncated, overlap: { from, to, days },
 //       flags: { reliable, negative_delay, substitutes, reading_src, failed } }
 const g = await be.stagger(a, b, { maxDays = 7, hours?, back = false });
 // g = { base: clash(a, b), best: { days, cost, ab, overlap_days, reliable }, tries: [{ days, cost, overlap_days, reliable }],
-//       worksite: 挪好的 b, period: { from, to, whens, truncated, ab_before, ab_after, reliable, failed } }
+//       worksite: the shifted b, period: { from, to, whens, truncated, ab_before, ab_after, reliable, failed } }
 ```
 
-- 时间窗 = 两处施工**重叠的那几天** × 重叠时段里的早晚高峰（8、17 点；都不在就取时段中间那个小时，和 `advise()` 同一口径）；`opts.hours` 换采样小时，`opts.when` 只算那一个时刻。不重叠 → 全 0、`whens = 0`，不跑引擎。两处施工都要写 `time`（或给 `when`），否则抛错
-- 数由 `engine.conflict()` 算（下文「其他」），接线层不另写算法；同样输入同样结果
-- 🔒 显示字段不出现负数，两种「≈ 0」分开标：`raw.a / raw.b / raw.ab` 有 < 0 的（基线车流本来就超过通行能力的路段，如 Flinders St，#58）→ `flags.negative_delay = true`、`flags.reliable = false`、`cost` 显示 0，页面写「≈ 0 · 这段路的基线车流超出通行能力，结果不可信」；三个 D 都 ≥ 0、只有 `raw.cost` < 0（同一走廊的两处施工互相替代）→ `flags.substitutes = true`、`cost` 显示 0、仍可信，页面写「≈ 0 · 两处施工在同一走廊，叠加不额外增加延误」
-- 读屏有失败（`flags.failed > 0`，和 `compare` / `advise` 同一口径）→ `flags.reliable = false`；a、b 先过 `validate()`，不合格抛 `bad_plan`
-- `stagger` 只挪 `b`：`+1 … +maxDays` 天（`back: true` 时 `+1, −1, +2, −2 …`），碰到第一个「不再重叠」或「冲突成本 0 且可信」就停；`best` 先取可信的尝试，同样可信时取冲突成本最小的（一样时取先试的），页面显示前看 `best.reliable`。`period` 是挪前、挪后在同一段时间（a、b、挪后的 b 从最早开工到最晚完工 × 采样小时）里的全网总延误 D(A+B)，同一把尺子比；`period.reliable` 要两个总和 ≥ 0、没有读屏失败、`base` 和 `best` 都可信
-- 读数和 `run()` 走同一条读屏链（T5 答案文件 → `/api/read` → 规则）。登记表 3 条预置施工的屏上文字（`ROAD CLOSED` / `USE RUSSELL ST` / `RIGHT LANE CLOSED`）还不在 T5 答案文件里：正式环境 MOCK=0 时第 3 步一打开就会现场问 `/api/read`，数和规则读数算的（测试里 27,783）不一样。演示前要预算进答案文件，或在 pitch 里说明这个数用的是规则读数
+- The window is the **days on which the two worksites overlap** × the morning and evening peaks (08:00 and 17:00) within the overlapping hours; if neither peak falls inside, the middle hour is used (the same rule as `advise()`). `opts.hours` changes the sampled hours; `opts.when` evaluates that single moment. No overlap → all zeros, `whens = 0`, and the engine is not run. Both worksites need a `time` (or pass `when`), otherwise it throws.
+- The numbers come from `engine.conflict()` (see [Other engine functions](#other-engine-functions)); the wiring layer adds no algorithm of its own, and the same inputs give the same result.
+- Display fields are never negative, and two kinds of "≈ 0" are flagged separately:
+  - If any of `raw.a / raw.b / raw.ab` is below 0 (links whose baseline flow already exceeds capacity, such as Flinders St), then `flags.negative_delay = true`, `flags.reliable = false` and `cost` shows 0. The page says "≈ 0 · baseline flow on this street exceeds capacity; result not reliable".
+  - If all three D values are ≥ 0 and only `raw.cost` is below 0 (two worksites on one corridor substitute for each other), then `flags.substitutes = true`, `cost` shows 0 and the result is still reliable. The page says "≈ 0 · both worksites are on one corridor; overlapping adds no delay".
+- Any failed sign reading (`flags.failed > 0`, counted the same way as in `compare` and `advise`) sets `flags.reliable = false`. `a` and `b` are validated first and invalid input throws `bad_plan`.
+- `stagger` moves only `b`: `+1 … +maxDays` days (with `back: true`: `+1, −1, +2, −2 …`). It stops at the first try that no longer overlaps, or whose clash cost is 0 and reliable. `best` prefers reliable tries, then the lowest clash cost, then the earliest try; the page should check `best.reliable` before showing it. `period` compares total network delay D(A+B) before and after the shift over the same span (earliest start to latest end of a, b and the shifted b, × the sampled hours), so both sides use the same yardstick. `period.reliable` needs both totals ≥ 0, no failed readings, and both `base` and `best` reliable.
+- Readings use the same chain as `run()` (answers file → `/api/read` → rules). The answers file holds only the pre-computed demo requests; any other request, such as the signs of the register's seed worksites, is read by `/api/read`, which since the event answers with keyword rules. Clash numbers for those worksites are therefore rule-based.
 
-**电车公交 `s.transit`**（T16，`apps/engine/public/js/transit.js`；`connect()` 同时读 `/roads/public/cbd/transit.json`，读不到不抛：`status().transit = "none"`、`status().errors` 记一条、`s.transit = { src: null }`；这一块算的时候抛错 → `{ src: null, error }`，车的数字照出；`opts.transit` 可以直接给）：
+### Trams and buses: `s.transit`
+
+`apps/engine/public/js/transit.js`. `connect()` also loads `/roads/public/cbd/transit.json`. If that fails it does not throw: `status().transit = "none"`, `status().errors` gets an entry and `s.transit = { src: null }`. If the transit calculation throws, the result is `{ src: null, error }` and the vehicle numbers are still returned. `opts.transit` can supply the data directly.
 
 ```js
 s.transit = {
   src: 'gtfs' | null, day: 'wd' | 'we', hour,
   routes: [{ id, short, mode: 'tram' | 'bus', dir, headsign,
-             trips_h, pax_per_trip, pax_h,          // 这个小时的车次（GTFS）、每趟人数（假设值）、乘客/小时
-             delay_s, pax_min,                      // 每趟多的秒数（≥ 0）、乘客·分钟；停掉的（blocked）和路网外换路的（edge）都是 null
-             diverted, blocked, edge,               // 公交全封要绕 / 电车全封停（公交在路网里绕不过去也算 blocked）/
-                                                    // edge：全封在线路进出路网 400 米内、路网里绕不过去 → 在路网外换路，分钟数算不出，不算停运
-             stops_closed: [{ id, name }],          // 在全封路段上的站
-             links: [路段 id],                      // 这条线路变慢了或全封的路段
-             detour_links: [路段 id], stops_skipped: [{ id, name }] }],  // 公交绕的路、绕开的站（没绕 = []）
-  trips_h, pax_h, pax_min, blocked_routes, blocked_pax_h,   // 合计；pax_min 不含停掉的和 edge 的（≥ 0）
-  edge_routes,                                              // edge 的线路数（不算进 blocked_routes / blocked_pax_h）
-  assumed: { pax_per_trip: { tram, bus }, period: 'peak' | 'offpeak', range: { tram: [低, 高], bus: [低, 高] }, note },
+             trips_h, pax_per_trip, pax_h,          // trips this hour (GTFS), riders per trip (assumed), riders per hour
+             delay_s, pax_min,                      // extra seconds per trip (≥ 0), rider-minutes; null for blocked and edge routes
+             diverted, blocked, edge,               // bus detoured around a full closure / tram stopped by a full closure (a bus with no in-network detour is also blocked) /
+                                                    // edge: full closure within 400 m of where the route enters or leaves the network, with no in-network detour → it reroutes outside the map; minutes unknown, not counted as cancelled
+             stops_closed: [{ id, name }],          // stops on fully closed links
+             links: [link id],                      // links where this route slowed down or is fully closed
+             detour_links: [link id], stops_skipped: [{ id, name }] }],  // the bus detour and the stops it skips ([] when there is no detour)
+  trips_h, pax_h, pax_min, blocked_routes, blocked_pax_h,   // totals; pax_min excludes blocked and edge routes (≥ 0)
+  edge_routes,                                              // number of edge routes (not included in blocked_routes / blocked_pax_h)
+  assumed: { pax_per_trip: { tram, bus }, period: 'peak' | 'offpeak', range: { tram: [low, high], bus: [low, high] }, note },
 }
-c.delta.transit_pax_min   // 后 − 前（负数 = 变好）；任何一边没有公交数据 = null
+c.delta.transit_pax_min   // after − before (negative = better); null if either side has no transit data
 ```
 
-- 只列「这个方向经过的路段被全封」或「整趟比没施工时慢 > 0.1 秒」、这个小时有车次的线路（有的路段因为车流绕走反而变快，整趟加起来不慢的不列）；排序：停掉的在前（按 `pax_h`），其余按 `pax_min` 从大到小，`edge` 的放最后（按 `pax_h`）
-- 公交：跟车流走固定线路，每趟多的秒数 = 线路上每个路段（这个方案的通行时间 − 同一小时没施工时的通行时间）之和，都用引擎的 `linkTime`（不是 `links[].delay_s`，那是比自由流多的）。有路段全封 → 在封闭段前后 400 米内就近绕（最短路，先只走主干道，不走小巷；从哪拐出去、在哪回来按全程时间挑最快的），多的秒数 = 绕完的全程 − 平时全程，**最少记 0**（绕行跳过了线路上本来绕的一圈也不算「变快」：按时刻表跑，早到要等；跳过的站在 `stops_skipped`）
-- 公交 `edge`：`transit.json` 的线路只截到 CBD 路网里；全封离线路进 / 出路网不到 400 米、路网里又绕不过去 → 公交在路网外就换路了：`diverted: true, edge: true`，`delay_s` / `pax_min` 为 `null`，不算停运。界面别显示成「+0 秒」，写「在地图外绕行」
-- 电车：假设 CBD 电车走自己的车道，封部分车道不耽误电车（不列）；全封电车经过的路段 → `blocked`，只报停掉的车次和乘客，不编分钟数
-- 每趟载客人数是**假设值**（D-0929-1536：界面标「假设值」+ 区间）：工作日 7–9、16–18 点高峰电车 60 / 公交 25，其余电车 30 / 公交 12；`assumed` 里给当时用的数和区间
+- Only routes with trips this hour whose links in this direction are fully closed, or whose whole trip is more than 0.1 s slower than without works, are listed. Some links get faster because traffic diverts away, so routes that are not slower overall are left out. Order: blocked routes first (by `pax_h`), then by `pax_min` descending, edge routes last (by `pax_h`).
+- Buses follow their fixed route with general traffic. Extra seconds per trip = the sum over the route's links of (travel time with this plan − travel time in the same hour without works), both from the engine's `linkTime` (not `links[].delay_s`, which is relative to free flow). If a link is fully closed, the bus detours locally within 400 m either side of the closure: shortest path, arterials first, no lanes, choosing the turn-off and rejoin points by total trip time. Extra seconds = detoured trip − normal trip, **with a floor of 0**. A detour that skips a loop of the route does not count as faster, because a timetabled bus that arrives early waits; the skipped stops are listed in `stops_skipped`.
+- Bus `edge`: routes in `transit.json` are clipped to the CBD network. If a full closure is less than 400 m from where the route enters or leaves the network and there is no detour inside the network, the bus would reroute outside the map: `diverted: true, edge: true`, `delay_s` / `pax_min` are `null`, and the route is not counted as cancelled. The page must not show this as "+0 s"; it says "detours outside the map".
+- Trams: CBD trams are assumed to run in their own lanes, so a partial lane closure does not delay them (not listed). A full closure on a tram link makes the route `blocked`; only the cancelled trips and riders are reported, with no invented minutes.
+- Riders per trip are **assumptions** (decision D-0929-1536: labelled "assumed" with a range on the page). Weekday peak hours 7–9 and 16–18 (`TRANSIT_PEAK_HOURS`, i.e. 07:00–10:00 and 16:00–19:00): tram 60, bus 25; other hours: tram 30, bus 12. `assumed` carries the values used and their range.
 
-字段表见 `docs/arch/T13-web-wiring-PRD.md` 第 5 节。下面是引擎核心的用法（接线层内部就是这么调的）：
+### Engine core
+
+What the wiring layer does internally:
 
 ```js
 import { createEngine } from '/engine/public/js/index.js';
-import { readSigns } from '/api/public/js/reader.js';        // T5 的；没好之前用 index.js 导出的 mockReadSigns
-const engine = createEngine({ network, flows, readSigns, params });  // network / flows = /roads/public/cbd/ 的两个 JSON；params = await loadParams()（可省）
-await engine.prepare(方案);                                   // 先把要的读数问好（异步，同一句话每类人只问一次，一直缓存）
-const 结果 = engine.evaluate(方案, { seed });                 // 同步、纯计算，同样输入同样结果；真路网上约 7 毫秒
+import { readSigns } from '/api/public/js/reader.js';        // index.js also exports mockReadSigns, used as a fallback and in tests
+const engine = createEngine({ network, flows, readSigns, params });  // network / flows = the two JSON files in /roads/public/cbd/; params = await loadParams() (optional)
+await engine.prepare(plan);                                   // fetch every reading the plan needs (async; each wording once per road-user type, cached)
+const result = engine.evaluate(plan, { seed });               // synchronous and pure: same input, same result; a few milliseconds on the real network
 ```
 
-- `方案 = { when, worksites: [施工方案] }`；只有在 `when` 生效的施工才算
-- 引擎向 `readSigns` 要的请求见 §路人读数：每段路每类人一份「全部标志」，另外每条绕行路线一份「拐口之前看得到的标志」（屏摆在拐口之后不算点名那条路）
-- 还没问到的读数按「没人被说动」算，`结果.missing` 报缺几条；`prepare` 之后应为 0
-- 比例由引擎的选择模型算：每类人参数（赶时间 · 熟路 · 信屏 · 怕堵 · 只能走货车路）在 `choice.js`；两个全局参数（绕行惯性 A、推荐力度 B）由两点校准定（ROADWORK / AHEAD → 3%，USE / RUSSELL ST → 20%，都［待核］），见 `结果.calib`
-- 排队变长 → 引擎按「看得到的排队」自己重算选择（逐次平均 6 轮），不再问大模型
-- 参数：`loadParams()` 读同源的 `/params/public/params.json`（T12），读不到、不合格逐项回退到假设值、不抛错；引擎认哪些字段见 `apps/engine/README.md`「参数」一节；`engine.params` = `{ src: params | default, version, mix, personas, anchors, used: { mix, anchors, persona.<类型>.<项> } 每项来源, ignored, errors, override }`，界面可以标「参数有出处 / 假设值」
+- `plan = { when, worksites: [worksite] }`; only worksites active at `when` count.
+- The requests the engine sends to `readSigns` are described in [Sign reading](#sign-reading-api--engine): for each stretch and road-user type, one request with every sign, plus one per detour route with only the signs visible before its turn-off (a VMS placed after the turn-off does not count as naming that road).
+- Readings not yet fetched count as "nobody persuaded" and `result.missing` reports how many; after `prepare()` it should be 0.
+- Shares come from the engine's choice model. The per-type parameters (hurry, route familiarity, sign trust, queue aversion, trucks-only) are in `choice.js`. Two global parameters, detour inertia A and recommendation strength B, are set by two-point calibration: `ROADWORK / AHEAD` → 3 % detour (a working assumption) and `USE / RUSSELL ST` → 20 % (Erke, Sagberg & Hagman, 2007). See `result.calib`.
+- As queues grow, the engine recomputes the choice from the queue drivers can see (6 rounds of successive averages) without asking the LLM again.
+- Parameters: `loadParams()` reads `/params/public/params.json` from the same origin. If it is missing or invalid, each item falls back to the built-in assumption and nothing throws. Which fields the engine reads is listed in the "Parameters" section of [`apps/engine/README.md`](../../apps/engine/README.md). `engine.params` = `{ src: params | default, version, mix, personas, anchors, used: { mix, anchors, persona.<type>.<item> } (source of each item), ignored, errors, override }`, so the page can label each number "sourced" or "assumed".
 
-**结果**（数字全由引擎算；单位：`*_min` = 这一小时比「没有施工」多出来的车·分钟；每车按 1 人算；公交电车乘客在接线层的 `s.transit`，见上）：
+### Result fields
 
-| 字段 | 含义 |
+All numbers are computed by the engine. Units: `*_min` = extra vehicle-minutes in this hour compared with the same hour without works; each vehicle counts as one person. Tram and bus riders are in the wiring layer's `s.transit` (above).
+
+| Field | Meaning |
 |---|---|
-| `delay_min` | 全网总延误（veh·min） |
-| `by_type[类型]` | `{ delay_min, vehicles, per_capita_min }`：每类人（commuter / local / tourist / delivery）的总延误和人均延误 |
-| `others_min` | 没受影响、但被绕行车流拖慢的背景车流的延误 |
-| `approaches[]` | 每段受影响的方向：`street dir to volume queue_m delay_min share routes[] by_type signs` |
-| `approaches[].routes[]` | `{ id, name, usual_min, now_min, share, flow, truck, turn_m, extra_min }`；`id: "stay"` 是原路，`turn_m` = 在施工起点上游多少米拐出去 |
-| `approaches[].by_type[类型]` | `{ share, detour, extra_min, informed, told[], reading }`：`informed` = 被标志说动的比例，`reading` = T5 给的读数（界面显示 `why`，用 `textContent`） |
-| `links[]` | 每个路段 `{ id, v, cap, delay_s, queue_m, extra_min }`：流量 veh/h；`delay_s` = 比自由流多的秒数（不是比平时）；`queue_m` = 一小时末排队米数（绝对值，含平时就有的排队）；`extra_min`（T28 #79）= 这一小时比不施工多出的车·分钟，可 < 0，全部路段加起来 = `delay_min`。页面画「施工造成的变慢 / 排队」用 `extra_min`，不要用 `delay_s` 或 `queue_m > 0` |
-| `hot[]` | 多出时间最多的 ≤ 5 个路段 |
-| `blocked_vph` | 全封又无路可绕、卡住的车流（不算进 `delay_min`，界面单独标） |
-| `calib` | `{ A, B, method: two_point | default, ok, target: { lo, hi }, lo_detour, hi_detour, src, model }`；`ok = false` = 两个目标至少有一个够不着 |
-| `missing` | 还没问到的读数条数 |
+| `delay_min` | Total network delay (veh·min) |
+| `by_type[type]` | `{ delay_min, vehicles, per_capita_min }`: total and per-vehicle delay for each road-user type (commuter / local / tourist / delivery) |
+| `others_min` | Delay to background traffic that is not on the works approach but is slowed by diverted traffic |
+| `approaches[]` | Each affected direction: `street dir to volume queue_m delay_min share routes[] by_type signs` |
+| `approaches[].routes[]` | `{ id, name, usual_min, now_min, share, flow, truck, turn_m, extra_min }`; `id: "stay"` is the original route, `turn_m` = metres upstream of the works where the route turns off |
+| `approaches[].by_type[type]` | `{ share, detour, extra_min, informed, told[], reading }`: `informed` = share persuaded by the signs, `reading` = the reading from `readSigns()` (render `why` with `textContent`) |
+| `links[]` | Per link `{ id, v, cap, delay_s, queue_m, extra_min }`: flow in veh/h; `delay_s` = seconds above free flow (not above normal); `queue_m` = queue length in metres at the end of the hour (absolute, including any normal queue); `extra_min` = extra veh·min in this hour compared with no works, can be < 0, and sums over all links to `delay_min`. To draw slowdowns or queues caused by the works, use `extra_min`, not `delay_s` or `queue_m > 0` |
+| `hot[]` | Up to 5 links with the most extra time |
+| `blocked_vph` | Traffic stuck at a full closure with no detour (not included in `delay_min`; the page shows it separately) |
+| `calib` | `{ A, B, method: two_point \| default, ok, target: { lo, hi }, lo_detour, hi_detour, src, model }`; `ok = false` means at least one target could not be reached |
+| `missing` | Number of readings not yet fetched |
 
-**行人（T17，`summary.peds`）**：`backend.js` 的 `connect()` 另外在**后台**取 `/roads/public/cbd/walk.json` + `peds.json`（3.6 MB；也可以 `connect({ walk, peds })` 注入）。`connect()` 不等它们：刚连上时 `status().peds = "loading"`，取完变 `fetched / given / none`；`await be.pedsReady()` → 取完后的那个值。`run()` 只有在这个小时真的封了人行道时才等它们，最多 8 秒（`connect({ pedsWaitMs })` 可改）；没封 / 不在施工时段 = 不用数据、直接全 0。取不到、格式不对都不抛：`status().peds = "none"`，`summary.peds = { src: null, footpath }`；等超时 = `{ src: null, footpath, pending: true, error }`（下次 run 数据到了就有）；两种情况 `compare` 的 `delta.peds_extra_min = null`。拿到了时：
+### Pedestrians: `summary.peds`
 
-| 字段 | 含义 |
+`connect()` also fetches `/roads/public/cbd/walk.json` and `peds.json` **in the background** (3.6 MB together; they can also be injected with `connect({ walk, peds })`). `connect()` does not wait for them: right after connecting `status().peds = "loading"`, which becomes `fetched / given / none`; `await be.pedsReady()` resolves to that final value. `run()` waits for them only when a footpath is actually closed in that hour, for at most 8 s (`connect({ pedsWaitMs })`); with no footpath closure, or outside the works hours, no data is needed and every number is 0. A failed fetch or bad format never throws: `status().peds = "none"` and `summary.peds = { src: null, footpath }`. A timeout gives `{ src: null, footpath, pending: true, error }` (the next run will have the data). In both cases `compare` returns `delta.peds_extra_min = null`. With data:
+
+| Field | Meaning |
 |---|---|
-| `src` | `"peds"`；数据没加载上是 `null`（其余字段都没有） |
-| `footpath` | 方案里声明封的人行道：`none / left / right / both`（不管这个小时在不在施工） |
-| `active` | 这个小时有没有正在封人行道的施工；`false` 时下面的数字全是 0 |
-| `day` `hour` | 用的是 `peds.json` 的哪一天类型（`wd / we`）、哪个小时 |
-| `closed[]` `closed_m` | 封掉的人行道（`walk.json` 的 link id）和总长（米） |
-| `ped_h` | 这一段封掉的人行道里这个小时人最多的那条（人/小时）；两侧都封时两侧加起来 |
-| `detour_m` | 每人多走的米数 = 避开封闭段的最短路 − 平时最短路（两侧按人数加权） |
-| `extra_min` | `ped_h × detour_m ÷ (walk_mps × 60)`，人·分钟 / 小时（和车的 `delay_min` 同口径）；等红灯没算 |
-| `crossings` | 绕行路线上要过几条街（`kind = crossing` 或 `crossing` 非空）：连着的几段过街（安全岛把一条过街切成几段）算一次，除非前后两段是不同名字的街；两侧都封时取多的那侧 |
-| `blocked` `blocked_ped_h` | 没路可绕（两头都连着像样的路网、中间被切断）；这些人不算进 `extra_min`，单独报人/小时（和 `blocked_vph` 一样） |
-| `dead_end` | 封掉的人行道在 `walk.json` 里是死胡同（一头连不到别的人行道，或者只连着 < 60 个节点的小孤岛）：没有穿过去的人，不算绕行、**不算** `blocked`；`note` 写明 |
-| `unmatched` `unmatched_sides[]` | 方案要封的那一侧在 `walk.json` 里一条人行道都找不到（`[{ worksite, side }]`）：这时 `closed = []`、数字是 0，但**不等于**「人行道照常通行」，页面要按 `unmatched` 区分；`note` 写明 |
-| `note` `note_zh` | 上面两种情况的说明；正常时 `null` |
-| `step_free` | 一律 `null`：`walk.json` 没有台阶 / 坡道数据，不判断轮椅能不能走 |
-| `measured` `method` | 封掉的人行道里有没有真计数器实测的（`peds.json` 的 `method = sensor`）；`method` = `ped_h` 取的那条的来源 |
-| `sensor` | 真计数器 `{ name, ped_h, id, dist_m, on_closed }`：先认装在封掉的人行道上的（`on_closed = true`）；否则要离封闭段 ≤ 40 米（`peds.json assumptions.sensor_m`）**而且在施工路段中心线的同一侧**（马路对面那条人行道上的不算）；都没有就 `null` |
-| `detour[]` | 绕行路线（`walk.json` link id），一定不经过 `closed[]` |
-| `stretches[]` | 每一段（施工 × 哪一侧 × 一串首尾相接、方向差 < 60° 的施工路段）的明细，字段同上加 `from / to / base_m / path_m / base_crossings / dead_end` |
-| `assumed` | `{ walk_mps: 1.3, note, note_zh }`：步速是假设值；`note` 写明「数到的人都走完整段（上限）、不含等红灯、不判断无障碍」 |
+| `src` | `"peds"`; `null` if the data did not load (then no other fields) |
+| `footpath` | The footpath closure declared in the plan: `none / left / right / both` (whether or not the works are active this hour) |
+| `active` | Whether any worksite is closing a footpath this hour; if `false`, every number below is 0 |
+| `day` `hour` | The `peds.json` day type (`wd / we`) and hour used |
+| `closed[]` `closed_m` | Closed footpath links (`walk.json` link ids) and their total length in metres |
+| `ped_h` | Pedestrians per hour on the busiest closed footpath; both sides added together when both are closed |
+| `detour_m` | Extra metres walked per person = shortest path avoiding the closure − normal shortest path (both sides weighted by pedestrian volume) |
+| `extra_min` | `ped_h × detour_m ÷ (walk_mps × 60)`, person-minutes per hour (same basis as the vehicle `delay_min`); waiting at signals is not included |
+| `crossings` | Streets crossed on the detour (`kind = crossing` or non-null `crossing`). Consecutive crossing segments (a refuge island splits one crossing into several) count once unless they belong to differently named streets; with both sides closed, the larger count |
+| `blocked` `blocked_ped_h` | No detour exists (both ends connect to the wider network but the closure cuts them apart); these people are not in `extra_min` and are reported separately in people per hour (like `blocked_vph`) |
+| `dead_end` | The closed footpath is a dead end in `walk.json` (one end does not connect to other footpaths, or only to a small island of fewer than 60 nodes): nobody walks through, so there is no detour and it is **not** `blocked`; explained in `note` |
+| `unmatched` `unmatched_sides[]` | No footpath at all was found on the side the plan closes (`[{ worksite, side }]`): `closed = []` and the numbers are 0, but this does **not** mean the footpath stays open, so the page must treat `unmatched` separately; explained in `note` |
+| `note` `note_zh` | Explanation for the two cases above (English and Chinese); `null` otherwise |
+| `step_free` | Always `null`: `walk.json` has no step or ramp data, so wheelchair access is not assessed |
+| `measured` `method` | Whether any closed footpath has a real counter (`peds.json` `method = sensor`); `method` = the source of the link `ped_h` was taken from |
+| `sensor` | The real counter `{ name, ped_h, id, dist_m, on_closed }`. A counter on a closed footpath is preferred (`on_closed = true`); otherwise it must be within 40 m of the closure (`peds.json assumptions.sensor_m`) **and on the same side of the works link's centreline** (one on the footpath across the road does not count); `null` if neither |
+| `detour[]` | Links of the detour route (`walk.json` link ids); never includes `closed[]` |
+| `stretches[]` | Details per stretch (worksite × side × a run of end-to-end works links whose headings differ by < 60°), with the fields above plus `from / to / base_m / path_m / base_crossings / dead_end` |
+| `assumed` | `{ walk_mps: 1.3, note, note_zh }`: walking speed is an assumption; `note` states that everyone counted is assumed to walk the full stretch (an upper bound), signal waits are excluded and step-free access is not assessed |
 
-- 右侧人行道：CBD 的双幅路（OSM 里两个方向是两条线，Lonsdale / La Trobe 都是）右边那条挂在对面那幅路上、记作它的 `left`，引擎按「同名、方向相反、40 米内」找对面那幅路，再取它的人行道里「和施工路段并排走了 ≥ min(5 米, 自身长度一半)」的那几条（按并排长度，不按中点；一条人行道只能整条封，所以 `closed_m` 可以比施工路段长）
-- `compare` 的 `delta.peds_extra_min` = 后 − 前（负数 = 变好）
+- Right-hand footpaths: on CBD dual carriageways (two one-way lines in OSM, as on Lonsdale St and La Trobe St) the right-hand footpath belongs to the opposite carriageway and is recorded as its `left`. The engine finds the opposite carriageway by "same name, opposite direction, within 40 m", then takes those of its footpaths that run alongside the works link for at least min(5 m, half their own length), judged by parallel length rather than midpoints. A footpath link can only be closed whole, so `closed_m` can exceed the length of the works.
+- `compare` returns `delta.peds_extra_min` = after − before (negative = better).
 
-其他：`engine.window(worksites, whens)` 一段时间的总延误；`engine.conflict(a, b, { whens?, hours? })` → `{ a, b, ab, cost, overlap, whens, truncated }`，`cost = D(A+B) − D(A) − D(B)`（时段不重叠时正好是 0；默认采样每个施工时段里的 8 点、17 点，没有就取时段中间那个小时，最多 31 天）；`advise(engine, 方案, { askAdvisor })` 第 ⑦ 步，每个改法都重算、标 `better`（MOCK 顾问 `mockAdvise`）。
+### Other engine functions
 
-**AI 调用日志（v3.10，只加方法）**：`connect({ onAiLog?, aiLogMax? })` 把读屏函数包一层，每次调用记一条 `{ seq, t（ISO）, persona, signs, roads, kmh, read_s（每块屏几秒）, src, model, ms, reading, fallback?, error? }`：`src` 照读数给的（`file / kv / llm / rule`）；读屏抛普通错改用引擎规则时记 `src: "rule"` + `fallback`（原因），请求不合规范（`SignError`）记 `src: "error"` + `error`（code）、`reading: null`。只在内存里，环形最多 `AI_LOG_MAX = 200` 条；不多发请求、不改读数（引擎按「字 + 人」缓存，同一句话只问一次，也只记一次）。`be.aiLog()` → 全部记录（拷贝，时间顺序）；`be.onAiLog(fn)` → 每来一条调 `fn(记录)`，回退订函数（回调抛错不影响读数）；`be.readingsOf(summary)` → 这次 `run()` 主路段上每类人读到了什么 `{ when, worksite, entry, street, dir, personas: { <类型>: { signs（按经过顺序，远 → 近）, roads, kmh, reading, src, model, ms, t, fallback } | null } }`，不是 `run()` 出的 summary → `null`；`be.lastReadings()` = 最近一次 `run()` 的。网页第 3 步「AI 路人」和「AI 调用日志」用它们（`apps/web/src/js/9-ai.js`）
+- `engine.window(worksites, whens)`: total delay over a set of hours.
+- `engine.conflict(a, b, { whens?, hours? })` → `{ a, b, ab, cost, overlap, whens, truncated }`, with `cost = D(A+B) − D(A) − D(B)`. It is exactly 0 when the time windows do not overlap. By default it samples every day from the earliest start to the latest end (at most 31 days, then `truncated = true`) at 08:00 and 17:00 within each worksite's hours (otherwise the middle hour).
+- `advise(engine, plan, { askAdvisor })`: suggested fixes, each re-run through the engine and marked `better`. The advisor is rule-based (`mockAdvise`); no LLM is involved.
 
-- 🔒 只支持同源：网页、`/engine/public/`、`/roads/public/`、`/api/*` 挂在同一个域名下
-- 路段可选字段 `truck: false` = 禁货车（T3 现在没有这个字段，没有时禁货车不生效）
+### AI call log
+
+Added in v3.10 (methods only). `connect({ onAiLog?, aiLogMax? })` wraps the sign reader and records one entry per call: `{ seq, t (ISO), persona, signs, roads, kmh, read_s (seconds per sign), src, model, ms, reading, fallback?, error? }`.
+
+- `src` is taken from the reading (`file / kv / llm / rule`). If the reader throws an ordinary error and the engine falls back to its own rules, the entry has `src: "rule"` and `fallback` (the reason). An invalid request (`SignError`) is logged as `src: "error"` with `error` (the code) and `reading: null`.
+- The log is in memory only, a ring buffer of at most `AI_LOG_MAX = 200` entries. It sends no extra requests and never changes a reading: the engine caches by wording and reader, so each wording is asked once and logged once.
+- `be.aiLog()` → all entries (a copy, in time order). `be.onAiLog(fn)` calls `fn(entry)` for each new entry and returns an unsubscribe function (an error thrown by the callback does not affect readings).
+- `be.readingsOf(summary)` → what each road-user type read on the main stretch in that `run()`: `{ when, worksite, entry, street, dir, personas: { <type>: { signs (in the order passed, far → near), roads, kmh, reading, src, model, ms, t, fallback } | null } }`; `null` for a summary that did not come from `run()`. `be.lastReadings()` = the same for the latest `run()`.
+- The step 03 "AI road users" and "AI call log" panels use these (`apps/web/src/js/9-ai.js`).
+
+Constraints:
+
+- Same origin only: the web page, `/engine/public/`, `/roads/public/` and `/api/*` must be served from one host.
+- Optional link field `truck: false` = no trucks. `network.json` does not have this field yet, so the trucks-only restriction currently has no effect.
 
 ## HTTP API
 
-| 方法 + 路径 | 请求 | 响应 | 负责模块 |
+| Method and path | Request | Response | Module |
 |---|---|---|---|
-| `GET /api/health` | — | `{ "ok": true, "v": "<版本>", "mock": bool, "llm": { "mode": "rules"\|"llm", "model", "key": bool, "cache": "kv"\|"cache-api"\|"memory", "prompt_v", "explain_v", "provider", "budget": bool, "per_day": int, "per_min": int } }`（`explain_v` v3.9 加）；`key` 只说有没有，**永远不给值**；`register`（#53）= 登记表的 Durable Object 绑上没有；api 没绑上时 site 自己回 `{ ok, v, mock: true, api: false }` | api |
-| `POST /api/read` | 同 §路人读数 的请求 | `{ "ok": true, "reading": <读数> }`（`src` 是 `llm / kv / rule`）；不合规范 400 `{ "ok": false, "error", "msg" }`；> 8KB（按字节）413 | api |
-| `POST /api/create` | `{}` | `{ "code": "ABCDE" }` | api |
-| `GET /api/worksites?from&to&status` | `from` / `to` 是 `YYYY-MM-DD`，和工期有交集就算 | `{ "ok": true, "register": "do"\|"seed", "n", "worksites": [施工] }`：预置 + 登记的，按开工日期排；DO 没绑或出错时 `register: "seed"`，只回预置的 | api |
-| `POST /api/worksites` | §施工方案 + 登记表字段 | 201 `{ "ok": true, "worksite", "edit_token" }`；`edit_token` **只回这一次**，库里只存 SHA-256，页面自己存（localStorage） | api |
-| `GET /api/worksites/<id>` | — | `{ "ok": true, "worksite" }`；没有 404 | api |
-| `PATCH /api/worksites/<id>` | 请求头 `x-edit-token` + 要改的字段 | `{ "ok": true, "worksite" }`；合并后整份重新校验；token 不对 403 `bad_token`、预置的 403 `locked`、满 200 条 409、全局每天写 500 次 429 | api |
-| `POST /api/explain` | `{ lang?, options: [{ id, label, metrics, per_capita_min?, flags? }] }`（1–5 套，数字从 `optionFromRun()` 转） | `{ "ok": true, "explain": { src, lang, options: [{ id, summary, pros, cons, hardest_hit, risks }], lean, decide, model?, prompt_v?, note? } }`（`src` 是 `llm / kv / rule`；`model` / `prompt_v` 只在 `llm / kv`；`note` 只在大模型兜底成规则时）；解读里的每个数都要能追溯到请求里的数，`hardest_hit` 和规则风险永远按引擎的数算；不合规范 400，> 8KB 413 | api |
-| `GET /api/sumo/v1/health`、`POST /api/sumo/v1/runs`、`GET /api/sumo/v1/runs/<id>[/index.json \| /<情景>/manifest.json \| /<情景>/frames-NNN.json \| /frame?scenario&t]` | 同 `apps/web/tools/sumo/README.md` §接口 v1；POST 只收白名单字段，`demand_scale` 0.1–1.2、`clearance_s` 600–2400，body ≤ 2KB | 同 README（完成前读结果 409）；错误一律 `{ ok:false, error, msg }`：`sumo_off` 503（site 没绑 `SUMO`）、`sumo_down` 502（容器没响应）、`sumo_starting` 503、`sumo_rate` 429（每 IP 每分钟 3 次运行）、`sumo_busy` 429（同时 ≥ 2 个任务）、`not_found` 404、`too_big` 413；完成的 index / manifest / frames 可缓存一天 | sumo |
-| 静态 `/sumo/public/baked/…` | — | 预跑结果：`baked.json`（目录：生成时间、来源、SUMO 版本、`generator_sha256`、预设和 15 个格点各自 complete / failed）+ `preset/`（seed 42 默认 4 种情景的 index / manifest / frames）+ `grid/<key>.json`（只有 index）；页面用它时**必须**标「预先跑好」 | sumo |
-| 静态 `/sumo/public/js/sumo-client.js` | — | `createSumoClient()`（T40 加 `loadReal()` / `realManifest()` / `realChunk()` / `runReal()`，真实路网，失败回 `/sumo/public/real/`）：先试云端，连不上 / 限流 / 忙 / 超时 / 运行失败都回预跑结果；返回值带 `source: live \| baked` 和 `reason`，页面按它选文案（`labels`） | sumo |
-| `POST /api/sumo/v1/runs` 带 `{"network":"real", "seed"?, "p_original"?, "p_ai"?, "scenarios"?}` | `p_*` 0–1（绕行比例，默认 0.14 / 0.53），`scenarios` ⊆ `baseline / original / ai`（默认全部） | 同上；结果目录格式 v2：`index.json`（情景列表、指标、假设）+ `<情景>/manifest.json`（车辆目录、`signal_heads`、分块、指标）+ `<情景>/frames-NNN.json`（每秒 `[i, lon×1e6, lat×1e6, 角度, 速度 cm/s]`、各信号机状态、施工排队 m）；位置是车身中心、经纬度，角度 0 = 正北顺时针 | sumo |
-| 静态 `/sumo/public/real/…` | — | 真实路网 SUMO 预跑（同上 v2 格式，seed 42，三个情景）；页面第 2 步默认播放它，必须标「SUMO · 预先跑好」 | sumo |
-| `POST /api/sumo/v1/runs` 带 `{"network":"real", "seed"?, "options": [{"id", "p"}], "frames"?}`（T49 方案模式） | `options` 1–5 个，`id` ∈ `A–E` 不重复，`p` 0–1（这个方案的绕行比例，页面用引擎读牌得出）；`frames` 默认 `false`；不能和 `p_original` / `p_ai` / `scenarios` 混用 | 同上 v2 目录，情景 = `baseline` + 每个方案一个 `opt-<id>`（封一条车道 + 这个 p，指标字段和 `original` / `ai` 一样）；p 相同的方案只跑一次，后面的照抄并带 `reused_from`；`frames:false` 时 `manifest.chunks` 为空、没有 `frames-NNN.json`；**没有预跑兜底**，`sumo-client.js` 的 `runOptions()` 失败回 `source:'none'` + `reason` | sumo |
+| `GET /api/health` | — | `{ "ok": true, "v": "<version>", "mock": bool, "llm": { "mode": "rules" \| "llm", "model", "key": bool, "cache": "kv" \| "cache-api" \| "memory", "prompt_v", "explain_v", "provider", "budget": bool, "per_day": int, "per_min": int, "error"? }, "register": bool }`. `key` only says whether a key is set and **never returns its value**. `register` = whether the worksite register Durable Object is bound. If the api Worker is not bound, the site answers `{ ok, v, mock: true, api: false }` itself | api |
+| `POST /api/read` | The [sign-reading request](#sign-reading-api--engine) | `{ "ok": true, "reading": <reading> }` (`src` is `llm / kv / rule`). Invalid request: 400 `{ "ok": false, "error", "msg" }`; body over 8 KB (in bytes): 413; other methods: 405 | api |
+| `GET /api/worksites?from&to&status` | `from` / `to` are `YYYY-MM-DD`; a worksite matches if its dates intersect the range | `{ "ok": true, "register": "do" \| "seed", "n", "worksites": [worksite] }`: seed and registered worksites, sorted by start date. If the Durable Object is unbound or fails, `register: "seed"` and only the seed worksites are returned. Bad query: 400 `bad_query` | api |
+| `POST /api/worksites` | A [worksite](#worksite-plan-web--engine) plus register fields | 201 `{ "ok": true, "worksite", "edit_token" }`. The `edit_token` is **returned only this once**; the register stores only its SHA-256, and the page keeps the token (localStorage). Register full (200 entries): 409; global write cap (500 a day): 429; body over 16 KB: 413; register not bound: 503 `no_register` | api |
+| `GET /api/worksites/<id>` | — | `{ "ok": true, "worksite" }`; 404 if absent | api |
+| `PATCH /api/worksites/<id>` | Header `x-edit-token` + the fields to change | `{ "ok": true, "worksite" }`. The merged worksite is validated as a whole. Wrong token: 403 `bad_token`; seed worksite: 403 `locked`; daily write cap: 429. There is no `DELETE`: set `status: "withdrawn"` | api |
+| `POST /api/explain` | `{ lang?, options: [{ id, label, metrics, per_capita_min?, flags? }] }` (1–5 options; numbers converted from `run()` results by `optionFromRun()`) | `{ "ok": true, "explain": { src, lang, options: [{ id, summary, pros, cons, hardest_hit, risks }], lean, decide, model?, prompt_v?, note? } }` (`src` is `llm / kv / rule`; `model` / `prompt_v` only for `llm / kv`; `note` only when an LLM attempt fell back to rules). Every number in the explanation must trace back to a number in the request; `hardest_hit` and the rule-based risks are always computed from the engine's numbers. Invalid: 400; over 8 KB: 413 | api |
+| `GET /api/sumo/v1/health`, `POST /api/sumo/v1/runs`, `GET /api/sumo/v1/runs/<id>[/index.json \| /<scenario>/manifest.json \| /<scenario>/frames-NNN.json \| /frame?scenario&t]` | As in [`apps/web/tools/sumo/README.md`](../../apps/web/tools/sumo/README.md#api-v1) (API v1). POST accepts only whitelisted fields; `demand_scale` 0.1–1.2, `clearance_s` 600–2400; body ≤ 2 KB | As in that README (reading results before completion: 409). Errors are always `{ ok:false, error, msg }`: `sumo_off` 503 (the site has no `SUMO` binding), `sumo_down` 502 (no response from the SUMO Worker or container; **the current state**), `sumo_starting` 503, `sumo_rate` 429 (3 runs per IP per minute), `sumo_busy` 429 (2 or more jobs running), `not_found` 404, `too_big` 413. Completed index, manifest and frame files may be cached for a day | sumo |
+| `POST /api/sumo/v1/runs` with `{"network":"real", "seed"?, "p_original"?, "p_ai"?, "scenarios"?}` | `p_*` 0–1 (detour share; defaults 0.14 and 0.53); `scenarios` ⊆ `baseline / original / ai` (default all) | As above; results in [format v2](#sumo-results-format-v2-real-network) | sumo |
+| `POST /api/sumo/v1/runs` with `{"network":"real", "seed"?, "options": [{"id", "p"}], "frames"?}` (options mode) | 1–5 `options`, unique `id` ∈ `A–E`, `p` 0–1 (that plan's detour share, which the page takes from the engine's sign reading); `frames` defaults to `false`; cannot be combined with `p_original` / `p_ai` / `scenarios` | Format v2 with scenarios `baseline` plus one `opt-<id>` per option (one lane closed with that `p`; metrics as for `original` / `ai`). Options with the same `p` run once; the copies carry `reused_from`. With `frames:false`, `manifest.chunks` is empty and there are no `frames-NNN.json` files. **No baked fallback**: `runOptions()` in `sumo-client.js` returns `source:'none'` and a `reason` on failure | sumo |
+| Static `/sumo/public/real/…` | — | Pre-computed SUMO run on the real network (format v2, seed 42, scenarios baseline / original / ai). Step 02 starts a live run and falls back to this copy when the cloud run fails, which since the event is always; the page labels it "SUMO · pre-computed" | sumo |
+| Static `/sumo/public/baked/…` | — | Pre-computed runs on the synthetic 2×2 grid: `baked.json` (catalogue: generation time, source, SUMO version, `generator_sha256`, complete / failed state of the preset and the 15 grid points), `preset/` (index, manifests and frames for the 4 default scenarios at seed 42) and `grid/<key>.json` (index only). Only the legacy `run()` / `bakedFor()` path reads them; the current page does not. Any page that shows them **must** label them pre-computed | sumo |
+| Static `/sumo/public/js/sumo-client.js` | — | `createSumoClient()` with `health, run, loadBaked, bakedFor, manifest, chunk, loadReal, runReal, runOptions, realManifest, realChunk`. It tries the cloud first; when the service is unreachable, rate-limited, busy, times out or the run fails, `run()` falls back to `/sumo/public/baked/` and `runReal()` to `/sumo/public/real/`. Every result carries `source: live \| baked \| none` and a `reason`, and the page picks its wording from them (`labels`, `realLabels`) | sumo |
 
-- `llm.mode` 是 `llm` 只在 Worker 变量 `MOCK` 为 `"0"` **且**有 secret `LLM_API_KEY`；否则 `/api/read` 只用关键词规则、不发任何外部请求（`apps/api/tests/llm.test.mjs` 反向断言）
-- `POST /api/explain` 开关同 `/api/read`，每个请求最多 1 次外部调用、预留 1 次（和读屏同一本账），兜底 `note` 另有 `llm_fallback: bad_json / invalid / empty / timeout / http_<码>`
-- 真调用前还要向全局每日计数（Durable Object 绑定 `BUDGET`）预留 3 次：超了 `LLM_MAX_CALLS_PER_DAY`（`llm.per_day`）、没绑上或出错都不调用，读数回规则并带 `note`（`llm_daily_cap` / `llm_no_budget` / `llm_budget_error`）
-- `llm.cache`：`kv` = 有 KV 绑定 `READINGS`（跨实例）；`cache-api` = Workers 自带的 Cache API（只在自己的域名上生效）；`memory` = 只有每个实例的内存缓存（`*.workers.dev` 上就是这个）
-- `/api/*` 由 site 用服务绑定 `API` 转给 api Worker（`hackathon-api`，不开自己的 `workers.dev` 网址）；`/api/public/*` 是 `apps/api/public/` 的静态文件，不转发
-- `/api/sumo` 和 `/api/sumo/*` 在上一条之前被 site 截走，经服务绑定 `SUMO` 转给 `hackathon-sumo`（不开自己的 `workers.dev` 网址），它再转进容器的 `/sumo/v1/*`；容器只开 1 个实例、会重启，重启后旧的运行 id 一律 404，页面要回预跑结果（D-0930-1700）
+- `llm.mode` is `llm` only when the Worker variable `MOCK` is `"0"` **and** the secret `LLM_API_KEY` is set. Otherwise `/api/read` uses keyword rules only and makes no external request (`apps/api/tests/llm.test.mjs` asserts this). After the event the secret was removed, so the live site is in `rules` mode.
+- `POST /api/explain` has the same switch as `/api/read`. Each request makes at most 1 external call and reserves 1 from the same budget. Its fallback `note` can also be `llm_fallback: bad_json / invalid / empty / timeout / http_<status>`.
+- Before a real `/api/read` call the Worker also reserves 3 calls against a global daily counter (Durable Object binding `BUDGET`). Over `LLM_MAX_CALLS_PER_DAY` (`llm.per_day`), with no binding, or on a counter error, it makes no call and returns a rule reading with a `note` (`llm_daily_cap` / `llm_no_budget` / `llm_budget_error`).
+- `llm.cache`: `kv` = a KV binding `READINGS` exists (shared across instances); `cache-api` = the Workers Cache API (only on a custom domain); `memory` = per-instance memory only (what `*.workers.dev` gets without KV).
+- `/api/*` is forwarded by the site Worker over the service binding `API` to the api Worker (`hackathon-api`, which has no `workers.dev` URL of its own). `/api/public/*` serves the static files in `apps/api/public/` and is not forwarded.
+- `/api/sumo` and `/api/sumo/*` are intercepted by the site before the `/api/*` rule and forwarded over the service binding `SUMO` to `hackathon-sumo` (no `workers.dev` URL of its own), which passed them to the container's `/sumo/v1/*`. The container ran a single instance and could restart; after a restart old run ids return 404, and the page falls back to the pre-computed results (decision D-0930-1700). The Worker and container were deleted after the event, while the site still declares the binding, so these paths now return 502 `sumo_down`.
 
-## WebSocket 消息（`/ws?room=<CODE>`）
+### SUMO results, format v2 (real network)
 
-| type | 方向 | 字段 |
-|---|---|---|
-| `join` | 客户端 → 服务端 | `token`, `nick` |
-| `act` | 客户端 → 服务端 | `kind`, `payload` |
-| `state` | 服务端 → 客户端 | `v`, `view`（按本人裁剪后的状态） |
-| `err` | 服务端 → 客户端 | `msg` |
+Produced by `apps/web/tools/sumo/build_real.py` (live runs) and committed under `apps/sumo/public/real/` (baked copy). Read by `sumo-client.js` and the web page's step 02, 03 and 04.
 
-## 共享状态形状
+- **`index.json`**: `version: 2, network: "real", engine` (e.g. `"Eclipse SUMO sumo 1.27.1"`), `generator_sha256` (SHA-256 of `build_real.py`; a web test fails if the script changes without a re-bake), `seed, hour, works { link, lanes_closed }, params, assumptions { en[], zh[] }, scenarios[{ id, label { en, zh }, diversion_share, manifest, metrics }], timing`. `params` records the run settings, including `p_original`, `p_ai`, `hour_window [8, 9]`, `warmup_s` (180), `sample_s` (2), `step_s` (0.5), `cycle_s` (90) and `engine_capacity_vph` (810).
+- **`<scenario>/manifest.json`**: `version, network, scenario, duration_s` (3600), `sample_s` (**2**: one frame every 2 simulated seconds), `clock0_s, agent_columns, agents[{ id, type, length_m, width_m }], signal_heads[{ id, tls, idx, lon_e6, lat_e6 }], chunks[{ file, start, end, frames, bytes, sha256 }], works, metrics, per_minute, engine, seed, diversion_share`. Each chunk holds 60 frames (120 s); the client checks each chunk's SHA-256 before using it (where the browser offers WebCrypto). The baseline scenario has a manifest but no frames.
+- **`<scenario>/frames-NNN.json`**: `{ frames: [{ t, a, tls, q }] }`. `a` holds one row per vehicle, `[i, lon×1e6, lat×1e6, angle, speed in cm/s]`, where `i` indexes `agents`, the position is the centre of the vehicle body and the angle is in degrees clockwise from north. `tls` maps each signal to its state string, and `q` is the works queue in metres.
 
-```json
-{
-  "v": 12,
-  "code": "ABCDE",
-  "phase": "lobby",
-  "members": [{ "id": "m1", "nick": "甲", "secret": "🔒只给本人" }],
-  "log": []
-}
-```
+The synthetic 2×2 format (v1, local metres) is described in [`apps/web/tools/sumo/README.md`](../../apps/web/tools/sumo/README.md).
 
-- `v` 单调递增，客户端用它判断广播新旧
-- 标 🔒 的字段必须按用户裁剪后再下发（`viewFor()`）
+## Error format
 
-## 错误格式
+`{ "ok": false, "error": "<machine-readable code>", "msg": "<human-readable message>" }`, with HTTP status codes following REST conventions. Clients branch on `error`, never on `msg`.
 
-`{ "ok": false, "error": "<机器可读短码>", "msg": "<给人看的中文>" }`，HTTP 状态码照 REST 常规。
+- In this repository most `msg` texts are English. Sign-text validation messages (`SignError` in `signs.js`, warnings from `check.js`) are Chinese on purpose: the Chinese UI shows them verbatim, and the English UI maps them by `error` code.
+- The deployed Workers predate the English translation, so live responses can still carry Chinese `msg` text (for example the `sumo_down` message).
 
-## Mock
+## Removed template sections
 
-`MOCK=1` 时：`/api/health` 的 `mock` 为 true；前端 `/api/*` 不通时在本地用 `logic.js` 的 `reduce()` 跑同一套逻辑。fixtures 放各模块 `fixtures/`。
+Earlier versions of this file still carried sections from the pre-event project template that were never implemented: a WebSocket endpoint (`/ws?room=<CODE>` with `join` / `act` / `state` / `err` messages), a shared room-state shape with per-user views (`viewFor()`), `POST /api/create` (room codes) and a "Mock" mode that ran `reduce()` from a `logic.js` file in the browser. None of these exist in the code, so they were removed in v3.15. They remain readable in the git history (`docs/contract.md` at tag `hackathon-final`). The `mock` flag in `/api/health` is unrelated: it is `true` unless the api Worker's `MOCK` variable is `"0"` (`llm.mode` says whether the LLM is actually used).
 
-## 变更流程
+## Changing an interface
 
-开 `contract:` PR → lead 批准 → 群里通知依赖方 → 依赖方各自适配。**字段路径以实测为准**，别照文档猜。
+Prefer backward-compatible changes: add fields, do not rename or remove them. A breaking change (rename, removal, new unit or value range) updates every caller in the same pull request, bumps the version at the top of this file and adds a row to the changelog below. During the event such pull requests were titled `contract:`, merged by the team lead, and announced to the modules that depend on them.
 
-## 变更记录（最新在上）
+## Changelog
 
-| 版本 | 时间 | 改了什么 | 谁 |
+Newest first. Decision ids (D-…) refer to [`docs/decisions.md`](../decisions.md).
+
+| Version | Date | Change | By |
 |---|---|---|---|
-| v3.13 | 2026-09-30 | T40（D-0930-2200）§HTTP API：`POST /api/sumo/v1/runs` 加 `network:'real'`（情景 baseline / original / ai，结果格式 v2，经纬度）和静态 `/sumo/public/real/…`；`sumo-client.js` 加真实路网方法（只加字段 / 方法） | lead |
-| v3.12 | 2026-09-30 | T37（D-0930-1700）§HTTP API 加 `/api/sumo/v1/*`（经 site → `hackathon-sumo` → 容器）和两处静态文件 `/sumo/public/baked/…`、`/sumo/public/js/sumo-client.js`（只加路径） | lead |
-| v3.11 | 2026-09-30 | §引擎原始结果 `raw.links` 加 `extra_min`（T28 #79，只加字段）；`delay_s` 的说明改成「比自由流多」（原来误写「比平时多」），并写明 `queue_m` 是绝对值 | lead |
-| v3.10 | 2026-09-29 | §evaluate 加 AI 调用日志（向后兼容，只加方法 / 可选参数）：`be.aiLog()` / `be.onAiLog(fn)` / `be.readingsOf(summary)` / `be.lastReadings()`，`connect({ onAiLog, aiLogMax })`；summary 字段不变 | lead |
-| v3.9 | 2026-09-29 | D-0929-2307（向后兼容，只加字段 / 取值）：`POST /api/explain` 接上大模型，`src` 多了 `llm / kv`，另加可选 `model` / `prompt_v`（`llm / kv` 时）和 `note`（兜底时）；`/api/health` 的 `llm` 加 `explain_v` | lead |
-| v3.8 | 2026-09-29 | T21（D-0929-2011 ②）§evaluate 加 `be.clash(a, b)` / `be.stagger(a, b)`：叠加冲突成本 D(A+B) − D(A) − D(B) 和一键错开，显示字段永远 ≥ 0、`flags.reliable`；只加方法 | lead |
-| v3.7 | 2026-09-29 | T22（D-0929-2011 ③）§施工方案 加「按库存出方案 `options[]`」：`be.options()` 出 `o1 / o2 / o3` 三套方案，每套带引擎结果、租金（`hire.assumed = true`）、库存检查（不超库存）；只加字段。依赖 v3.6（#57）的 `equipment[].item / qty` | lead |
-| v3.6 | 2026-09-29 | T24（D-0929-2011 ⑤，向后兼容，只加字段）：§施工方案加登记表字段（`title / kind / status / decision`，服务端 `id / seed / created / updated`，#53）和可选的 `equipment[].item / qty`（#55，引擎不看）；§HTTP API 加 `/api/worksites` 四个接口（#53）、`POST /api/explain`（#54），`/api/health` 加 `register`；`options[]` 等 T22 | lead |
-| v3.5 | 2026-09-29 | T19 大模型接口留好（向后兼容，只加字段）：`/api/health` 加 `llm`（含每日上限 `budget` / `per_day` / `per_min`，`cache` ∈ `kv / cache-api / memory`）；读数说明 `src` / `model` / `prompt_v`，加可选 `note`；site 服务绑定 `API` → `hackathon-api` | lead |
-| v3.4 | 2026-09-29 | §evaluate `summary.peds`（T17 复审）：`connect()` 不再等 walk / peds（`status().peds = loading`、`be.pedsReady()`、`pending`）；加 `dead_end`、`unmatched` / `unmatched_sides`、`note` / `note_zh`、`sensor.on_closed`；`crossings` 改按「过几条街」数；右侧人行道按并排长度选 | lead |
-| v3.3 | 2026-09-29 | §施工方案加可选的 `closes.footpath`（`left / right / both`）和方案校验（`bad_plan`）；§evaluate 加 `summary.peds`（封人行道的行人绕行，T17）、`status().peds`、`compare` 的 `delta.peds_extra_min`；`connect()` 另取 `walk.json` / `peds.json`，取不到不抛 | lead |
-| v3.2 | 2026-09-29 | §路网数据文件加 `transit.json`；§evaluate：接线层 `run()` 加 `summary.transit`（电车公交受影响的线路、乘客·分钟，T16），`compare()` 加 `delta.transit_pax_min`；只加字段 | lead |
-| v3.1 | 2026-09-29 | §路人读数：`kind` 加 `arrow`、`read_s` 上限 120、路名字符、`SignError` 和 `failed` / `missing`（T5 #29 对齐引擎）；HTTP API 加 `POST /api/read`；§evaluate：网页只接 `backend.js`（D-0929-1540） | lead |
-| v3 | 2026-09-29 | 加「施工方案」；「evaluate」定稿（createEngine / prepare / evaluate / conflict / advise 和结果字段，T9 骨架）；参数入口 `loadParams()` 读 T12 的 `params.json`，`calib.target` | lead |
-| v2 | 2026-09-29 | 加「路人读数」（api → engine，D-0929-1435）和「evaluate」草案（engine → web） | lead |
-| v1 | 2026-09-29 | 加「路网数据文件」一节（roads → engine、web）；HTTP / WS 节还是模板预置，T5 定了再改 | lead |
-| v0 | 2026-09-26 | 模板预置：health / create / ws 骨架 | lead |
+| v3.15 | 2026-10-11 | Post-event English edition, no interface change. Translated from Chinese; fixed the version header (it said v3.11); removed the unimplemented template sections (see above); corrected the real-network frame interval (`sample_s = 2`, not 1 s) and step 02's behaviour (live run first, baked replay as fallback); added rows for `buildings.json`, `equipment.json`, `vectormap.json` and the weather files, the SUMO format v2 summary, and the post-event status | @Zemmeng |
+| v3.14 | 2026-10-01 | D-1001-0045, HTTP API: options mode for `POST /api/sumo/v1/runs` (`options: [{ id, p }]`, `frames`, scenarios `opt-A…E`, `reused_from`, no baked fallback) and `runOptions()` in `sumo-client.js`. Additive only. Not logged at the time | @Zemmeng |
+| v3.13 | 2026-09-30 | D-0930-2200, HTTP API: `POST /api/sumo/v1/runs` accepts `network:'real'` (scenarios baseline / original / ai, results format v2 in lat/lon) and the static `/sumo/public/real/…`; real-network methods in `sumo-client.js`. Additive only | @Zemmeng |
+| v3.12 | 2026-09-30 | D-0930-1700, HTTP API: `/api/sumo/v1/*` (site → `hackathon-sumo` → container) and the static `/sumo/public/baked/…` and `/sumo/public/js/sumo-client.js`. Paths added only | @Zemmeng |
+| v3.11 | 2026-09-30 | Result `links[]` gains `extra_min` (additive). `delay_s` is now described as "above free flow" (it was wrongly described as "above normal"), and `queue_m` is documented as absolute | @Zemmeng |
+| v3.10 | 2026-09-29 | Engine API: AI call log (backward compatible; methods and optional arguments only): `be.aiLog()`, `be.onAiLog(fn)`, `be.readingsOf(summary)`, `be.lastReadings()`, `connect({ onAiLog, aiLogMax })`. Summary fields unchanged | @Zemmeng |
+| v3.9 | 2026-09-29 | D-0929-2307 (backward compatible): `POST /api/explain` uses the LLM, so `src` gains `llm / kv`, with optional `model` / `prompt_v` (for `llm / kv`) and `note` (on fallback); `/api/health` `llm` gains `explain_v` | @Zemmeng |
+| v3.8 | 2026-09-29 | D-0929-2011, engine API: `be.clash(a, b)` and `be.stagger(a, b)`: clash cost D(A+B) − D(A) − D(B) and one-click staggering, display fields never negative, `flags.reliable`. Methods only | @Zemmeng |
+| v3.7 | 2026-09-29 | D-0929-2011, worksite plan: equipment options `options[]`: `be.options()` returns plans `o1 / o2 / o3`, each with an engine result, hire cost (`hire.assumed = true`) and stock check (never above stock). Additive; builds on `equipment[].item / qty` from v3.6 | @Zemmeng |
+| v3.6 | 2026-09-29 | D-0929-2011 (backward compatible, additive): register fields on the worksite plan (`title / kind / status / decision`; server-set `id / seed / created / updated`) and optional `equipment[].item / qty` (ignored by the engine); HTTP API gains the four `/api/worksites` endpoints and `POST /api/explain`; `/api/health` gains `register` | @Zemmeng |
+| v3.5 | 2026-09-29 | LLM interface prepared (backward compatible, additive): `/api/health` gains `llm` (with the daily cap fields `budget` / `per_day` / `per_min` and `cache` ∈ `kv / cache-api / memory`); readings document `src` / `model` / `prompt_v` and gain an optional `note`; site service binding `API` → `hackathon-api` | @Zemmeng |
+| v3.4 | 2026-09-29 | Engine API `summary.peds` (after review): `connect()` no longer waits for walk / peds data (`status().peds = loading`, `be.pedsReady()`, `pending`); added `dead_end`, `unmatched` / `unmatched_sides`, `note` / `note_zh`, `sensor.on_closed`; `crossings` now counts streets crossed; right-hand footpaths chosen by parallel length | @Zemmeng |
+| v3.3 | 2026-09-29 | Worksite plan gains optional `closes.footpath` (`left / right / both`) and plan validation (`bad_plan`); engine API gains `summary.peds` (pedestrian detours around closed footpaths), `status().peds` and `delta.peds_extra_min` in `compare`; `connect()` also fetches `walk.json` / `peds.json` and does not throw if they fail | @Zemmeng |
+| v3.2 | 2026-09-29 | Road data files gain `transit.json`; engine API: `run()` gains `summary.transit` (affected tram and bus routes, rider-minutes) and `compare()` gains `delta.transit_pax_min`. Additive only | @Zemmeng |
+| v3.1 | 2026-09-29 | Sign reading: `kind` gains `arrow`, `read_s` capped at 120, road-name characters, `SignError` and `failed` / `missing` (aligning the api module with the engine); HTTP API gains `POST /api/read`; engine API: the page uses only `backend.js` (D-0929-1540) | @Zemmeng |
+| v3 | 2026-09-29 | Added the worksite plan; settled the engine API (`createEngine` / `prepare` / `evaluate` / `conflict` / `advise` and result fields); parameters via `loadParams()` from `params.json`, `calib.target` | @Zemmeng |
+| v2 | 2026-09-29 | Added sign reading (api → engine, D-0929-1435) and a draft engine API (engine → web) | @Zemmeng |
+| v1 | 2026-09-29 | Added the road data files section (roads → engine, web); the HTTP and WebSocket sections were still template placeholders | @Zemmeng |
+| v0 | 2026-09-26 | Template placeholders: health / create / WebSocket skeleton | @Zemmeng |
