@@ -1,9 +1,9 @@
-// AI 解读（T5 · 提案 #48 第 ⑥ 步）：读引擎给每套方案算出的数字，写优缺点、谁最吃亏、风险、倾向哪套和理由。浏览器和 Worker 共用
-// 原则（D-0929-1310「大模型出主意，引擎算数字」）：解读里的每个数字都得来自引擎给的数（allowedNumbers），编出来的、用文字写的数（hasWordNumber）整句丢掉；
-//   只说「倾向」，不替人拍板：选哪套由负责人决定（decide 那句固定写在响应里）
-// 规则版（src: "rule"，确定、不花钱）+ 大模型版（D-0929-2307，Worker 的 src/llm.js serverExplain()：src "llm" / 缓存 "kv"），
-//   同一个请求 / 响应格式；大模型回来的字、缓存里的解读一律先过 sanitizeExplain()，拿不到就规则版 + note
-// 🔒 label 不许有 < >（网页用 innerHTML 拼模板）；多余字段丢掉
+// Plan explanation: reads the numbers the engine computed for each plan and writes pros, cons, the hardest-hit group, risks, and which plan it leans towards and why. Shared by the browser and the Worker
+// Principle (D-0929-1310, "the LLM suggests, the engine computes"): every number in an explanation must come from the engine (allowedNumbers); any sentence with an invented number or a number in words (hasWordNumber) is dropped;
+//   it only gives a lean, never the decision: the person responsible chooses the plan (the fixed decide sentence is always in the response)
+// Rule-based version (src: "rule", deterministic, free) + LLM version (D-0929-2307, serverExplain() in the Worker's src/llm.js: src "llm" / cached "kv"),
+//   with the same request / response format; LLM text and cached explanations always go through sanitizeExplain() first, otherwise the rule-based version + note
+// 🔒 label must not contain < > (the web page builds templates with innerHTML); unknown fields are dropped
 
 export const EXPLAIN_LIMITS = { options: 5, label: 60, item: 200, items: 6, max: 1e8 };
 export const GROUPS = ["commuter", "local", "tourist", "delivery", "transit", "pedestrian"];
@@ -20,7 +20,7 @@ const bad = (code, msg) => new ExplainError(code, msg);
 const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const ID_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
-// 越小越好的指标：拿来比优缺点、加总。detour_share 不在里面（绕得多不一定是坏事），只进风险
+// Lower-is-better metrics used for pros, cons and totals. detour_share is not one (more detouring is not necessarily bad); it only feeds risks
 const METRICS = [
   { key: "delay_veh_min", name: { zh: "全网延误", en: "network delay" }, unit: { zh: "车·分钟", en: "vehicle-min" } },
   { key: "queue_m", name: { zh: "排队", en: "queue" }, unit: { zh: "米", en: "m" } },
@@ -39,32 +39,32 @@ const GROUP_NAME = {
 
 function num(x, where, max = EXPLAIN_LIMITS.max) {
   if (x === undefined || x === null) return null;
-  if (typeof x !== "number" || !Number.isFinite(x) || x < 0 || x > max) throw bad("bad_number", `${where} 要是 0–${max} 的数（没有就不写或写 null）`);
+  if (typeof x !== "number" || !Number.isFinite(x) || x < 0 || x > max) throw bad("bad_number", `${where} must be a number from 0 to ${max} (omit it or use null if unknown)`);
   return x;
 }
 
 function label(x, where) {
-  if (typeof x !== "string") throw bad("bad_label", `${where} 要是字符串`);
+  if (typeof x !== "string") throw bad("bad_label", `${where} must be a string`);
   const t = x.replace(/\s+/g, " ").trim();
-  if (!t || t.length > EXPLAIN_LIMITS.label) throw bad("bad_label", `${where} 要是 1–${EXPLAIN_LIMITS.label} 个字符`);
-  if (/[<>\u0000-\u001f\u007f]/.test(t)) throw bad("bad_text", `${where} 不能有 < > 或控制字符`);
+  if (!t || t.length > EXPLAIN_LIMITS.label) throw bad("bad_label", `${where} must be 1–${EXPLAIN_LIMITS.label} characters`);
+  if (/[<>\u0000-\u001f\u007f]/.test(t)) throw bad("bad_text", `${where} must not contain < > or control characters`);
   return t;
 }
 
-// 请求 → 规范化后的请求；不合规范抛 ExplainError；多余字段丢掉
+// Request → normalised request; throws ExplainError if invalid; unknown fields are dropped
 export function normalizeExplainRequest(req) {
-  if (!isObj(req)) throw bad("bad_request", "请求要是一个对象");
+  if (!isObj(req)) throw bad("bad_request", "the request must be an object");
   const lang = req.lang === undefined || req.lang === null ? "en" : req.lang;
-  if (!LANGS.includes(lang)) throw bad("bad_lang", `lang 只能是 ${LANGS.join(" / ")}`);
+  if (!LANGS.includes(lang)) throw bad("bad_lang", `lang must be one of ${LANGS.join(" / ")}`);
   if (!Array.isArray(req.options) || req.options.length < 1 || req.options.length > EXPLAIN_LIMITS.options) {
-    throw bad("bad_options", `options 要是 1–${EXPLAIN_LIMITS.options} 套方案`);
+    throw bad("bad_options", `options must hold 1–${EXPLAIN_LIMITS.options} plans`);
   }
   const ids = new Set();
   const options = req.options.map((o, i) => {
     const at = `options[${i}]`;
-    if (!isObj(o)) throw bad("bad_options", `${at} 要是对象`);
-    if (typeof o.id !== "string" || !ID_RE.test(o.id)) throw bad("bad_options", `${at}.id 要是 1–32 个字母、数字、_ -`);
-    if (ids.has(o.id)) throw bad("bad_options", `${at}.id「${o.id}」重复了`);
+    if (!isObj(o)) throw bad("bad_options", `${at} must be an object`);
+    if (typeof o.id !== "string" || !ID_RE.test(o.id)) throw bad("bad_options", `${at}.id must be 1–32 letters, digits, _ or -`);
+    if (ids.has(o.id)) throw bad("bad_options", `${at}.id "${o.id}" is a duplicate`);
     ids.add(o.id);
     const m = isObj(o.metrics) ? o.metrics : {};
     const metrics = {};
@@ -90,21 +90,21 @@ export function normalizeExplainRequest(req) {
   return { lang, options };
 }
 
-// ---- 数字：规则版只用请求里的数和各方案的合计；大模型回来的字也按这个查 ----
+// ---- Numbers: the rule-based version uses only request numbers and per-plan totals; LLM text is checked against the same set ----
 
 const commas = (s) => s.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 const fmtInt = (n) => commas(String(Math.round(n)));
 const fmt1 = (n) => String(Math.round(n * 10) / 10);
 const fmtMetric = (k, v) => (k === "detour_share" ? `${Math.round(v * 100)}%` : k === "mean_delay_s" || k === "queue_m" || v >= 100 ? fmtInt(v) : fmt1(v));
 
-// 合计 = 车·分钟 + 乘客·分钟 + 行人·分钟（直接相加，没按载客人数换算，why 里写明）；缺全网延误就不算
+// Total = vehicle-minutes + passenger-minutes + pedestrian-minutes (added as is, not weighted by occupancy, which why states); no total without network delay
 export function totalOf(o) {
   const m = o.metrics;
   if (m.delay_veh_min === undefined) return null;
   return m.delay_veh_min + (m.transit_pax_min || 0) + (m.peds_extra_min || 0);
 }
 
-// 解读里允许出现的数：请求里所有的数（含 label 里写的）和各方案合计，以及它们的取整、一位小数、百分数
+// Numbers allowed in an explanation: every number in the request (including in labels) and each plan's total, plus their whole-number, one-decimal and percentage forms
 export function allowedNumbers(req) {
   const out = new Set();
   const add = (v) => {
@@ -121,20 +121,20 @@ export function allowedNumbers(req) {
   return out;
 }
 
-// 一段字里出现的数（去掉千分位逗号）。先 NFKC：全角数字 ３００ 当 300 查；千分位只认「逗号 + 正好 3 位」，
-//   免得 NFKC 把中文的全角逗号变成 , 后把「10493，918」拼成一个数
+// Numbers in a text (thousands commas removed). NFKC first, so full-width digits ３００ are checked as 300; a thousands separator must be a comma + exactly 3 digits,
+//   so that after NFKC turns the full-width Chinese comma into "," the text "10493，918" is not read as one number
 const NUM_RE = /\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)|\d+(?:\.\d+)?/g;
 export const numbersIn = (text) => (String(text).normalize("NFKC").match(NUM_RE) || []).map((t) => t.replace(/,/g, ""));
 const traceable = (text, allowed) => numbersIn(text).every((n) => allowed.has(n) || allowed.has(String(Number(n))));
 
-// 用文字写的数（阿拉伯数字之外的）一律当追溯不到：两倍、一半、三成、三分之一、九十米、七百澳元、twice、half、ninety、seven hundred……
-// 保守的关键词规则：宁可错删（例「每一辆车」「double the queue」），不放过；方案名（label）里的字先挖掉再查。
-// 漏网：不带单位的单个汉字数（「缩短约九」）、差值刚好等于另一个允许的数（1200−600=600），这两种只靠提示词管（README 已知限制）
+// A number written in words (anything other than Arabic digits) always counts as untraceable: 两倍, 一半, 三成, 三分之一, 九十米, 七百澳元, twice, half, ninety, seven hundred...
+// Conservative keyword rules: better to drop a good sentence (e.g. 每一辆车, "double the queue") than let one through; plan labels are cut out before checking.
+// Gaps: a single Chinese numeral with no unit (缩短约九), and a difference that happens to equal another allowed number (1200−600=600); only the prompt covers these (README, known issues)
 const ZH_DIGIT = "零〇一二两三四五六七八九十";
 const WORD_NUM = [
-  new RegExp(`[${ZH_DIGIT}][十百千万亿]|十[一二三四五六七八九]`), // 九十、三百、一千、十万、十一（不含「千万」「万一」）
-  /[一二两三四五六七八九十几数半][倍成]|分之|一半|减半|翻倍|翻番/, // 倍数、成数、分数
-  new RegExp(`[${ZH_DIGIT}百千万]+(?:个百分点|米|秒|分钟|小时|澳元|元|辆|人|天|公里)`), // 三天、九十米、一辆
+  new RegExp(`[${ZH_DIGIT}][十百千万亿]|十[一二三四五六七八九]`), // 九十, 三百, 一千, 十万, 十一 (but not 千万 or 万一)
+  /[一二两三四五六七八九十几数半][倍成]|分之|一半|减半|翻倍|翻番/, // multiples, tenths, fractions
+  new RegExp(`[${ZH_DIGIT}百千万]+(?:个百分点|米|秒|分钟|小时|澳元|元|辆|人|天|公里)`), // 三天, 九十米, 一辆 (numeral + unit)
   /\b(?:twice|thrice|half|halves|halved|halving|halve|doubles?(?![-\s]check)|doubled|doubling|triples?|tripled|tripling|quadruple[sd]?|(?:two|three|four|five|six|seven|eight|nine|ten|many|several)-?fold|hundreds?|thousands?|millions?|dozens?)\b/i,
   /\b(?:eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i,
   /\b(?:one|two|three|four|five|six|seven|eight|nine|ten)[\s-]+(?:minutes?|mins?|seconds?|secs?|hours?|hrs?|days?|weeks?|metres?|meters?|kilometres?|kilometers?|km|m|dollars?|aud|vehicles?|cars?|people|persons?|passengers?|pedestrians?|trams?|buses|percent|per\s?cent|times)\b/i,
@@ -146,7 +146,7 @@ export function hasWordNumber(text, labels = []) {
   return WORD_NUM.some((re) => re.test(t));
 }
 
-// ---- 规则版解读：确定、可追溯；src: "rule" ----
+// ---- Rule-based explanation: deterministic and traceable; src: "rule" ----
 
 export function ruleExplain(input) {
   const req = normalizeExplainRequest(input);
@@ -213,12 +213,12 @@ export function ruleExplain(input) {
 }
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
-// ---- 外来的解读（大模型、缓存、接口响应）当不可信数据：字段不对整份作废（回 null，调用方用规则版）；数字追溯不到、或用文字写数的句子丢掉 ----
-// 另外只放行三个说明字段（短、只许字母数字和少数标点）：model、prompt_v（大模型版）、note（兜底原因短码，例 llm_fallback: timeout）
+// ---- External explanations (LLM, cache, API responses) are untrusted: a bad shape voids the whole thing (returns null, the caller uses the rule-based version); sentences with untraceable or word numbers are dropped ----
+// Only three metadata fields pass (short, letters, digits and a little punctuation only): model, prompt_v (LLM version), note (fallback reason code, e.g. llm_fallback: timeout)
 const META = ["model", "prompt_v", "note"];
 const META_RE = /^[A-Za-z0-9 ._:/,()-]{1,120}$/;
 
-// chk = { allowed: allowedNumbers(req), labels: 各方案名（NFKC，长的在前） }
+// chk = { allowed: allowedNumbers(req), labels: plan labels (NFKC, longest first) }
 const cleanItem = (x, chk) => {
   if (typeof x !== "string") return null;
   const t = x.replace(/\s+/g, " ").trim().slice(0, EXPLAIN_LIMITS.item);
@@ -241,7 +241,7 @@ export function sanitizeExplain(raw, input, src) {
       summary: cleanItem(r.summary, chk) || rule.options[i].summary,
       pros: cleanList(r.pros, chk),
       cons: cleanList(r.cons, chk),
-      hardest_hit: rule.options[i].hardest_hit, // 谁最吃亏按引擎的数算，不信外来的
+      hardest_hit: rule.options[i].hardest_hit, // the hardest-hit group comes from engine numbers, never from outside
       risks: [...new Set([...rule.options[i].risks, ...cleanList(r.risks, chk)])].slice(0, EXPLAIN_LIMITS.items),
     };
   });
@@ -255,9 +255,9 @@ export function sanitizeExplain(raw, input, src) {
   return out;
 }
 
-// ---- 浏览器端：引擎结果 → 一套方案；POST /api/explain，接口不通就在浏览器里跑规则版 ----
+// ---- Browser side: engine result → one plan; POST /api/explain, and run the rule-based version in the browser if the API is unreachable ----
 
-// be.run() 的结果（apps/engine/public/js/backend.js 的 summarize()）→ 请求里的一套方案。extra：{ hire_aud, days }
+// A be.run() result (summarize() in apps/engine/public/js/backend.js) → one plan in the request. extra: { hire_aud, days }
 export function optionFromRun(id, name, s, extra = {}) {
   const t = s?.transit?.src ? s.transit : null;
   const p = s?.peds?.src ? s.peds : null;
@@ -288,8 +288,8 @@ export function optionFromRun(id, name, s, extra = {}) {
   };
 }
 
-// → 解读；opts: { fetch, apiBase, timeoutMs }。请求不合规范直接抛 ExplainError（调用方的 bug），接口不通就本地规则版（src: "rule"）
-// src 照接口给的（llm / kv / rule），不认识的记 "api"；默认等 25 秒：Worker 那边问大模型最多等 20 秒（EXPLAIN_TIMEOUT_MS），等不到它会自己回规则版
+// → explanation; opts: { fetch, apiBase, timeoutMs }. An invalid request throws ExplainError (a caller bug); if the API is unreachable, the local rule-based version (src: "rule")
+// src as given by the API (llm / kv / rule), anything else becomes "api"; waits 25 s by default: the Worker waits at most 20 s for the LLM (EXPLAIN_TIMEOUT_MS) and then answers with the rule-based version itself
 const API_SRC = ["llm", "kv", "rule"];
 export async function explainOptions(input, opts = {}) {
   const req = normalizeExplainRequest(input);
@@ -303,7 +303,7 @@ export async function explainOptions(input, opts = {}) {
       const clean = r.ok && b?.ok ? sanitizeExplain(b.explain, req, API_SRC.includes(b.explain?.src) ? b.explain.src : "api") : null;
       if (clean) return clean;
     } catch {
-      // 断网、超时、site 没绑 api：下面用规则版
+      // offline, timed out, or the site has no api binding: use the rule-based version below
     } finally {
       if (timer) clearTimeout(timer);
     }

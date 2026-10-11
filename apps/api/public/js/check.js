@@ -1,16 +1,16 @@
-// 给 T2 文案输入框用：checkSigns(请求) 不抛错，回 { ok, error?, warnings[] }
-// error = 超了规范（/api/read 会回 400、readSigns() 会抛 SignError），warnings = 没超但不好读，只提醒
-// 软警告的出处：RPM Hire VMS 产品页（09-29 实查）—— 理想是 3 行、每行 8 个字符；每屏一般停 2 秒，4 行或闪烁 3 秒
-// 思路来自 #20 的 vms.js（lead 的骨架），这里多了「整行是路名不算太长」和「非标准缩写」两条
+// For the sign-text editor: checkSigns(request) never throws and returns { ok, error?, warnings[] }
+// error = over the spec (/api/read would answer 400, readSigns() would throw SignError); warnings = within the spec but hard to read, advisory only
+// Soft-warning source: RPM Hire VMS product page (checked 2026-09-29): ideally 3 lines of 8 characters; each frame usually shows for 2 s, 3 s for 4 lines or flashing
+// Based on the engine's vms.js, plus two extra rules: a line that is a whole road name is not too long, and non-standard abbreviations
 import { normalizeRequest, signMessage, countWords, SignError } from "./signs.js";
 import { roadAliases, oddAbbreviations } from "./rules.js";
 
 export const SOFT = {
-  lines: 3, // 每帧超过 3 行提醒
-  chars: 8, // 每行超过 8 个字符提醒（整行是候选路名的不算：路名没法缩）
-  frameS: 2, // 每帧至少停 2 秒
-  frameS4: 3, // 4 行的帧至少停 3 秒
-  secPerWord: 1, // 每个词约 1 秒（和 rules.js 的 notice 同一个假设）
+  lines: 3, // warn above 3 lines per frame
+  chars: 8, // warn above 8 characters per line (except a line that is a whole candidate road name: it cannot be shortened)
+  frameS: 2, // each frame needs at least 2 s
+  frameS4: 3, // a 4-line frame needs at least 3 s
+  secPerWord: 1, // about 1 s per word (the same assumption as notice in rules.js)
 };
 
 const frameTime = (lines) => (lines.length >= 4 ? SOFT.frameS4 : SOFT.frameS);
@@ -27,6 +27,7 @@ export function checkSigns(request) {
   const isRoad = (line) => roadLines.has(line.replace(/['.]/g, ""));
   const warnings = [];
   req.signs.forEach((s, i) => {
+    // msg is Chinese on purpose (shown verbatim in the zh UI); the English UI maps by code, like SignError in signs.js
     const warn = (code, msg) => warnings.push({ sign: i, code, msg });
     const words = countWords(signMessage(s));
     if (s.kind === "vms") {

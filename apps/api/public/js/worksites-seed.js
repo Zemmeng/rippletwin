@@ -1,7 +1,7 @@
-// 登记表里预置的演示施工（只读：PATCH 回 403 locked）。格式 = worksites.js 的「施工」对象
-// 前两条和引擎演示方案一样（apps/engine/public/js/backend.js 的 DEMOS.lonsdale / latrobe），只是 id 改成唯一的
-// 第三条封在 Lonsdale 演示的绕行路线上（Russell St → Little Bourke St），和第一条有 3 天重叠：演示「多处施工互相影响」
-// 09-29 本地用 main 上的引擎 conflict() 试过：10-07、10-08 早 8 点两个时刻，冲突成本约 1 万车·分钟（数以引擎现场算的为准）
+// Seed worksites in the register (read-only: PATCH answers 403 locked). Same shape as the worksite object in worksites.js
+// The first two match the engine demo plans (DEMOS.lonsdale / latrobe in apps/engine/public/js/backend.js), with unique ids
+// The third closes a road on the Lonsdale demo's detour (Russell St → Little Bourke St) and overlaps the first for 3 days, to demonstrate overlapping works
+// Tried locally on 2026-09-29 with the engine's conflict(): at 08:00 on 10-07 and 10-08 the clash cost was about 10,000 vehicle-minutes (the engine's live result is authoritative)
 const WEEK = { from: "2026-10-05", to: "2026-10-09", hours: [7, 19] };
 
 export const SEED_WORKSITES = [

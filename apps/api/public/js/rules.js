@@ -1,22 +1,22 @@
-// 关键词规则：大模型不通时的兜底，也是 MOCK=1 时的答案。浏览器和 Worker 共用同一份
-// 只读懂屏上的字，不算各条路的比例（D-0929-1435）；同样输入同样输出，src 固定是 "rule"
-// 规则表见 docs/arch/T5-PRD.md「关键词规则」；数值常量都在下面，改了要同步改 tests/rules.test.mjs
+// Keyword rules: the fallback when the LLM is unavailable, and the answer when MOCK=1. One copy shared by the browser and the Worker
+// Reads the sign text only and never computes route shares (D-0929-1435); same input, same output; src is always "rule"
+// Rule table: docs/hackathon/specs/T5-PRD.md (keyword rules); all numeric constants are below, so update tests/rules.test.mjs when changing them
 import { normalizeRequest, signMessage, countWords } from "./signs.js";
 
 export const RULE_V = "k1";
 
-// ---- 注意到（notice）：按读屏秒数和词数估，词越多、秒数越少，越低 ----
-const SEC_PER_WORD = 1; // 陌生信息每个词约 1 秒（VMS 设计常用的读屏时间下限）
-const FRAME_SWITCH_S = 1; // 两帧轮播要多等一次换帧
+// ---- notice: estimated from readable seconds and word count; more words or fewer seconds give a lower value ----
+const SEC_PER_WORD = 1; // about 1 s per word of unfamiliar text (the usual lower bound in VMS design)
+const FRAME_SWITCH_S = 1; // two alternating frames add one frame switch
 const NOTICE_MAX = 0.95;
 
-// ---- 看懂（understand）：规则只在「非标准缩写」这一处按人区分，其余人设差别交给引擎的参数 ----
+// ---- understand: the rules differ by persona only for non-standard abbreviations; other persona differences are engine parameters ----
 const UNDERSTAND_BASE = 0.9;
 const UNDERSTAND_MIN = 0.2;
-const ABBREV_PENALTY = { commuter: 0.05, local: 0.03, tourist: 0.15, delivery: 0.03 }; // 每个非标准缩写扣多少
-const ABBREV_MAX = 3; // 最多按 3 个算
+const ABBREV_PENALTY = { commuter: 0.05, local: 0.03, tourist: 0.15, delivery: 0.03 }; // penalty per non-standard abbreviation
+const ABBREV_MAX = 3; // count at most 3
 
-// ---- 信不信（trust）：规则不按人区分（「信不信屏」是引擎的人设参数），写了具体分钟数略高 ----
+// ---- trust: not persona-specific in the rules (trust in signs is an engine persona parameter); slightly higher when the sign gives minutes ----
 const TRUST_BASE = 0.7;
 const TRUST_NUMBER_BONUS = 0.1;
 
@@ -25,7 +25,7 @@ const AVOID_WORDS = new Set(["AVOID"]);
 const CLOSED_WORDS = new Set(["CLOSED", "BLOCKED"]);
 const JOIN_WORDS = new Set(["OR", "AND", "&", "/"]);
 
-// 路名后缀的两种写法（VMS 每行只有 10 个字符，常写成缩写，或干脆不写后缀：LA TROBE ST 就放不下）
+// Road-suffix spellings (a VMS line has only 10 characters, so suffixes are often abbreviated or dropped: LA TROBE ST does not fit)
 const SUFFIX = [
   ["ST", "STREET"], ["RD", "ROAD"], ["AVE", "AVENUE", "AV"], ["PDE", "PARADE"], ["HWY", "HIGHWAY"],
   ["FWY", "FREEWAY"], ["BLVD", "BOULEVARD"], ["DR", "DRIVE"], ["LN", "LANE"], ["PL", "PLACE"],
@@ -33,12 +33,12 @@ const SUFFIX = [
 ];
 const SUFFIX_OF = new Map(SUFFIX.flatMap((g) => g.map((s) => [s, g])));
 
-// 澳洲路牌上常见、一般人认得的缩写；不在这里又没有元音的词按「非标准缩写」算
+// Abbreviations common on Australian signs that most people recognise; a vowel-less word not listed here counts as non-standard
 const STANDARD = new Set([
   ...SUFFIX.flat(), "CBD", "KM", "KMH", "KPH", "MIN", "MINS", "HR", "HRS", "AM", "PM", "NB", "SB", "EB", "WB",
   "NTH", "STH", "MT", "TV", "VMS", "PTV",
 ]);
-// 有元音、但普通人（尤其游客）不一定认得的缩写
+// Abbreviations with vowels that ordinary drivers (especially visitors) may not recognise
 const NONSTANDARD = new Set([
   "WKS", "AHD", "DLY", "DLYS", "TFC", "TRFC", "CLSD", "ALT", "RTE", "DET", "DETR", "ACC", "INC", "LNS", "RHT", "LFT",
   "BTWN", "XING", "CONST", "CONSTR", "EXP", "EXPT", "MAINT", "EVT", "EVNT", "PKG", "PED", "PEDS", "CYC", "DIV", "DIVN",
@@ -48,15 +48,15 @@ const NONSTANDARD = new Set([
 const r2 = (x) => Math.round(x * 100) / 100;
 const clamp = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
 
-// ---------------------------------------------------------------- 路名匹配
+// ---------------------------------------------------------------- road-name matching
 
-// 每条路 → 屏上可能出现的写法（按词切好）。同一个不带后缀的写法对应两条路（Flinders St / Flinders Ln）时，这个写法作废
+// Each road → the spellings that may appear on a sign (split into words). If one suffix-less spelling matches two roads (Flinders St / Flinders Ln), it is discarded
 export function roadAliases(roads) {
   const byAlias = new Map();
   const add = (alias, road) => {
     const k = alias.join(" ");
     if (!byAlias.has(k)) byAlias.set(k, road);
-    else if (byAlias.get(k) !== road) byAlias.set(k, null); // 有歧义：不认
+    else if (byAlias.get(k) !== road) byAlias.set(k, null); // ambiguous: ignore
   };
   for (const road of roads) {
     const toks = road.toUpperCase().replace(/[.']/g, "").split(" ").filter(Boolean);
@@ -75,10 +75,10 @@ export function roadAliases(roads) {
     }
   }
   const list = [...byAlias].filter(([, r]) => r).map(([k, road]) => ({ toks: k.split(" "), road }));
-  return list.sort((a, b) => b.toks.length - a.toks.length); // 长的先配
+  return list.sort((a, b) => b.toks.length - a.toks.length); // longest match first
 }
 
-// 一句话切成词和路名：[{ w: "USE" }, { road: "Russell St" }, ...]
+// Split a message into words and roads: [{ w: "USE" }, { road: "Russell St" }, ...]
 function tokenize(message, aliases) {
   const toks = message.split(" ").map((t) => t.replace(/[.,:!?]+$/, "").replace(/['.]/g, "")).filter(Boolean); // A'BECKETT → ABECKETT
   const items = [];
@@ -95,7 +95,7 @@ function tokenize(message, aliases) {
   return items;
 }
 
-// 从 items[i] 开始收路名：X、X OR Y、X / Y
+// Collect roads starting at items[i]: X, X OR Y, X / Y
 function roadsFrom(items, i) {
   const out = [];
   while (items[i]?.road) {
@@ -106,7 +106,7 @@ function roadsFrom(items, i) {
   return out;
 }
 
-// ---------------------------------------------------------------- 各项读数
+// ---------------------------------------------------------------- reading fields
 
 function adviceOf(messages, aliases) {
   const use = new Set();
@@ -121,11 +121,11 @@ function adviceOf(messages, aliases) {
   }
   const advice = {};
   for (const r of use) advice[r] = "use";
-  for (const r of avoid) advice[r] = "avoid"; // 同一条路既叫走又叫别走：按别走算（保守）
+  for (const r of avoid) advice[r] = "avoid"; // told both to use and to avoid the same road: avoid wins (conservative)
   return advice;
 }
 
-// N MIN、N-M MIN（取上限）；多块标志都写了取最大
+// N MIN, N-M MIN (take the upper bound); with several signs, take the largest
 const NUM = String.raw`(\d{1,3})(?:\s*-\s*(\d{1,3}))?\s*(?:MIN|MINS|MINUTES)\b`;
 const SAVING_RE = [new RegExp(String.raw`\bSAVES?\s+(?:UP\s+TO\s+)?` + NUM, "g")];
 const DELAY_RE = [
@@ -156,7 +156,7 @@ function noticeOf(signs) {
     const ratio = s.read_s / need;
     miss *= 1 - (NOTICE_MAX * ratio) / (ratio + 0.5);
   }
-  return Math.min(NOTICE_MAX, 1 - miss); // 至少注意到其中一块
+  return Math.min(NOTICE_MAX, 1 - miss); // notices at least one of the signs
 }
 
 export function oddAbbreviations(messages, roads) {
@@ -186,9 +186,9 @@ function whyOf({ advice, saving, delay, odd, empty }) {
   return why.slice(0, 160);
 }
 
-// ---------------------------------------------------------------- 入口
+// ---------------------------------------------------------------- entry point
 
-// 请求（原样或已规范化都行）→ 读数。不合规范抛 SignError
+// Request (raw or already normalised) → reading. Throws SignError if invalid
 export function ruleReading(request) {
   const req = normalizeRequest(request);
   const messages = req.signs.map(signMessage);

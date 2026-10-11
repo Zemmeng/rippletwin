@@ -1,10 +1,10 @@
-// 大模型每日调用上限（T19 修）：全局一个 Durable Object 计数，跨所有 Worker 实例、所有入口网址都算一本账
-// 为什么：/api/read 是公开的，MOCK=0 以后谁都能 POST；每实例每分钟的限流挡不住多实例 / 换着花样绕缓存，这里是真正的封顶
-// 🔒 拿不到额度（没绑 BUDGET、DO 出错、超了）一律不调用，回规则 —— 宁可少用大模型，不能多花钱
-// 免费版只能用 SQLite 后端的 DO（wrangler.jsonc 的 migrations 用 new_sqlite_classes）；每天 UTC 0 点清零（墨尔本上午 10 / 11 点）
-// ⚠️ 不 import "cloudflare:workers"：worker.js 要在 node 里直接跑测试，老式「有 fetch() 的类」在 workerd 里同样能当 DO
+// Global daily cap on LLM calls: one Durable Object counter, shared by every Worker instance and every entry URL
+// Why: /api/read is public, so with MOCK=0 anyone can POST; a per-instance per-minute limit cannot stop many instances or cache-busting variations. This is the real cap
+// 🔒 No budget (BUDGET unbound, DO error, over the cap) means no call and a rule reading: better to use the LLM less than to overspend
+// The free plan only allows SQLite-backed DOs (wrangler.jsonc migrations use new_sqlite_classes); resets daily at 00:00 UTC (10:00 or 11:00 in Melbourne)
+// ⚠️ No import of "cloudflare:workers": worker.js must run directly in Node for tests, and a plain class with fetch() works as a DO in workerd too
 
-const DAY_KEY = "calls"; // 只存一条 { day, n }，不会越存越多
+const DAY_KEY = "calls"; // stores a single { day, n } record, so it never grows
 
 const int = (x) => {
   const n = Number(x);
@@ -12,13 +12,13 @@ const int = (x) => {
 };
 
 export class LlmBudget {
-  // clock 只给测试注入；workerd 只传 (ctx, env)
+  // clock is injected only by tests; workerd passes just (ctx, env)
   constructor(ctx, env, clock = Date.now) {
     this.ctx = ctx;
     this.clock = clock;
   }
 
-  // POST /take?n=3&max=600 → { ok, used, max, day }。get → put 之间没有别的 I/O，DO 的 input gate 保证不会被别的请求插进来
+  // POST /take?n=3&max=600 → { ok, used, max, day }. There is no other I/O between get and put, so the DO input gate guarantees no other request interleaves
   async fetch(request) {
     const u = new URL(request.url);
     const n = int(u.searchParams.get("n"));
@@ -33,7 +33,7 @@ export class LlmBudget {
   }
 }
 
-// Worker 这边：预留 n 次调用。返回 "ok" | "over" | "no_budget" | "error"（不抛）
+// Worker side: reserve n calls. Returns "ok" | "over" | "no_budget" | "error" (never throws)
 export async function takeBudget(env, n, max) {
   const ns = env?.BUDGET;
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") return "no_budget";

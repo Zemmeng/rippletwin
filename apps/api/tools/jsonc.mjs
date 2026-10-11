@@ -1,4 +1,4 @@
-// 读 wrangler.jsonc：去掉 // 和 /* */ 注释、尾逗号（跳过字符串里的内容）再 JSON.parse。tests/config.test.mjs 和 tools/precompute.mjs 共用
+// Reads wrangler.jsonc: strips // and /* */ comments and trailing commas (leaving string contents alone), then JSON.parse. Shared by tests/config.test.mjs and tools/precompute.mjs
 export function parseJsonc(text) {
   let out = "";
   let i = 0;

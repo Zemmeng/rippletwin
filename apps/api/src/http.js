@@ -1,6 +1,6 @@
-// worker.js 和 register.js 共用的小工具：按字节限长读请求体、JSON 响应、§错误格式
+// Small helpers shared by worker.js and register.js: byte-limited body reader, JSON responses, the error envelope
 
-// 最多读 max 字节：Content-Length 超了直接拒；否则边读边数，超了就取消流，不把整个请求体攒进内存。超限回 null
+// Reads at most max bytes: rejects outright on an oversized Content-Length; otherwise counts while streaming and cancels the stream past the limit, so the whole body is never buffered. Returns null when over the limit
 export async function readLimited(request, max) {
   const len = Number(request.headers?.get?.("content-length"));
   if (Number.isFinite(len) && len > max) return null;
@@ -30,10 +30,10 @@ export async function readLimited(request, max) {
 export function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    // 读数只取决于请求体，但 POST 本来就不缓存；health 要看到当前版本；登记表随时会变
+    // Readings depend only on the body, but POST is never cached anyway; health must show the current version; the register can change at any time
     headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
   });
 }
 
-// docs/contract.md §错误格式
+// Error envelope: docs/reference/interfaces.md
 export const fail = (status, error, msg) => json({ ok: false, error, msg }, status);
