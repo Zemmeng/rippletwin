@@ -1,6 +1,6 @@
 // Grid micro-sim (src/js/4b-grid.js) on the real network: 4×4 computed, the 2×2 at the works shown. Gridlock, works queue,
 // red lights, overlaps, determinism, flows entering the 2×2, and that `agents` (the stats) stay inside the 2×2 while the
-// page draws `all` and the signal heads of all 16 junctions (T38).
+// page draws `all` and the signal heads of all 16 junctions.
 // Called by tests/test_grid.py; one ✅ / ❌ line per assertion, no network access.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -108,7 +108,7 @@ ok(A.inPoly + Bw.inPoly === 0, `reverse: no car centre ever inside a closed-lane
 ok(A.red + Bw.red === 0 && A.sim.redRun + Bw.sim.redRun === 0, `reverse: no car crosses a stop line on red (${A.red + Bw.red} independent, ${A.sim.redRun + Bw.sim.redRun} self-reported)`);
 ok(A.overlap + Bw.overlap === 0, `reverse: no overlaps on any lane (gap ≥ 0) — ${A.overlap + Bw.overlap} violations`);
 ok(A.outBox + Bw.outBox === 0, `reverse: the page is never handed a car outside the 2×2 view (${A.outBox + Bw.outBox} outside GRID_VIEW)`);
-ok(A.heads.size === 16 && Bw.heads.size === 16, `signal heads at all 16 junctions — the page draws the whole 4×4 (T38; ${[...A.heads].join(' ')})`);
+ok(A.heads.size === 16 && Bw.heads.size === 16, `signal heads at all 16 junctions — the page draws the whole 4×4 (${[...A.heads].join(' ')})`);
 { const hs = A.sim.signalHeads(), sh = new Set(hs.filter(h => h.shown).map(h => h.id));
   ok(sh.size === 4 && SHOWN.every(id => sh.has(id)) && hs.every(h => h.shown === SHOWN.includes(h.id)), `signalHeads() flags exactly the 2×2 at the works as shown: ${[...sh].join(' ')}`); }
 
@@ -147,35 +147,35 @@ ok(h.length >= 8 && h.every(x => (x.axis === 'EW' || x.axis === 'NS') && 'GAR'.i
 ok(s.all.some(a => a.type === 'tram'), 'trams run on Swanston St');
 s.setWeather('storm', null); s.step(5); ok(s.wxk === 'storm', 'setWeather switches the weather multipliers');
 
-// T44 safety events with a place on the map (sim.events): harsh braking and TTC conflicts, 2×2 only, old ones forgotten
+// Safety events with a place on the map (sim.events): harsh braking and TTC conflicts, 2×2 only, old ones forgotten
 {
   const sim = new G.GridSim(G.gridSpec(net.links, flows, 8, WORKS), { seed: 4218 });
   while (sim.t < 180) sim.step(0.25); sim.resetStats();
   while (sim.t < 280) sim.step(0.25); // 100 s < evKeep: every event is still kept
   const ev = sim.events, hb = ev.filter(e => e.kind === 'harsh'), cf = ev.filter(e => e.kind === 'conflict');
   ok(hb.length > 0 && hb.length === sim.stats.harsh && cf.length === sim.stats.conflicts && cf.filter(e => e.sev === 2).length === sim.stats.critical,
-    `T44: every harsh braking / conflict / critical counted has a mark on the map (${hb.length} / ${cf.length} / ${sim.stats.critical} in 100 s)`);
-  ok(ev.every(e => Number.isFinite(e.x) && Number.isFinite(e.y) && e.x >= VW.x0 && e.x <= VW.x1 && e.y >= VW.y0 && e.y <= VW.y1), 'T44: the marks sit inside the 2×2 (GRID_VIEW), where the counts are taken');
+    `every harsh braking / conflict / critical counted has a mark on the map (${hb.length} / ${cf.length} / ${sim.stats.critical} in 100 s)`);
+  ok(ev.every(e => Number.isFinite(e.x) && Number.isFinite(e.y) && e.x >= VW.x0 && e.x <= VW.x1 && e.y >= VW.y0 && e.y <= VW.y1), 'the marks sit inside the 2×2 (GRID_VIEW), where the counts are taken');
   // a follower forced onto a stopped leader in the same lane → one critical conflict (TTC < 1 s), marked between the two
   const inV = c => c.x >= VW.x0 + 20 && c.x <= VW.x1 - 20 && c.y >= VW.y0 + 20 && c.y <= VW.y1 - 20 && !c.arc && c.turn === null;
   let pair = null;
   for (const l of sim.lanes) { for (let i = 1; i < l.cars.length && !pair; i++) if (l.cars[i - 1].type === 'car' && inV(l.cars[i - 1]) && inV(l.cars[i])) pair = [l.cars[i - 1], l.cars[i]]; if (pair) break; }
-  if (!pair) ok(false, 'T44: found two cars one behind the other inside the 2×2');
+  if (!pair) ok(false, 'found two cars one behind the other inside the 2×2');
   else {
     const [ld, c] = pair, n0 = sim.stats.conflicts, k0 = sim.stats.critical;
     ld.v = 0; ld.acc = 0; c.s = ld.s - ld.len - 5 * G.GRID_K; c.v = 10 * G.GRID_K;
     sim.step(0.25);
     const e = sim.events.filter(x => x.kind === 'conflict').pop();
-    ok(sim.stats.conflicts === n0 + 1 && sim.stats.critical === k0 + 1 && e && e.sev === 2 && e.ttc < 1, `T44: closing at 10 m/s on a stopped car 5 m ahead → 1 critical conflict (TTC ${e ? e.ttc.toFixed(2) : '?'} s)`);
+    ok(sim.stats.conflicts === n0 + 1 && sim.stats.critical === k0 + 1 && e && e.sev === 2 && e.ttc < 1, `closing at 10 m/s on a stopped car 5 m ahead → 1 critical conflict (TTC ${e ? e.ttc.toFixed(2) : '?'} s)`);
     sim.step(0.25);
-    ok(sim.stats.conflicts === n0 + 1, 'T44: the same pair is counted once (within 6 s)');
+    ok(sim.stats.conflicts === n0 + 1, 'the same pair is counted once (within 6 s)');
   }
-  ok(cf.every(e => e.ttc < 1.5 && (e.sev === 2) === (e.ttc < 1)), 'T44: conflict = TTC < 1.5 s, critical = TTC < 1.0 s');
+  ok(cf.every(e => e.ttc < 1.5 && (e.sev === 2) === (e.ttc < 1)), 'conflict = TTC < 1.5 s, critical = TTC < 1.0 s');
   { const sum = a => a.reduce((x, y) => x + y, 0), seen = sum(sim.mSeen), hit = sum(sim.mHit);
     ok(seen > 0 && hit > 0 && hit <= seen && hit <= sim.stats.harsh + sim.stats.conflicts,
-      `T44: timeline shares — ${hit} of ${seen} vehicles into the 2×2 braked harshly or were in a conflict (${(hit / seen * 100).toFixed(1)} %); a vehicle counts once`); }
+      `timeline shares — ${hit} of ${seen} vehicles into the 2×2 braked harshly or were in a conflict (${(hit / seen * 100).toFixed(1)} %); a vehicle counts once`); }
   while (sim.t < 600) sim.step(0.25);
-  ok(sim.events.every(e => sim.t - e.t <= 120) && sim.stats.harsh > sim.events.filter(e => e.kind === 'harsh').length, 'T44: marks older than 2 minutes are dropped; the counts keep them');
+  ok(sim.events.every(e => sim.t - e.t <= 120) && sim.stats.harsh > sim.events.filter(e => e.kind === 'harsh').length, 'marks older than 2 minutes are dropped; the counts keep them');
 }
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

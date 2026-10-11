@@ -1,8 +1,8 @@
-"""AI 面板（src/js/9-ai.js）：第 3 步「AI 路人 · 各自读到了什么」+「AI 调用日志」，第 4 步方案卡片上的 AI 解读。
+"""AI panel (src/js/9-ai.js): step 3 "AI road users · what each one read" and "AI call log", plus the AI explanation on the step 4 plan cards.
 
-用法：python3 apps/web/tests/test_ai.py（要 node ≥ 18，不联网、不调大模型）
-纯函数和接真 backend.js 的断言在 tests/ai_glue.mjs；这里先做源码上的静态断言，再调 node 转发它的 ✅ / ❌ 行。
-最后一行「N passed, M failed」。
+Usage: python3 apps/web/tests/test_ai.py (needs node ≥ 18; no network, no LLM calls)
+Pure-function and real-backend.js assertions live in tests/ai_glue.mjs; this file first runs static source assertions, then runs node and forwards its ✅ / ❌ lines.
+The last line is "N passed, M failed".
 """
 import pathlib
 import re
@@ -25,11 +25,11 @@ def check(name, ok, detail=""):
         print(f"✅ {name}")
     else:
         failed += 1
-        print(f"❌ {name}{('：' + detail) if detail else ''}")
+        print(f"❌ {name}{(': ' + detail) if detail else ''}")
 
 
 def body(name, text):
-    """function name(){…} 的函数体（按花括号配对）"""
+    """Body of function name(){…} (matched by brace pairing)"""
     i = text.find(f"function {name}(")
     if i < 0:
         return ""
@@ -43,51 +43,51 @@ def body(name, text):
 
 
 code = re.sub(r"/\*.*?\*/", "", AI, flags=re.S)
-# 1 挂载点：只在别人的文件里加一行钩子
-check("5-app.js 第 3 步路网面板挂上 aiMount()", "clashMount();aiMount();" in APP)
-# 2 隐私 / 网络：不发任何请求；下载在浏览器里拼文件
-check("反向：9-ai.js 没有 import() / fetch() / XMLHttpRequest / sendBeacon / WebSocket",
+# 1 Mount point: only a one-line hook is added to another module's file
+check("5-app.js mounts aiMount() on the step 3 network panel", "clashMount();aiMount();" in APP)
+# 2 Privacy / network: no requests at all; downloads are assembled in the browser
+check("negative: 9-ai.js has no import() / fetch() / XMLHttpRequest / sendBeacon / WebSocket",
       not re.search(r"\bimport\s*\(|\bfetch\s*\(|XMLHttpRequest|sendBeacon|WebSocket", code))
 dl = body("aiDownload", AI)
-check("下载 JSON：Blob + createObjectURL（本地文件，不上传），内容只经 aiLogJSON() 白名单",
+check("JSON download: Blob + createObjectURL (local file, nothing uploaded); content only passes through the aiLogJSON() allow-list",
       "new Blob([txt]" in dl and "URL.createObjectURL" in dl and "aiLogJSON(AI.log" in dl and "revokeObjectURL" in dl)
-check("日志只从 backend.js 来：aiLog() 快照 + onAiLog() 订阅，同一个 tick", re.search(r"AI\.log=api\.aiLog\(\);\s*api\.onAiLog\(", AI) is not None)
-# 3 注入：模型写的字只走 textContent
-check("why 用 textContent 写（data-aiwhy）", "q.textContent=p&&p.reading&&p.reading.why||''" in AI)
-check("反向：整个 9-ai.js 只有一处 innerHTML（aiRender 写 aiHTML() 的结果，里面每个字符串过 esc()）",
+check("the log comes only from backend.js: aiLog() snapshot + onAiLog() subscription, in the same tick", re.search(r"AI\.log=api\.aiLog\(\);\s*api\.onAiLog\(", AI) is not None)
+# 3 Injection: text written by the model only goes through textContent
+check("why is written with textContent (data-aiwhy)", "q.textContent=p&&p.reading&&p.reading.why||''" in AI)
+check("negative: the whole of 9-ai.js has a single innerHTML (aiRender writes the result of aiHTML(), where every string goes through esc())",
       code.count("innerHTML") == 1 and "el.innerHTML=h;" in body("aiRender", AI))
 interp = re.findall(r"\$\{((?:[^{}]|\{[^{}]*\})*)\}", body("aiPersonaHTML", AI) + body("aiLogRowHTML", AI) + body("aiTileHTML", AI))
 raw = [x for x in interp if re.search(r"\.(text|why|src|error|persona)\b|\b(txt|adv|who)\b|aiAdvice\(|aiSrcLabel\(|aiKind\(|aiTime\(", x) and "esc(" not in x and not x.startswith("aiSrcTone(")]
-check("读数卡片 / 小方块 / 日志行里的字都过 esc()", not raw, str(raw[:3]))
-# 4 签名守卫（CLAUDE.md §9）：同样的状态不重建 DOM
-check("aiRender 有签名守卫（HTML + why 一起算签名）", "if(el.dataset.sig===sig)return;" in AI and "const sig=h+'\\u0000'+whys;" in AI)
-check("一次 run 问 ~20 条读数只重画一次（aiRenderSoon 防抖）", "setTimeout(aiRender,120)" in AI)
-# 6 审查修复：出错 / 不合规 / 还没算完时不画上一份方案的读数；徽章按这份方案的读数算来源
-check("反向：aiReadings 和 engPanel3 同一个判断（run() 出错留着的旧 EP.sum 不拿来画卡片）",
+check("all text in reading cards / tiles / log rows goes through esc()", not raw, str(raw[:3]))
+# 4 Signature guard: the same state does not rebuild the DOM
+check("aiRender has a signature guard (signature covers the HTML and the why text)", "if(el.dataset.sig===sig)return;" in AI and "const sig=h+'\\u0000'+whys;" in AI)
+check("one run asks for ~20 readings but redraws once (aiRenderSoon debounce)", "setTimeout(aiRender,120)" in AI)
+# 6 Review fixes: no readings from the previous plan on error / invalid text / unfinished run; the badge's source comes from this plan's readings
+check("negative: aiReadings uses the same test as engPanel3 (a stale EP.sum kept after a run() error is not used for the cards)",
       "if(aiState(EP)!=='ok'" in body("aiReadings", AI) and "ep.runErr&&!ep.busy?'err'" in AI)
-check("aiRender 按状态画：不是 ok 就只写一行和面板一致的说明 + 调用日志",
+check("aiRender draws by state: if not ok, only a one-line note matching the panel + the call log",
       "aiHTML(rd,st)" in body("aiRender", AI) and "if(st&&st!=='ok')" in body("aiHTML", AI))
-check("中英：面板标题和日志标题两边都有", "L('AI road users · what each one read','AI 路人 · 各自读到了什么')" in AI and "L(`AI call log (${n})`,`AI 调用日志（${n}）`)" in AI)
+check("EN/ZH: panel title and log title both present", "L('AI road users · what each one read','AI 路人 · 各自读到了什么')" in AI and "L(`AI call log (${n})`,`AI 调用日志（${n}）`)" in AI)
 
-# 7 四个小方块（09-30 @unicornnnnnny：面板在右侧不显眼 → 2 × 2 方块，点一个展开它的详细卡片）
+# 7 Four tiles (30 Sep, @unicornnnnnny: the panel on the right was easy to miss → 2 × 2 tiles; clicking one expands its detail card)
 ah = body("aiHTML", AI)
-check("四类路人画成 2 × 2 小方块（aiTileHTML），点开的那一个在方块下面画完整卡片（aiPersonaHTML）",
+check("the four road-user types are drawn as 2 × 2 tiles (aiTileHTML); the opened one gets its full card below the tiles (aiPersonaHTML)",
       "TYPES4.map(t=>aiTileHTML(t,ps[t],t===sel,!noAdv))" in ah and "aiPersonaHTML(sel,ps[sel])" in ah and ".ai-tiles{display:grid;grid-template-columns:1fr 1fr" in (HERE.parent / "src" / "styles.css").read_text(encoding="utf-8"))
 rr = body("aiRender", AI)
-check("点方块切换 AI.sel（再点一次收起），重画后把卡片滚进视野；签名里带着选中状态（HTML 里有 .on）",
+check("clicking a tile toggles AI.sel (click again to close) and scrolls the card into view after redraw; the signature includes the selection (.on in the HTML)",
       "AI.sel=AI.sel===x.dataset.aip?'':x.dataset.aip;aiRender();" in rr and "scrollIntoView" in rr and "class=\"metric ai-tile${sel?' on':''}\"" in AI)
 GLASS = (HERE.parent / "src" / "js" / "7-glass.js").read_text(encoding="utf-8")
-check("简洁模式下 AI 路人面板默认展开（SEC_KEEP 含 #aiBox）", "#aiBox" in re.search(r"const SEC_KEEP='([^']*)'", GLASS).group(1))
+check("the AI road-users panel is expanded by default in compact mode (SEC_KEEP includes #aiBox)", "#aiBox" in re.search(r"const SEC_KEEP='([^']*)'", GLASS).group(1))
 
 node = shutil.which("node")
 if not node:
-    check("找到 node（纯函数断言要用 node 跑）", False)
+    check("node found (the pure-function assertions run under node)", False)
 else:
     try:
         r = subprocess.run([node, str(HERE / "ai_glue.mjs")], capture_output=True, text=True, encoding="utf-8", timeout=120)
         out, rc = r.stdout + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
-        out, rc = "❌ ai_glue.mjs 超过 120 秒没跑完\n", 1
+        out, rc = "❌ ai_glue.mjs did not finish within 120 s\n", 1
     f0 = failed
     for line in out.splitlines():
         if line.startswith("✅"):
@@ -98,7 +98,7 @@ else:
             print(line)
     if rc != 0 and failed == f0:
         failed += 1
-        print(f"❌ ai_glue.mjs 退出码 {rc}")
+        print(f"❌ ai_glue.mjs exit code {rc}")
         print("\n".join(out.splitlines()[-15:]))
 print(f"{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

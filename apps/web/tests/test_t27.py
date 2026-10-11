@@ -1,7 +1,7 @@
-"""T27：地图放下整个 CBD（docs/arch/T26-T27-web-PRD.md 第 3 节）。静态断言 + tests/t27_glue.mjs（真路网、真引擎，node 跑）。
+"""T27: the map holds the whole CBD (docs/hackathon/specs/T26-T27-web-PRD.md section 3). Static assertions + tests/t27_glue.mjs (real network, real engine, run in node).
 
-用法：python3 apps/web/tests/test_t27.py（要 node ≥ 18，不联网）
-最后一行固定输出「N passed, M failed」，有失败退出码 1。
+Usage: python3 apps/web/tests/test_t27.py (needs node ≥ 18, no network)
+The last line is always "N passed, M failed"; any failure exits with code 1.
 """
 import pathlib
 import re
@@ -29,7 +29,7 @@ def check(name, ok, detail=""):
         print(f"✅ {name}")
     else:
         failed += 1
-        print(f"❌ {name}{('：' + detail) if detail else ''}")
+        print(f"❌ {name}{(': ' + detail) if detail else ''}")
 
 
 def fn(src, name):
@@ -42,82 +42,82 @@ def fn(src, name):
     return src[j:k - 1]
 
 
-# 0 全局名不能重名（6c-city.js 一度和 8-clash.js 都声明了 CL，整页脚本直接报错不跑）
+# 0 Global names must be unique (6c-city.js and 8-clash.js once both declared CL, and the whole page script failed to run)
 names = re.findall(r"^(?:const|let|class|function) ([A-Za-z_$][\w$]*)", "\n".join(JS.values()), re.M)
 dups = sorted({n for n in names if names.count(n) > 1})
-check("所有 js 文件的顶层 const / let / function 不重名", not dups, str(dups))
+check("no duplicate top-level const / let / function names across the js files", not dups, str(dups))
 
-# 1 范围：CITY 只管拖到哪、缩到多小、引擎线画到哪
-check("1-world.js 有 CITY = Hoddle Grid + 约 150 m，北边到 Franklin St（x −1150..750、y −950..450）；WORLD（精细窗口）T50 起往东、往南扩到盖住第 2 步 4×4",
+# 1 Extent: CITY only governs how far you can pan, how far you can zoom out, and how far engine lines are drawn
+check("1-world.js has CITY = Hoddle Grid + about 150 m, north to Franklin St (x −1150..750, y −950..450); WORLD (the fine window) extended east and south to cover the step 2 4×4",
       "const CITY={x0:-1150,x1:750,y0:-950,y1:450};" in WORLDJS and "const WORLD={x0:-320,x1:480,y0:-380,y1:300};" in WORLDJS)
-check("反向：天气、微观仿真、正射影像的网格仍按 WORLD 建，不按 CITY",
+check("negative: the weather, micro-simulation and orthoimagery grids are still built on WORLD, not CITY",
       "CITY" not in JS["3-weather.js"] and "CITY" not in JS["4-sim.js"] and "CITY" not in JS["2-basemap.js"] and "CITY" not in fn(WORLDJS, "buildWorldReal"))
 
-# 2 全城层：预渲染一次，平铺在精细窗口下面
-check("6c-city.js 排在 6-engine.js 后面（build.py 按文件名排序）", sorted(JS).index("6c-city.js") == sorted(JS).index("6-engine.js") + 1)
+# 2 Whole-city layer: pre-rendered once, tiled under the fine window
+check("6c-city.js sorts right after 6-engine.js (build.py orders by file name)", sorted(JS).index("6c-city.js") == sorted(JS).index("6-engine.js") + 1)
 cc = fn(CITYJS, "cityCanvas")
-check("全城层预渲染到离屏画布、按明暗主题缓存", "document.createElement('canvas')" in cc and "CITYL.cv[key]=c" in cc and "(light?'L':'D')" in cc)
-check("路网：双向街的两条路段只描一次（按两端节点去重）", "l.from<l.to?l.from+'|'+l.to:l.to+'|'+l.from" in cc and "seen.has(k)" in cc)
+check("the whole-city layer is pre-rendered to an off-screen canvas, cached per light/dark theme", "document.createElement('canvas')" in cc and "CITYL.cv[key]=c" in cc and "(light?'L':'D')" in cc)
+check("network: the two links of a two-way street are stroked once (deduplicated by end nodes)", "l.from<l.to?l.from+'|'+l.to:l.to+'|'+l.from" in cc and "seen.has(k)" in cc)
 bl = cc[cc.index("if(CITYL.bld){"):cc.index("if(net){")]
-check("建筑：画平的轮廓，不挤出、不描边", "g.fill('nonzero')" in bl and "stroke" not in bl)
+check("buildings: flat footprints, no extrusion, no outline", "g.fill('nonzero')" in bl and "stroke" not in bl)
 rb = fn(APP, "renderBase")
-check("renderBase：先贴全城层，再把精细窗口裁进 WORLD，最后画接缝",
+check("renderBase: paints the whole-city layer first, then clips the fine window to WORLD, then draws the seam",
       rb.index("cityDraw(bctx,V)") < rb.index("bctx.clip()") < rb.index("drawVector(") and "citySeam(bctx,V,TK.light)" in rb and "cityKey()" in rb)
-check("全城层拿到的是完整的建筑表（loadBuildings → cityData）", "cityData(d);" in fn(APP, "loadBuildings"))
+check("the whole-city layer gets the full building table (loadBuildings → cityData)", "cityData(d);" in fn(APP, "loadBuildings"))
 
-# 3 放开视图
-check("缩放下限 = 刚好装下 CITY（cityMinS），平移夹到 CITY", "V.s=clamp(s,cityMinS(),14)" in APP and "CITY.x0+hw-I.l/V.s" in APP
+# 3 Opening up the view
+check("minimum zoom = just fits CITY (cityMinS); panning is clamped to CITY", "V.s=clamp(s,cityMinS(),14)" in APP and "CITY.x0+hw-I.l/V.s" in APP
       and "s=clamp(s,cityMinS(),14);cx+=" in APP and "function zoomAt(px,py,s){const wx=V.wx(px),wy=V.wy(py);s=clamp(s,cityMinS(),14);" in APP)
-check("反向：视图里不再有写死的缩放下限 1.1", not re.search(r"clamp\(s,1\.1,14\)", APP))
+check("negative: no hard-coded minimum zoom of 1.1 left in the view", not re.search(r"clamp\(s,1\.1,14\)", APP))
 rd = fn(APP, "render")
-check("缩放 < 1：天气、La Trobe 微观场景的小人和事件、经纬网都不画（T38：第 2 步网格仿真的车照画）",
+check("zoom < 1: weather, the La Trobe micro scene's pedestrians and events, and the graticule are not drawn (the step 2 grid sim's cars still are)",
       "fine=V.s>=1" in rd and "wx=S.layers.weather&&fine" in rd and "walkers=micro&&(fine||gridShown())" in rd and "S.layers.grid&&fine" in rd
       and not re.search(r"if\(S\.layers\.weather\)WX\.", rd))
-check("缩放 < 1：经纬度探针隐藏", "hide=V.s<1" in APP)
-check("反向：缩放 < 1 时点地图不挪施工区", "if(S.step!==1||!BE.api||V.s<1)return;" in ENG)
+check("zoom < 1: the lat/long probe is hidden", "hide=V.s<1" in APP)
+check("negative: clicking the map at zoom < 1 does not move the works", "if(S.step!==1||!BE.api||V.s<1)return;" in ENG)
 
-# 4 引擎线画全
-check("引擎叠加层用 CITY：可点的路段、取景、标签剔除、可见范围", all(x in ENG for x in [
+# 4 Engine lines drawn in full
+check("engine overlay uses CITY: clickable links, framing, label culling, visible range", all(x in ENG for x in [
     "p[0]<CITY.x0||p[0]>CITY.x1", "clamp(p[0],CITY.x0,CITY.x1)", "if(c[0]<CITY.x0||c[0]>CITY.x1", "Math.max(CITY.x0,V.wx(24))"]))
-check("反向：6-engine.js 里不再用 WORLD", "WORLD" not in ENG)
-fit = fn(ENG, "engFit") + fn(ENG, "fitView")  # T49：取景算法抽成 fitView(x0, x1, y0, y1, maxS)
-check("取景缩放下限跟着放开（cityMinS），画出来的绕行（≥ 1%）都框进来", "cityMinS(),maxS" in fit and "+60,3.6);" in fit and ">=.01" in fit)
+check("negative: 6-engine.js no longer uses WORLD", "WORLD" not in ENG)
+fit = fn(ENG, "engFit") + fn(ENG, "fitView")  # the framing algorithm was pulled out into fitView(x0, x1, y0, y1, maxS)
+check("framing's minimum zoom opens up too (cityMinS); every drawn detour (≥ 1 %) is framed", "cityMinS(),maxS" in fit and "+60,3.6);" in fit and ">=.01" in fit)
 
-# 5 排队线沿真路
-check("排队线沿施工街往上游找同名路段、按 len_m 累加（upstreamPath），画到街没了为止",
+# 5 Queue line follows the real road
+check("the queue line walks upstream along same-named links of the works street, accumulating len_m (upstreamPath), and is drawn until the street ends",
       "function upstreamPath(" in ENG and "u.name===link.name" in ENG and "+U.len_m" in ENG and "engSub(Math.min(s.queue_m,engReach())).reverse()" in ENG)
-check("标签照写引擎的数，再说明画到哪（画到 Spring St 为止）", "engQueueTxt(s,vis)" in ENG and "画到 ${end} 为止" in ENG and "drawn to ${end" in ENG)
-check("反向：不再沿施工路段方向直线外推（旧 engUp 把米当页面单位）", "return[a[0]-(b[0]-a[0])/l*m,a[1]-(b[1]-a[1])/l*m];" not in ENG)
+check("the label shows the engine's number as is, then says how far it is drawn (drawn to Spring St)", "engQueueTxt(s,vis)" in ENG and "画到 ${end} 为止" in ENG and "drawn to ${end" in ENG)
+check("negative: no straight-line extrapolation along the works link any more (the old engUp treated metres as page units)", "return[a[0]-(b[0]-a[0])/l*m,a[1]-(b[1]-a[1])/l*m];" not in ENG)
 
-# 6 比例尺
+# 6 Scale bar
 ds = fn(APP, "drawScale")
-check("比例尺按 1 m ≈ 0.862 页面单位（K_UPM）", "K_UPM" in ds and "const K_UPM=0.862;" in ENG)
+check("scale bar uses 1 m ≈ 0.862 page units (K_UPM)", "K_UPM" in ds and "const K_UPM=0.862;" in ENG)
 
-# 7 变慢路段按 extra_min（T28）
-check("变慢路段用 extra_min 筛（rippleLinks），不再按 v·delay_s", "rippleLinks(s.raw.links,EP.link)" in ENG and "(l.v||0)*(l.delay_s||0)/60" not in ENG)
+# 7 Slowed links by extra_min
+check("slowed links are filtered by extra_min (rippleLinks), no longer by v·delay_s", "rippleLinks(s.raw.links,EP.link)" in ENG and "(l.v||0)*(l.delay_s||0)/60" not in ENG)
 rl = fn(ENG, "rippleLinks")
-check("反向：筛选和红色判断都只看 extra_min，不看 queue_m（Flinders / King St 平时就排队，PRD 3.2 第 7 条 #82）",
+check("negative: both the filter and the red threshold look only at extra_min, not queue_m (Flinders / King St queue anyway; PRD 3.2 item 7, #82)",
       "queue_m" not in rl and "sev:ex>=60?2:ex>=10?1:0" in rl)
-check("反向：地图上最堵路段的标签也按 extra_min 标红（和底下的线同色），不按 queue_m",
+check("negative: the map label on the most congested link also turns red by extra_min (same colour as the line below it), not by queue_m",
       "h.extra_min>=60?TK.risk:TK.works" in ENG and "h.queue_m>0?TK.risk" not in ENG)
 dt = fn(APP, "drawTag")
-check("标签避让（375 px 施工标签曾压在缩放按钮下、出屏）：engLabels 期间 drawTag 走 tagSpot，避开玻璃控件、施工段和已画的标签；先画全部引线再画框",
+check("label placement (at 375 px the works label once sat under the zoom buttons and off-screen): during engLabels drawTag goes through tagSpot, avoiding glass controls, the works segment and labels already drawn; all leader lines first, then the boxes",
       "TAGS.on?tagSpot(px,py,dx,dy,w,h)" in dt and "TAGS.boxes=[[wx0,wy0," in fn(ENG, "engLabels") and fn(ENG, "engLabels").rstrip().endswith("tagFlush();") and "if(TAGS.on)TAGS.q.push(t)" in dt
       and all(x in fn(APP, "tagObst") for x in ["#wx", "#basemap", ".zoom", "#legend", "#rail"]))
 
-# 8 AI 面板的挂钩（PRD 4.3）
-check("第 3 步 AI 面板挂钩还在", "clashMount();aiMount();" in APP and "aiPlanSrc(s,f)" in ENG)
+# 8 AI panel hooks (PRD 4.3)
+check("step 3 AI panel hooks still present", "clashMount();aiMount();" in APP and "aiPlanSrc(s,f)" in ENG)
 
-# 9 真路网 / 真引擎（node）
+# 9 Real network / real engine (node)
 node = shutil.which("node")
 if not node:
-    check("找到 node（t27_glue.mjs 要用）", False)
+    check("node found (needed by t27_glue.mjs)", False)
 else:
     try:
         r = subprocess.run([node, str(HERE / "t27_glue.mjs")], capture_output=True, text=True, encoding="utf-8", timeout=150)
         out, code = r.stdout + r.stderr, r.returncode
     except subprocess.TimeoutExpired:
-        out, code = "❌ t27_glue.mjs 超过 150 秒没跑完\n", 1
+        out, code = "❌ t27_glue.mjs did not finish within 150 s\n", 1
     n0 = passed + failed
     for line in out.splitlines():
         if line.startswith("✅"):
@@ -127,7 +127,7 @@ else:
             failed += 1
             print(line)
     if code != 0 and passed + failed == n0:
-        check(f"t27_glue.mjs 退出码 {code}", False, out[-400:])
+        check(f"t27_glue.mjs exit code {code}", False, out[-400:])
 
 print(f"{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

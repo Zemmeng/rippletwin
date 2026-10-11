@@ -185,7 +185,8 @@ class GridSim{
   resetStats(){
     this.events=[];this.recent=new Map();this.critical=null;this.stats={conflicts:0,critical:0,harsh:0,delay:0,done:0,noRoute:0,merges:0};
     this.minute.fill(0);this.mSeen.fill(0);this.mHit.fill(0);this.risk.fill(0);
-    for(const ln of this.lanes||[])for(const c of ln.cars){c.inV=false;c.hit=false;} // cars already in the 2×2 count again from herethis.riskVer++;this.redRun=0;
+    for(const ln of this.lanes||[])for(const c of ln.cars){c.inV=false;c.hit=false;} // cars already in the 2×2 count again from here
+    this.riskVer++;this.redRun=0;
     this.entry=this.spec.dirs.map(D=>({id:D.entry,street:D.street,dir:D.dir,vph:D.vph,arr:0,ins:0,div:0}));
   }
   setWeather(k,env){this.wxk=k;this.wx=WXP[k]||WXP.clear;this.env=env;}

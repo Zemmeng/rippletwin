@@ -1,4 +1,4 @@
-// T27 on the real network: the queue's road (upstreamPath), metres ↔ page units (K_UPM), and the ripple filter (rippleLinks)
+// Whole-CBD map on the real network: the queue's road (upstreamPath), metres ↔ page units (K_UPM), and the ripple filter (rippleLinks)
 // on a real engine run of the demo plan (Lonsdale St westbound 08:00, one lane). Called by tests/test_t27.py; one ✅ / ❌ line
 // per assertion, no network access.
 import { readFileSync, existsSync } from 'node:fs';
@@ -53,7 +53,7 @@ const be = await connect({ fetch: fakeFetch, importer: noImporter });
 const s = await be.run(be.demo('lonsdale'));
 const L = s.raw.links, rip = new Set(rippleLinks(L, worksId).map(r => r.id));
 const bg = L.filter(l => /^(Flinders|King) Street$/.test((byId.get(l.id) || {}).name || '') && (l.v || 0) * (l.delay_s || 0) / 60 >= 60);
-ok(L.every(l => typeof l.extra_min === 'number'), `raw.links carry extra_min (T28 in the engine) — ${L.length} links`);
+ok(L.every(l => typeof l.extra_min === 'number'), `raw.links carry extra_min (computed by the engine) — ${L.length} links`);
 ok(bg.length > 0 && bg.every(l => !rip.has(l.id)), `reverse: the ${bg.length} Flinders / King St links queued against free flow (up to ${Math.round(Math.max(...bg.map(l => l.v * l.delay_s / 60)))} veh·min) are not drawn as this plan's ripple`);
 const R = rippleLinks(L, worksId), red = R.filter(r => r.sev === 2), qd = L.filter(l => l.queue_m > 0 && l.extra_min < 60 && l.id !== worksId);
 ok(red.every(r => r.ex >= 60) && qd.length > 0 && qd.every(l => !red.some(r => r.id === l.id)), `reverse: red = ≥ 60 extra veh·min only (${red.length} links); the ${qd.length} links that queue anyway but gain < 60 are not red`);

@@ -1,7 +1,7 @@
-"""2×2 路口微观仿真接进第 2 步（4b-grid.js 的 GridSim）。只做源码静态断言，不跑浏览器。
+"""Junction micro-simulation wired into step 2 (GridSim in 4b-grid.js). Static source assertions only; no browser.
 
-用法：python3 apps/web/tests/test_grid_wire.py（要 git，不联网）
-最后一行固定输出「N passed, M failed」，有失败退出码 1。
+Usage: python3 apps/web/tests/test_grid_wire.py (needs git, no network)
+The last line is always "N passed, M failed"; any failure exits with code 1.
 """
 import pathlib
 import re
@@ -26,7 +26,7 @@ def check(name, ok, detail=""):
         print(f"✅ {name}")
     else:
         failed += 1
-        print(f"❌ {name}" + (f" —— {detail}" if detail else ""))
+        print(f"❌ {name}" + (f" — {detail}" if detail else ""))
 
 
 def fn_body(src, name):
@@ -37,53 +37,53 @@ def fn_body(src, name):
 # 1. helpers exist, each defined exactly once across all js files (one classic script: names must be unique)
 for name in ["gridOn", "newGrid", "gridShown", "gridFly", "gridRebuild", "gridNote", "drawJunctions"]:
     n = len(re.findall(r"^function " + name + r"\(", ALL, re.M))
-    check(f"{name}() 定义且全局只有一处", n == 1, f"找到 {n} 处")
+    check(f"{name}() is defined exactly once across all files", n == 1, f"found {n}")
 
 # 2. gridOn guards a missing 4b-grid.js and only fires on step 2 inside GRID_BOX
 on = fn_body(APP, "gridOn")
-check("gridOn() 先判断 typeof GridSim==='function'", "typeof GridSim==='function'" in on)
-check("gridOn() 只在第 2 步、施工段全在 GRID_BOX 里", "S.step===2" in on and "GRID_BOX.x0" in on and "EP.pts.every" in on)
+check("gridOn() checks typeof GridSim==='function' first", "typeof GridSim==='function'" in on)
+check("gridOn() only on step 2, with the whole works segment inside GRID_BOX", "S.step===2" in on and "GRID_BOX.x0" in on and "EP.pts.every" in on)
 
 # 3. newGrid falls back to null on any throw
 ng = fn_body(APP, "newGrid")
-check("newGrid() 有 try/catch，出错返回 null", "try{" in ng and "catch(" in ng and "return null" in ng)
+check("newGrid() has try/catch and returns null on error", "try{" in ng and "catch(" in ng and "return null" in ng)
 
 # 4. every newGrid() call sits behind gridOn()
 calls = [m.start() for m in re.finditer(r"(?<!function )newGrid\(\)", APP + ENG)]
 bad = [i for i in calls if not (APP + ENG)[max(0, i - 10):i].endswith("gridOn()&&")]
-check("newGrid() 每次调用前都有 gridOn()&&", len(calls) >= 2 and not bad, f"{len(bad)} 处没守")
+check("every newGrid() call is preceded by gridOn()&&", len(calls) >= 2 and not bad, f"{len(bad)} unguarded")
 g2 = re.search(r"if\(n===2\)\{(.*?)\n\s*else\{(.*?)\}\}", APP, re.S)
-check("goStep(2)：gridOn()&&newGrid() 成功才用网格，否则原来的 newStress('before') 原样保留",
+check("goStep(2): the grid is used only if gridOn()&&newGrid() succeeds; otherwise the original newStress('before') stays as it was",
       bool(g2) and "gridOn()&&newGrid()" in g2.group(1) and "S.stress=newStress('before');S.sim=S.stress" in g2.group(2) and "flyTo(-8,-4,4.2)" in g2.group(2))
-check("goStep(2) 网格分支把 S.stress 置空（第 3 步会自己重建 La Trobe 场景，不碰 GridSim.script）",
+check("goStep(2) grid branch clears S.stress (step 3 rebuilds the La Trobe scene itself and does not touch GridSim.script)",
       bool(g2) and "S.stress=null" in g2.group(1))
 
 # 5. La Trobe-only drawing skips the grid sim
-check("drawRisk / fogRings 遇到 isGrid 直接返回",
+check("drawRisk / fogRings return immediately on isGrid",
       "if(!sim||sim.isGrid)return;" in APP and "if(!sim||sim.isGrid||S.wx!=='fog'" in APP)
-check("render 第 2 步网格不画 La Trobe 施工，画网格的施工和信号灯（T38：缩小也画）",
+check("render on the step 2 grid skips the La Trobe works and draws the grid's works and signals (also when zoomed out)",
       "if(micro&&!grid)drawWorks('before')" in APP and "if(grid)drawJunctions(S.sim,wait)" in APP)
-check("T38：第 2 步网格缩放 < 1 也画车（walkers 含 gridShown()），La Trobe 场景仍只在 fine 里画",
+check("step 2 grid draws cars at zoom < 1 too (walkers includes gridShown()); the La Trobe scene still draws only when fine",
       "walkers=micro&&(fine||gridShown())" in APP)
-check("T38：网格仿真画整个 4×4（sim.all），统计仍用 sim.agents（施工处 2×2）",
+check("grid sim draws the whole 4×4 (sim.all); stats still use sim.agents (the 2×2 at the works)",
       "const list=sim.isGrid&&sim.all?sim.all:sim.agents" in APP and "for(const a of list)" in APP)
-check("T38：施工段醒目（光晕 + 标签），标签写街名和封几条道",
+check("works segment stands out (glow + tag); the tag names the street and how many lanes are closed",
       "drawTag(ctx,px,py,0,-34" in fn_body(APP, "drawJunctions") or "drawTag(ctx,px,py,0,-34" in APP)
-check("T38：时钟 / 时间轴按方案时段（第 2 步网格用 EP.hour，其余 17:00），不再写死「17:」",
+check("clock / timeline follow the plan's time window (step 2 grid uses EP.hour, everything else 17:00); \"17:\" is no longer hard-coded",
       "function clockHour(){return gridShown()?" in APP and "`17:${" not in APP)
 
 # 6. plan change in step 2 rebuilds the grid
 run = ENG[ENG.find("async function engRun("):]
 run = run[:run.find("\n}\n")]
-check("engRun 结束时第 2 步调 gridRebuild()", "if(S.step===2)gridRebuild();" in run)
+check("engRun calls gridRebuild() on step 2 when it finishes", "if(S.step===2)gridRebuild();" in run)
 
 # 7. panel line + things other tests rely on
-check("第 2 步面板写明信号配时和转弯比例是假设值", "signal timing and turn shares are assumed" in APP and "信号配时和转弯比例是假设值" in APP)
-check("clashMount();aiMount(); 还在", "clashMount();aiMount();" in APP)
+check("step 2 panel states that signal timing and turn shares are assumed", "signal timing and turn shares are assumed" in APP and "信号配时和转弯比例是假设值" in APP)
+check("clashMount();aiMount(); still present", "clashMount();aiMount();" in APP)
 
 # 8. 4-sim.js untouched vs origin/main
 r = subprocess.run(["git", "-C", str(REPO), "diff", "--quiet", "origin/main", "--", "apps/web/src/js/4-sim.js"])
-check("4-sim.js 和 origin/main 一致", r.returncode == 0, f"git diff 退出码 {r.returncode}")
+check("4-sim.js matches origin/main", r.returncode == 0, f"git diff exit code {r.returncode}")
 
 print(f"{passed} passed, {failed} failed")
 sys.exit(1 if failed else 0)

@@ -46,7 +46,7 @@ function clashHTML(){
   if(CL.busy)return one(L('checking the works register for overlaps…','正在查登记表里同期的施工…'));
   if(CL.err)return one(L('clash check unavailable right now.','叠加检查暂时用不了。'));
   if(!CL.other)return one(L('no other registered works overlap this plan’s dates.','登记表里没有和本方案同期的其他施工。'));
-  if(suPlan())return clashSuHTML(); // T49 (lead D-0930): the SUMO plan shows no engine clash cost
+  if(suPlan())return clashSuHTML(); // SUMO plan (D-1001-0045): no engine clash cost
   const{o,ws,r}=CL.other,net=engNet(),l0=net&&net.links.get(ws.links[0]),street=esc(shortSt(l0&&l0.name||'')),title=esc(o.title);
   const U=L('veh·min','车·分钟'),hrs=r.hours.map(engHour).join(', '),days=r.overlap.days;
   const head=`<div class="row between"><span class="eyebrow">${L('Nearby works · clash check','附近施工 · 叠加检查')}</span><span class="eyebrow"${r.flags.reliable&&r.cost>0?' style="color:var(--risk)"':''}>${r.flags.reliable&&r.cost>0?`+${fmtN(r.cost)} ${U}`:L(`${days} day${days===1?'':'s'} overlap`,`重叠 ${days} 天`)}</span></div>
@@ -67,9 +67,9 @@ function clashHTML(){
   else if(r.cost>0){const n=clashDays(ws);act=`<p class="small muted">${CL.stErr?L('Stagger failed — try again (button at the bottom of the panel).','错开没算成，再点一次面板底部的按钮。'):L(`“Stagger by ${n} day${n===1?'':'s'}” at the bottom of the panel moves ${title} later, re-scored by the engine day by day.`,`面板底部的「错开 ${n} 天」把「${title}」往后挪，引擎逐天重算。`)}</p>`;}
   return`${head}${metrics}${sub}${why}${act}${more}`;
 }
-// T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan the section names the overlapping works, the dates and the
+// SUMO-primary mode (D-1001-0045): on the SUMO plan the section names the overlapping works, the dates and the
 // window, and suggests a stagger in days worked out from the dates alone (clashDays: start the day after this plan ends) — no
-// engine clash cost, no engine stagger (its result is a cost), and SUMO does not model two works at once: 「叠加影响 SUMO 暂不覆盖」
+// engine clash cost, no engine stagger (its result is a cost), and SUMO does not model two works at once (“Combined impact not covered by SUMO”)
 function clashSuHTML(){
   const{o,ws,r}=CL.other,net=engNet(),l0=net&&net.links.get(ws.links[0]),street=esc(shortSt(l0&&l0.name||'')),title=esc(o.title);
   const days=r.overlap.days,n=clashDays(ws),win=cmpWin(days,r.hours.length,LANG.cur==='zh');

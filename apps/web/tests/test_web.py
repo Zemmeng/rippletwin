@@ -1,7 +1,7 @@
-"""apps/web 的静态断言：不开浏览器，只读源码和打包产物。
+"""Static assertions for apps/web: no browser, only the sources and the bundle are read.
 
-用法：python3 apps/web/tests/test_web.py
-最后一行固定输出「N passed, M failed」，有失败退出码 1。
+Usage: python3 apps/web/tests/test_web.py
+The last line is always "N passed, M failed"; any failure exits with code 1.
 """
 import pathlib
 import re
@@ -27,53 +27,53 @@ def check(name, ok, detail=""):
         print(f"✅ {name}")
     else:
         failed += 1
-        print(f"❌ {name}{('：' + detail) if detail else ''}")
+        print(f"❌ {name}{(': ' + detail) if detail else ''}")
 
 
-# 1. 仓库里的 public/index.html 和 src/ 同步（改了源码忘了打包会红）
+# 1. The committed public/index.html is in sync with src/ (goes red if the source changed but was not rebuilt)
 committed = (ROOT / "public" / "index.html").read_text(encoding="utf-8")
-check("public/index.html 与 src/ 打包结果一致", committed == PAGE, "先跑 python3 apps/web/build.py")
+check("public/index.html matches the bundle built from src/", committed == PAGE, "run python3 apps/web/build.py first")
 
-# 2. 单文件体积在 2MB 以内（D：public/ 下文件上限）
+# 2. Single-file size under 2 MB (the file size limit under public/)
 size = len(PAGE.encode("utf-8"))
-check(f"打包后 {size} 字节 < 2MB", size < 2 * 1024 * 1024)
+check(f"bundle is {size} bytes < 2MB", size < 2 * 1024 * 1024)
 
-# 3. 反向断言（隐私）：页面只从同源取东西（/engine/ /roads/ /params/ /api/，T13 PRD 第 6 节；T40 加 /sumo/：
-#    只 import 同源的 sumo-client.js，由它去取 /sumo/public/real/ 和 /api/sumo/v1/），不往别的服务器发数据
+# 3. Negative assertions (privacy): the page only loads from the same origin (/engine/ /roads/ /params/ /api/, docs/hackathon/specs/T13-web-wiring-PRD.md section 6; plus /sumo/:
+#    it only imports the same-origin sumo-client.js, which fetches /sumo/public/real/ and /api/sumo/v1/) and sends no data to any other server
 SAME_ORIGIN = ("/engine/", "/roads/", "/params/", "/api/", "/sumo/")
 loads = re.findall(r"\b(import|fetch)\s*\(\s*([^)]*?)\s*[,)]", JS)
 bad = [f"{k}({a})" for k, a in loads if not re.fullmatch(r"'(/[^']*)'", a) or not a.strip("'").startswith(SAME_ORIGIN)]
-check(f"import() / fetch() 只用同源的固定路径（{len(loads)} 处）", loads and not bad, f"不合规 {bad}")
-check("JS 里没有 XMLHttpRequest / WebSocket / sendBeacon", not re.search(r"XMLHttpRequest|WebSocket|sendBeacon", JS))
+check(f"import() / fetch() use only fixed same-origin paths ({len(loads)} calls)", loads and not bad, f"non-compliant {bad}")
+check("no XMLHttpRequest / WebSocket / sendBeacon in the JS", not re.search(r"XMLHttpRequest|WebSocket|sendBeacon", JS))
 hosts = set(re.findall(r"https?://([a-zA-Z0-9.-]+)", PAGE))
 allowed = {"fonts.googleapis.com", "fonts.gstatic.com", "www.w3.org"}
-# 许可要求的数据署名（OSM、OpenMapTiles / OpenFreeMap、DataVic、墨尔本市）是给人点的链接，不是页面去取的东西：
-# 只准出现在 CREDITS 的 href 里（矢量瓦片是 tools/fetch_vectormap.py 在构建期拉的，页面不连它）
+# The licence-required data attributions (OSM, OpenMapTiles / OpenFreeMap, DataVic, City of Melbourne) are links for people to click, not things the page loads:
+# they may only appear in CREDITS hrefs (vector tiles are fetched at build time by tools/fetch_vectormap.py; the page never connects to them)
 CREDIT_HOSTS = {"www.openstreetmap.org", "openfreemap.org", "discover.data.vic.gov.au", "data.melbourne.vic.gov.au"}
-check("外部地址只有 Google Fonts（另有署名链接，见下一条）", hosts <= allowed | CREDIT_HOSTS, f"多出 {sorted(hosts - allowed - CREDIT_HOSTS)}")
+check("the only external hosts are Google Fonts (plus attribution links, see the next check)", hosts <= allowed | CREDIT_HOSTS, f"extra {sorted(hosts - allowed - CREDIT_HOSTS)}")
 stray = [h for h in CREDIT_HOSTS if PAGE.count("https://" + h) != len(re.findall(r"href:'https://" + re.escape(h), PAGE))]
-check("署名链接只出现在 CREDITS 的 href 里，不被 fetch / import / src 加载", not stray, str(stray))
-check("署名链接新开窗口且不带 referrer（rel=noopener noreferrer）", 'target="_blank" rel="noopener noreferrer"' in PAGE and re.search(r"CREDITS\.map\(c=>`<a href=\"\$\{c\.href\}\" target=\"_blank\" rel=\"noopener noreferrer\">", PAGE) is not None)
+check("attribution links appear only in CREDITS hrefs and are never loaded via fetch / import / src", not stray, str(stray))
+check("attribution links open in a new window without a referrer (rel=noopener noreferrer)", 'target="_blank" rel="noopener noreferrer"' in PAGE and re.search(r"CREDITS\.map\(c=>`<a href=\"\$\{c\.href\}\" target=\"_blank\" rel=\"noopener noreferrer\">", PAGE) is not None)
 
-# 3b. 接后端（T13）：只接 backend.js 的 connect()；连不上走 BE.err，页面留着预设数字
+# 3b. Backend wiring: only backend.js connect(); on failure BE.err is set and the page shows the offline card
 ENG = (SRC / "js" / "6-engine.js").read_text(encoding="utf-8")
-check("6-engine.js 加载 /engine/public/js/backend.js 并调 connect()",
+check("6-engine.js loads /engine/public/js/backend.js and calls connect()",
       "import('/engine/public/js/backend.js')" in ENG and re.search(r"\.then\(m=>m\.connect\(\)\)", ENG))
-check("后端加载失败的分支：catch 里记 BE.err，不往外抛",
+check("backend load-failure branch: catch records BE.err and does not rethrow",
       re.search(r"\.catch\(e=>\{BE\.err=e;", ENG) and "engOfflineCard" in ENG)
-check("反向（T20）：引擎连不上时不再拿预设数字顶上（没有 RESULTS 查表，离线卡片写「暂时没有数字」）",
+check("negative: when the engine is unreachable, no preset numbers stand in (no RESULTS lookup table; the offline card says there are no numbers to show)",
       "RESULTS" not in JS and "Engine offline — no numbers to show" in ENG and "showing preset numbers" not in ENG)
 
-# 3c. 反向断言（注入）：引擎 / T5 / 顾问给的文字（why、路名、报错）不原样拼进 HTML
-#     why 只用 textContent；路名、报错进模板一律过 esc()；画在 canvas 上的（drawTag）和剪贴板文字（engPlaybook）不算 HTML
+# 3c. Negative assertions (injection): text from the engine / sign checker / advisor (why, road names, errors) is never concatenated into HTML as is
+#     why only via textContent; road names and errors always go through esc() in templates; text drawn on canvas (drawTag) and clipboard text (engPlaybook) are not HTML
 html_part = re.sub(r"function engPlaybook\(\)\{.*?\n\}\n", "", ENG, flags=re.S)
-html_part = re.sub(r"/\* pure:begin.*?/\* pure:end \*/", "", html_part, flags=re.S)  # 拼方案的纯数据，不进 HTML
+html_part = re.sub(r"/\* pure:begin.*?/\* pure:end \*/", "", html_part, flags=re.S)  # pure plan-building data, never goes into HTML
 interp = [m.group(0) for m in re.finditer(r"\$\{((?:[^{}]|\{[^{}]*\})*)\}", html_part)]
 raw_why = [x for x in interp if re.search(r"\.why\b", x)]
-check("why 不拼进 HTML（只用 textContent）", not raw_why, str(raw_why[:3]))
-check("why 用 textContent 写（第 3 步读数、第 4 步顾问）", ENG.count(".textContent=w||''") + ENG.count(".textContent=o&&o.why||''") >= 2)
+check("why is not concatenated into HTML (textContent only)", not raw_why, str(raw_why[:3]))
+check("why is written with textContent (step 3 readings, step 4 advisor)", ENG.count(".textContent=w||''") + ENG.count(".textContent=o&&o.why||''") >= 2)
 def interpolations(text):
-    """每个 ${…} 单独拿出来（含嵌在 L(`…${x}…`) 里的内层），按花括号配对"""
+    """Every ${…} on its own (including inner ones nested in L(`…${x}…`)), matched by brace pairing"""
     out, i = [], text.find("${")
     while i != -1:
         depth, j = 0, i + 1
@@ -91,14 +91,14 @@ def interpolations(text):
 
 
 def unsafe_in(text):
-    """引擎 / 读屏 / 顾问给的字段直接进了插值、又没过 esc()（外层 L(…) 的整段不算，里面每个 ${} 另算）"""
+    """Fields from the engine / sign reader / advisor interpolated directly without esc() (an outer L(…) as a whole does not count; each ${} inside is checked separately)"""
     bad = []
     for x in interpolations(text):
-        if "${" in x:  # 外层：里面的插值会单独检查
+        if "${" in x:  # outer: the interpolations inside are checked separately
             continue
-        code = re.sub(r"'[^']*'|\"[^\"]*\"|`[^`]*`", "''", x)  # 字符串字面量里的文案不算
-        # 引擎 / 读屏 / 顾问 / check 给的字段，和用户打的字（f1 f2 sign）、顾问改法（what kind frames）
-        if re.fullmatch(r"\s*(fmtN|pctS|engHour)\([^()]*(\([^()]*\))?[^()]*\)\s*", code):  # 数字格式化，输出只有数字
+        code = re.sub(r"'[^']*'|\"[^\"]*\"|`[^`]*`", "''", x)  # copy inside string literals does not count
+        # fields from the engine / sign reader / advisor / check, text the user typed (f1 f2 sign), and advisor changes (what kind frames)
+        if re.fullmatch(r"\s*(fmtN|pctS|engHour)\([^()]*(\([^()]*\))?[^()]*\)\s*", code):  # number formatting, outputs digits only
             continue
         if re.search(r"(?<![.\w])(street|name|msg|message|reading_src|src|equipment|f1|f2|sign|what|kind|frames|text|headsign|short|m)\b|\.(street|name|msg|message|reading_src|src|equipment|f1|f2|sign|kind|frames|text|headsign|short)\b", code) and "esc(" not in code:
             bad.append(x[:60])
@@ -107,234 +107,234 @@ def unsafe_in(text):
 
 lines = "\n".join(ln for ln in html_part.splitlines() if "drawTag(" not in ln and "toast(" not in ln)
 unsafe = unsafe_in(lines)
-check("路名 / 报错 / 来源进 HTML 模板都过 esc()（含 L() 里嵌的）", not unsafe, str(unsafe[:4]))
-# 自检：去掉一处 esc() 必须被抓到（防止断言本身永远不会失败）
+check("road names / errors / sources in HTML templates all go through esc() (including those nested in L())", not unsafe, str(unsafe[:4]))
+# Self-check: removing one esc() must be caught (guards against an assertion that can never fail)
 probe = "`${L(`One lane on ${shortSt(s.street)} backs up`,`x`)}` `${esc(a.src)}`"
-check("自检：嵌在 L() 里的未转义路名会被抓到", unsafe_in(probe) == ["shortSt(s.street)"], str(unsafe_in(probe)))
+check("self-check: an unescaped road name nested in L() is caught", unsafe_in(probe) == ["shortSt(s.street)"], str(unsafe_in(probe)))
 app_js = (SRC / "js" / "5-app.js").read_text(encoding="utf-8")
-check("第 1 步标题里的路名过 esc()", "esc(shortSt(EP.street)" in app_js and not unsafe_in(app_js[app_js.find("S.step===1"):app_js.find("S.step===2")]))
+check("the road name in the step 1 heading goes through esc()", "esc(shortSt(EP.street)" in app_js and not unsafe_in(app_js[app_js.find("S.step===1"):app_js.find("S.step===2")]))
 
-# 3d. 真建筑（T15）：先同步画程序生成的城市（兜底），异步取 buildings.json，拿不到 / 太少就留着兜底，页面不会空白
+# 3d. Real buildings: draw the procedurally generated city synchronously first (fallback), fetch buildings.json asynchronously, keep the fallback if it is missing / too small, so the page is never blank
 WORLD_JS = (SRC / "js" / "1-world.js").read_text(encoding="utf-8")
 no_comments = lambda t: re.sub(r"/\*.*?\*/|//[^\n]*", "", t, flags=re.S)  # noqa: E731
-check("兜底城市先同步建好：let W=buildWorld(),G=buildGrids(W)", "let W=buildWorld(),G=buildGrids(W);" in app_js and "function buildWorld(){" in WORLD_JS)
+check("the fallback city is built synchronously first: let W=buildWorld(),G=buildGrids(W)", "let W=buildWorld(),G=buildGrids(W);" in app_js and "function buildWorld(){" in WORLD_JS)
 lb = re.search(r"function loadBuildings\(\)\{.*?\n\}\n", app_js, re.S)
 lb_src = lb.group(0) if lb else ""
-check("loadBuildings 取同源的 /roads/public/cbd/buildings.json", "fetch('/roads/public/cbd/buildings.json')" in lb_src)
-check("取不到 / 坏数据 / 不够 REAL_MIN 栋 → 不换世界（catch + REAL_MIN）",
+check("loadBuildings fetches the same-origin /roads/public/cbd/buildings.json", "fetch('/roads/public/cbd/buildings.json')" in lb_src)
+check("missing / bad data / fewer than REAL_MIN buildings → the world is not replaced (catch + REAL_MIN)",
       ".catch(" in lb_src and "nw.buildings.length<REAL_MIN)return false" in lb_src and "r.ok?r.json():null" in lb_src)
-check("geoToWorld 只在 loadBuildings 的异步回调里用（1-world.js 顶层不碰它）",
+check("geoToWorld is used only in the loadBuildings async callback (1-world.js top level does not touch it)",
       "geoToWorld" not in no_comments(WORLD_JS) and no_comments(app_js).count("geoToWorld") == no_comments(lb_src).count("geoToWorld") == 1)
-check("rebuildWorld 清掉影像缓存、底图签名和高温统计", re.search(r"function rebuildWorld\(nw,g,imgs\)\{\s*W=nw;G=g\|\|buildGrids\(nw\);WX\.rebind\(W,G\);\s*for\(const k of Object\.keys\(IMG\)\)delete IMG\[k\];\s*if\(imgs\)Object\.assign\(IMG,imgs\);\s*baseKey='';probeKey='';heatStats=null;", app_js) is not None)
-check("启动最多等 1.2 s 真建筑，超时先画兜底城市", "loadBuildings().then(once);setTimeout(once,1200);" in app_js)
-# 真建筑晚到时分几个 task 换（轮廓 → 栅格 → 影像 → 一帧内换上），动画不整段卡住；栅格和影像都先建好再交给 rebuildWorld
+check("rebuildWorld clears the imagery cache, basemap signature and heat stats", re.search(r"function rebuildWorld\(nw,g,imgs\)\{\s*W=nw;G=g\|\|buildGrids\(nw\);WX\.rebind\(W,G\);\s*for\(const k of Object\.keys\(IMG\)\)delete IMG\[k\];\s*if\(imgs\)Object\.assign\(IMG,imgs\);\s*baseKey='';probeKey='';heatStats=null;", app_js) is not None)
+check("start-up waits at most 1.2 s for real buildings, then draws the fallback city", "loadBuildings().then(once);setTimeout(once,1200);" in app_js)
+# Late-arriving real buildings are swapped in over several tasks (footprints → rasters → imagery → swapped within one frame) so the animation never stalls; rasters and imagery are built before rebuildWorld gets them
 lb_code = no_comments(lb_src)
-check("loadBuildings 分 task 换世界：3 次 await nextTask()，栅格和影像先建好再 rebuildWorld(nw,g,imgs)",
+check("loadBuildings swaps the world over several tasks: 3 × await nextTask(), rasters and imagery built before rebuildWorld(nw,g,imgs)",
       lb_code.count("await nextTask();") == 3 and "const g=buildGrids(nw);" in lb_code and "renderImagery(nw," in lb_code
       and lb_code.find("buildGrids(nw)") < lb_code.find("renderImagery(nw,") < lb_code.find("rebuildWorld(nw,g,imgs)"))
-check("反向：loadBuildings 里没有不带预建栅格的 rebuildWorld(nw)", "rebuildWorld(nw)" not in lb_code)
-# 天气栅格只在 start() 里建一次：boot 里先建（兜底城市上）会在真建筑到了之后被 WX.rebind 扔掉重建
+check("negative: loadBuildings has no rebuildWorld(nw) without pre-built rasters", "rebuildWorld(nw)" not in lb_code)
+# Weather rasters are built once, in start(): building them earlier in boot (on the fallback city) would be thrown away and rebuilt by WX.rebind when real buildings arrive
 bt = re.search(r"function boot\(\)\{.*?\n\}\n", app_js, re.S)
 bt_code = no_comments(bt.group(0) if bt else "")
 pre_start = bt_code[:bt_code.find("const start=")] if "const start=" in bt_code else bt_code
-check("天气栅格在 start() 里建：if(WX.kind!==S.wx)WX.set(S.wx)", "const start=()=>{if(WX.kind!==S.wx)WX.set(S.wx);" in bt_code)
-check("反向：boot 在 start() 之前不调 WX.set（不在兜底城市上白建一次高温栅格）", bool(bt) and "WX.set(" not in pre_start)
-# 反向断言（注入）：数据里的楼名只画在 canvas 上，不进 HTML
+check("weather rasters are built in start(): if(WX.kind!==S.wx)WX.set(S.wx)", "const start=()=>{if(WX.kind!==S.wx)WX.set(S.wx);" in bt_code)
+check("negative: boot does not call WX.set before start() (no wasted heat raster on the fallback city)", bool(bt) and "WX.set(" not in pre_start)
+# Negative assertion (injection): building names from the data are only drawn on canvas, never put into HTML
 BASE_JS = (SRC / "js" / "2-basemap.js").read_text(encoding="utf-8")
-check("反向：楼名只用 fillText 画，1-world / 2-basemap 里没有 innerHTML", "innerHTML" not in WORLD_JS + BASE_JS and "c.fillText(t,px,py)" in BASE_JS)
-# 真城市里 Little La Trobe / A'Beckett 只在真路网有的那段（STREET_SPAN）标街名，Swanston 以东的真楼上不压「A'BECKETT ST」
-check("街名注记只标在真路网有的那段：drawLabels 按 W.real && STREET_SPAN 跳过",
+check("negative: building names are drawn only with fillText; no innerHTML in 1-world / 2-basemap", "innerHTML" not in WORLD_JS + BASE_JS and "c.fillText(t,px,py)" in BASE_JS)
+# In the real city, Little La Trobe / A'Beckett are labelled only on the stretch the real network has (STREET_SPAN), so no "A'BECKETT ST" over the real buildings east of Swanston
+check("street labels only on the stretch the real network has: drawLabels skips by W.real && STREET_SPAN",
       "real=W.real&&STREET_SPAN[st.id]" in BASE_JS and "if(real&&!(u>real[0]&&u<real[1]))continue;" in BASE_JS
       and "const STREET_SPAN={llatrobe:[-185,-15],abeckett:[-Infinity,-15]};" in WORLD_JS)
 
-# 4. 反向断言（秘密）：源码里没有 key / token 形状的字符串
-check("源码里没有 key / token", not re.search(r"(sk-[A-Za-z0-9]{16,}|api[_-]?key\s*[:=]|Bearer\s+[A-Za-z0-9])", JS + BODY, re.I))
+# 4. Negative assertion (secrets): no key / token-shaped strings in the source
+check("no key / token in the source", not re.search(r"(sk-[A-Za-z0-9]{16,}|api[_-]?key\s*[:=]|Bearer\s+[A-Za-z0-9])", JS + BODY, re.I))
 
-# 5. 四步流程都在
+# 5. All workflow steps present
 steps = re.findall(r'data-ui="(\d)"', BODY)
-check("stepper 有 00–05 六步（路况总览 → 配置施工 → 仿真评估 → 影响分析 → 比较方案 → 确认导出）", steps == ["0", "1", "2", "3", "4", "5"], str(steps))
+check("the stepper has six steps 00–05 (Overview → Configure → Simulate → Impact → Compare → Export)", steps == ["0", "1", "2", "3", "4", "5"], str(steps))
 
-# 6. 六种天气：每种都有颜色、图标、图例、影响说明（对比结果、复现种子是写死的假数，T20 删了）
+# 6. Six weather types: each has a colour, icon, legend and impact note (the comparison results and reproduction seeds were hard-coded fake numbers and have been removed)
 for k in WX_KINDS:
     ok = all(re.search(pat, JS, re.S) for pat in [
         rf"WX_META=\{{.*?\b{k}:\{{label:", rf"WX_ICON=\{{.*?\b{k}:'", rf"const LEG=\{{.*?\b{k}:\{{t:",
         rf"const IMPACT=\{{.*?\b{k}:\["])
-    check(f"天气 {k} 的配置齐全", ok)
+    check(f"weather {k} is fully configured", ok)
 
-# 7. 反向（T20）：安全分、修复前后对比表、复现种子、预期冲突曲线这些按天气查表的假数都删了
-check("没有 RESULTS / SEEDS / PROFILE 查表", not re.search(r"\bconst (RESULTS|SEEDS|PROFILE)=", JS))
+# 7. Negative: the per-weather lookup-table fake numbers (safety score, before/after table, reproduction seeds, expected conflict curve) are all gone
+check("no RESULTS / SEEDS / PROFILE lookup tables", not re.search(r"\bconst (RESULTS|SEEDS|PROFILE)=", JS))
 
-# 8. 方案 v2 的几何和文案对得上：护栏西移 8 m、收窄 0.9 m、无障碍通道 1.8 m、VMS 上游移 80 m
+# 8. Layout v2 geometry matches its copy: barriers 8 m west, 0.9 m narrower, accessible path 1.8 m, VMS moved 80 m upstream
 lay = {m.group(1): dict((k, float(v)) for k, v in re.findall(r"(\w+):(-?[\d.]+)", m.group(2)))
        for m in re.finditer(r"\b(before|after):\{([^}]*)\}", JS.split("const LAYOUTS=")[1].split(";")[0])}
 b, a = lay.get("before", {}), lay.get("after", {})
-check("Δ1 护栏西移 8 m", b and a and a["bx0"] - b["bx0"] == -8 and a["bx1"] - b["bx1"] == -8)
-check("Δ1 护栏收窄 0.9 m", b and a and abs((a["by"] - b["by"]) + 0.9) < 1e-9)
-check("Δ3 人行通道 1.1 m → 1.8 m", b and a and abs(abs(b["hoard"] + 10.5) - 1.1) < 1e-9 and abs(abs(a["hoard"] + 10.5) - 1.8) < 1e-9)
-check("Δ4 VMS-1 上游移 80 m", b and a and a["vms"] - b["vms"] == 80)
+check("Δ1 barriers moved 8 m west", b and a and a["bx0"] - b["bx0"] == -8 and a["bx1"] - b["bx1"] == -8)
+check("Δ1 barriers 0.9 m narrower", b and a and abs((a["by"] - b["by"]) + 0.9) < 1e-9)
+check("Δ3 pedestrian path 1.1 m → 1.8 m", b and a and abs(abs(b["hoard"] + 10.5) - 1.1) < 1e-9 and abs(abs(a["hoard"] + 10.5) - 1.8) < 1e-9)
+check("Δ4 VMS-1 moved 80 m upstream", b and a and a["vms"] - b["vms"] == 80)
 
-# 9. 中英切换：静态文案都带 data-zh，JS 里用 L(英, 中) 的地方两边都有字
-check("body.html 至少 30 处 data-zh 译文", len(re.findall(r"data-zh[-=]", BODY)) >= 30)
+# 9. EN/ZH toggle: static copy carries data-zh, and every L(en, zh) in the JS has text on both sides
+check("body.html has at least 30 data-zh translations", len(re.findall(r"data-zh[-=]", BODY)) >= 30)
 bad = [m.group(0)[:60] for m in re.finditer(r"\bL\('([^']*)','([^']*)'\)", JS) if not m.group(1) or not m.group(2)]
-check("L('英','中') 没有空字符串", not bad, str(bad[:3]))
+check("L('en','zh') has no empty strings", not bad, str(bad[:3]))
 cjk = len(re.findall(r"[一-鿿]", JS))
-check(f"JS 里有中文文案（{cjk} 个汉字）", cjk > 800)
+check(f"the JS has Chinese copy ({cjk} CJK characters)", cjk > 800)
 
-# 10. 页面里没有写死 localhost（线上冒烟 check --e2e 也查这一条）
-check("没有写死 localhost", "localhost" not in PAGE)
+# 10. No hard-coded localhost in the page (the live smoke test check --e2e checks this too)
+check("no hard-coded localhost", "localhost" not in PAGE)
 
-# 11. 部署配置：纯静态（只托管 public/，没有 Worker 代码 / 绑定），deploy.sh 调得到 npm run deploy
+# 11. Deployment config: purely static (serves public/ only, no Worker code / bindings); deploy.sh can call npm run deploy
 import json  # noqa: E402
 wr_txt = (ROOT / "wrangler.jsonc").read_text(encoding="utf-8")
 wr = json.loads(re.sub(r"(?m)^\s*//.*$|\s//[^\"\n]*$", "", wr_txt))
-check("wrangler.jsonc 用 assets 托管 public/", wr.get("assets", {}).get("directory") == "public")
-check("wrangler.jsonc 是纯静态：没有 main / durable_objects / vars", not any(k in wr for k in ("main", "durable_objects", "vars", "kv_namespaces")))
+check("wrangler.jsonc serves public/ via assets", wr.get("assets", {}).get("directory") == "public")
+check("wrangler.jsonc is purely static: no main / durable_objects / vars", not any(k in wr for k in ("main", "durable_objects", "vars", "kv_namespaces")))
 pkg = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
-check("package.json 的 deploy 是 wrangler deploy", pkg.get("scripts", {}).get("deploy") == "wrangler deploy")
-check("反向断言：部署配置里没有 token / account_id", not re.search(r"api[_-]?token|account_id|CLOUDFLARE_", wr_txt, re.I))
+check("the package.json deploy script is wrangler deploy", pkg.get("scripts", {}).get("deploy") == "wrangler deploy")
+check("negative: no token / account_id in the deployment config", not re.search(r"api[_-]?token|account_id|CLOUDFLARE_", wr_txt, re.I))
 
-# T21 叠加检查（8-clash.js，D-0929-2011 ②）：登记表从同源 /api/ 取，数全由 be.clash / be.stagger 算；不可信时不显示负数
+# Overlapping-works check (8-clash.js, docs/decisions.md D-0929-2011 ②): the register comes from the same-origin /api/, every number from be.clash / be.stagger; no negative numbers shown when unreliable
 CLASH = (SRC / "js" / "8-clash.js").read_text(encoding="utf-8")
-check("T21 登记表走 /api/public/js/worksites.js，数由 BE.api.clash / stagger 算",
+check("clash check: the register comes via /api/public/js/worksites.js, numbers from BE.api.clash / stagger",
       "import('/api/public/js/worksites.js')" in CLASH and "BE.api.clash(" in CLASH and "BE.api.stagger(" in CLASH)
-check("T21 flags.reliable = false 时写「≈ 0 · 结果不可信」（中英）",
+check("clash check: flags.reliable = false shows \"≈ 0 · result not reliable\" (EN and ZH)",
       "!r.flags.reliable" in CLASH and "result not reliable" in CLASH and "结果不可信" in CLASH)
-check("T21 两种 ≈ 0 分开写：negative_delay 说基线超通行能力，substitutes 说同一走廊；错开前看 best.reliable",
+check("clash check: the two kinds of ≈ 0 are worded separately: negative_delay says the baseline is over capacity, substitutes says same corridor; staggering checks best.reliable",
       "r.flags.negative_delay?" in CLASH and "r.flags.substitutes?" in CLASH and "same corridor" in CLASH and "同一走廊" in CLASH and "b&&!b.reliable" in CLASH)
-check("T21 第 3 步挂上叠加检查（clashMount）、地图画那处施工（clashDraw）", "clashMount();" in app_js and "clashDraw();" in app_js)
+check("clash check: mounted on step 3 (clashMount), the map draws the other works (clashDraw)", "clashMount();" in app_js and "clashDraw();" in app_js)
 raw_title = [x for x in interpolations(CLASH) if "${" not in x and re.search(r"\.(title|name)\b", x) and "esc(" not in x]
-check("T21 反向断言：登记表的标题 / 路名进 HTML 都过 esc()", not raw_title and "esc(o.title)" in CLASH, str(raw_title[:3]))
+check("clash check, negative: register titles / road names go through esc() before entering HTML", not raw_title and "esc(o.title)" in CLASH, str(raw_title[:3]))
 
-# 9. T23 方案对比 · 选定 · 导出（src/js/8-compare.js）
+# 9. Plan comparison · selection · export (src/js/8-compare.js)
 CMP = (SRC / "js" / "8-compare.js").read_text(encoding="utf-8")
 cmp_html = re.sub(r"/\* pure:begin.*?/\* pure:end \*/", "", CMP, flags=re.S)
 cmp_html = "\n".join(ln for ln in cmp_html.splitlines() if "toast(" not in ln)
 cmp_unsafe = unsafe_in(cmp_html)
-check("T23：方案名称、改法、路名进 HTML 模板都过 esc()", not cmp_unsafe, str(cmp_unsafe[:4]))
+check("compare: plan names, changes and road names in HTML templates all go through esc()", not cmp_unsafe, str(cmp_unsafe[:4]))
 cmp_loads = re.findall(r"(?:import|fetch)\('([^']+)'\)", CMP)
-check("T23：只取同源的 /api/public/js/pack.js 和 explain.js", sorted(cmp_loads) == ["/api/public/js/explain.js", "/api/public/js/pack.js"], str(cmp_loads))
-check("T23：改法说明和纯文字执行包用 textContent 写", ".textContent=r?cmpWhat(r):''" in CMP and "pre.textContent=txt" in CMP)
-check("T23：排版版执行包只经 cmpDocHTML（里面每个字符串过 esc()，compare_glue.mjs 反向断言）", CMP.count("innerHTML=doc") == 1 and "doc=cmpDocHTML(" in CMP)
-check("T23 反向断言：用户写的理由不拼进 HTML（只用 .value）", "ta.value=CP.reason" in CMP and not re.search(r"\$\{[^}]*reason", cmp_html))
-check("T23：页面上写明租金是假设值（中英）", "day rates and stock are assumptions" in CMP and "日租价和库存件数是假设值" in CMP)
-check("T23：由人拍板的字样在（不是工具替人选）", "a person decides" in CMP and "由人拍板" in CMP)
-check("T23：挂在第 4 步顾问下面（engPanel4 有 #cmp4，engRender4 调 cmpRender）", 'id="cmp4"' in ENG and "cmpRender();" in ENG)
-check("T23：方案名称（可能是顾问给的 kind）过 esc()", "esc(cmpLabel(r))" in CMP)
+check("compare: loads only the same-origin /api/public/js/pack.js and explain.js", sorted(cmp_loads) == ["/api/public/js/explain.js", "/api/public/js/pack.js"], str(cmp_loads))
+check("compare: change descriptions and the plain-text execution pack are written with textContent", ".textContent=r?cmpWhat(r):''" in CMP and "pre.textContent=txt" in CMP)
+check("compare: the formatted execution pack goes only through cmpDocHTML (every string in it goes through esc(); negative assertions in compare_glue.mjs)", CMP.count("innerHTML=doc") == 1 and "doc=cmpDocHTML(" in CMP)
+check("compare, negative: the reason the user types is not concatenated into HTML (.value only)", "ta.value=CP.reason" in CMP and not re.search(r"\$\{[^}]*reason", cmp_html))
+check("compare: the page states that hire rates are assumptions (EN and ZH)", "day rates and stock are assumptions" in CMP and "日租价和库存件数是假设值" in CMP)
+check("compare: says a person decides (the tool does not choose for them)", "a person decides" in CMP and "由人拍板" in CMP)
+check("compare: mounted under the step 4 advisor (engPanel4 has #cmp4, engRender4 calls cmpRender)", 'id="cmp4"' in ENG and "cmpRender();" in ENG)
+check("compare: plan names (possibly the advisor's kind) go through esc()", "esc(cmpLabel(r))" in CMP)
 probe_cmp = "`<b>${cmpLabel(r)}</b><i>${r.kind}</i>`"
-check("自检：T23 去掉 esc() 会被抓到", len(unsafe_in(probe_cmp)) >= 1)
+check("self-check: removing esc() in the comparison is caught", len(unsafe_in(probe_cmp)) >= 1)
 
-# 10. T43 决赛亮点（lead 派单）：①对比表标出「结果一样、却多花钱」的那套 ②加一行「和附近施工叠加」（③「比只写 ROADWORK AHEAD 少排多少」由 VMS 试验台（qjm 交接单写 T42，GitHub 上 T42 已被 #121 用，改 T45）包含，按交接单不做）
-#     只把引擎已有的数摆出来：页面不自己算、源码里不写死验收时看到的数
+# 10. Finals highlights (assigned by the team lead): ① the comparison table flags the plan with "the same result but costs more"; ② a "nearby works" clash row (③ "how much shorter than ROADWORK AHEAD alone" is covered by the VMS test bench, so not done here, per @jinmingq's handoff note)
+#     Only shows numbers the engine already has: the page computes nothing itself and the source hard-codes none of the numbers seen during acceptance
 CLASHJS = (SRC / "js" / "8-clash.js").read_text(encoding="utf-8")
 T43_SRC = JS + "\n" + BODY + "\n" + (SRC / "styles.css").read_text(encoding="utf-8")
 t40_lits = [x for x in ["1,250", "1250", "33,015", "33015", "25,719", "25719"] if x in T43_SRC or x in PAGE] \
     + re.findall(r"(?<![\w.])725(?!\d)", T43_SRC + PAGE)
-check("T43 反向断言：源码和打包页里没有验收时的数（1,250 / 33,015 / 25,719 / 725），都从引擎来", not t40_lits, str(t40_lits[:4]))
-check("T43①：「结果和 A 一样 · 多花 A$…」由 cmpSameAs(CP.rows) 逐列算，字母和金额都不写死（中英成对）",
+check("finals, negative: no acceptance-run numbers (1,250 / 33,015 / 25,719 / 725) in the source or bundle; they all come from the engine", not t40_lits, str(t40_lits[:4]))
+check("finals ①: \"Same result as A · +A$…\" is computed column by column by cmpSameAs(CP.rows), with neither letter nor amount hard-coded (EN/ZH paired)",
       "dup=cmpSameAs(CP.rows)" in CMP and "function cmpSameAs(rows){" in CMP and "String.fromCharCode(65+d.of),amt=fmtN(d.extra)" in CMP
       and "L(`Same result as ${a} · +A$${amt}`,`结果和 ${a} 一样 · 多花 A$${amt}`)" in CMP and 'class=\\"cmp-dup\\"' in CMP.replace('"', '\\"'))
 t40_same = CMP[CMP.index("function cmpSameAs(rows){"):CMP.index("function cmpSpan(")]
-check("T43① 反向断言：不是只认 B 列的特判（cmpSameAs 里没有 rows[1] / 'B' / i===1）",
+check("finals ①, negative: not a special case for column B (no rows[1] / 'B' / i===1 in cmpSameAs)",
       not re.search(r"rows\[1\]|'B'|===1\b", t40_same))
-check("T43②：叠加一行用 8-clash.js 的同一挑法（clashPick）+ BE.api.clash 逐套算；表先出、这一行后补；无重叠写 none、算失败写 — 并 console.warn",
+check("finals ②: the clash row uses the same pick as 8-clash.js (clashPick) + BE.api.clash per plan; the table renders first and this row fills in later; no overlap shows none, a failure shows — and console.warn",
       "async function clashPick(cur,alive){" in CLASHJS and "await clashPick(clashCur(),()=>seq===CL.seq)" in CLASHJS
       and "await clashPick(cur,alive)" in CMP and "BE.api.clash(r.plan.worksites[0],x.ws)" in CMP and "${cmpClashRow(rc)}" in CMP
       and "cmpUpdate();cmpExplainUpdate();cmpClashUpdate();" in CMP and "L('none','无')" in CMP
       and "console.warn('compare: clash check failed for plan'" in CMP and "console.warn('compare: nearby works check failed'" in CMP
       and "L('Nearby works','和附近施工叠加')" in CMP)
-check("T43②：进过 03 就沿用它挑好的那处施工（CL.other），没进过就按同一规则现挑",
+check("finals ②: if 03 has been visited, reuse the works it picked (CL.other); otherwise pick now with the same rule",
       "in3=CL.m&&CL.key===JSON.stringify(cur)&&!CL.busy&&!CL.err;" in CMP and "x3=in3?cmpClashOther(CL.other,CL.st):null" in CMP
       and "if(in3)x=x3;" in CMP)
-# T46（lead 09-30 拍板，跟 #123）：03 点了「错开 N 天」，04 的叠加一行跟 03 走 —— 用 03 的 stagger().worksite，行名写挪后的日期 + 已错开 N 天
-check("T46：04 叠加一行用 03 错开后的同一个 worksite（cmpClashOther 读 CL.st 的可信 best），缓存键带上 N，03 错开 / 撤掉后 04 重算",
+# Decided by the team lead on 30 Sep (follows #123): after "Stagger N days" in 03, 04's clash row follows 03, using 03's stagger().worksite; the row name shows the shifted date + "staggered N days"
+check("04's clash row uses the same worksite as 03 after staggering (cmpClashOther reads the reliable best from CL.st); the cache key includes N, so 04 recomputes when 03 staggers / undoes it",
       "function cmpClashOther(x,st){" in CMP and "b&&b.reliable&&st.worksite?{...x,ws:st.worksite,days:b.days" in CMP
       and "key=CP.key+(x3&&x3.days!=null?`|+${x3.days}`:'')" in CMP and "if(CP.cl&&CP.cl.key===key)return;" in CMP
       and "CP.cl.key===CP.key" not in CMP)
-check("T46：行名写挪后的日期 + 「已错开 N 天」/ staggered N days（中英成对，cmpClashWhen 在 pure 段）；错开算完时人已在 04 也跟上（clashStagger 结尾 cmpRender()）",
+check("the row name shows the shifted date + \"staggered N days\" (EN/ZH paired, cmpClashWhen in the pure block); if the user is already on 04 when staggering finishes, it updates too (cmpRender() at the end of clashStagger)",
       "function cmpClashWhen(x,zh,hour){" in CMP and "`已错开 ${n} 天`:`staggered ${n} day${Math.abs(n)===1?'':'s'}`" in CMP
       and "${cmpClashWhen(x,LANG.cur==='zh',engHour)}" in CMP
       and CMP.index("function cmpClashWhen(") < CMP.index("/* pure:end */")
       and "CL.stBusy=false;clashRender();\n  cmpRender();" in CLASHJS)
 
-# 11. T44（@unicornnnnnny 09-30）：01 施工信息 / 设备诱导不放引擎四个数；02 仿真的冲突 / 严重 / 急刹在地图上标出来
+# 11. @unicornnnnnny, 30 Sep: 01 works info / sign guidance no longer show the engine's four numbers; 02 marks conflicts / critical / harsh braking from the simulation on the map
 GRIDJS = (SRC / "js" / "4b-grid.js").read_text(encoding="utf-8")
-check("T44：01 施工信息 / 设备诱导两个页签不再放「引擎 · 真实 CBD 车流」四个数，只在没选街 / 引擎算不了时留一行提示",
+check("01 works info / sign guidance tabs no longer show the four \"engine · real CBD traffic\" numbers; only a one-line hint when no street is chosen / the engine cannot compute",
       "engOutSec()" not in app_js and app_js.count("engStateSec()") == 2 and "function engStateHTML(){" in ENG and "['engState',engStateHTML]" in ENG)
-check("T44：4×4 仿真的急刹和冲突都带位置记进 sim.events（冲突 TTC < 1.5 s、严重 < 1.0 s，只算 2×2）；地图 drawEvents 画出来",
+check("the 4×4 simulation records harsh braking and conflicts with positions in sim.events (conflict TTC < 1.5 s, critical < 1.0 s, 2×2 only); the map draws them with drawEvents",
       "kind:'harsh'" in GRIDJS and "kind:'conflict'" in GRIDJS and "ttc:1.5,ttcCrit:1" in GRIDJS and "if(e.kind==='harsh'){" in app_js
       and "const keep=sim.isGrid?EV_KEEP_GRID:25" in app_js)
-check("T44 反向断言：02 面板急刹写的阈值来自 4×4 仿真自己的 GRID_P.harsh（3.5），不再写旧场景的 4.2",
+check("negative: the harsh-braking threshold in the 02 panel comes from the 4×4 simulation's own GRID_P.harsh (3.5), no longer the old scene's 4.2",
       "-GRID_P.harsh/GRID_K" in app_js and "grid?fmtN(-GRID_P.harsh/GRID_K*10)/10:'4.2'" in app_js)
-check("T44：02 面板有图例说明地图和时间轴上的标记（中英成对）；冲突 / 严重也画成菱形，不和信号灯的圆点混",
+check("the 02 panel has a legend explaining the map and timeline markers (EN/ZH paired); conflicts / critical are also diamonds, not confused with signal dots",
       "L(`map: last ${EV_KEEP_GRID} s · timeline: share of vehicles, per 10 min`,`地图标最近 ${EV_KEEP_GRID} 秒 · 时间轴：每 10 分钟车辆占比`)" in app_js and 'class="eng-legend ev-legend"' in app_js
       and "evDiamond(px,py,sim.isGrid?(e.sev===2?7.5:6.5)" in app_js and "ev-dot" not in app_js)
-check("T44：02 时间轴改成每 10 分钟一根的 100% 堆叠柱（红 = 急刹或卷入冲突的车占比，灰 = 其余），两段都标百分比；其他步骤按最忙的一分钟缩放（不再按每分钟 3 次封顶）",
+check("the 02 timeline is now a 100% stacked bar per 10 minutes (red = share of vehicles with harsh braking or in a conflict, grey = the rest), both segments labelled with percentages; other steps scale to the busiest minute (no longer capped at 3 per minute)",
       "function histShare(c,sim,top,bot){" in app_js and "hit/seen" in app_js and "pct(1-p)" in app_js
       and "Math.min(1,v/3)" not in app_js[app_js.index("function drawHist(){"):app_js.index("function histShare(")] and "const mx=Math.max(3,top1)" in app_js
       and "this.mSeen=new Float32Array(60);this.mHit=new Float32Array(60);" in GRIDJS and "mBy" not in GRIDJS + app_js)
-check("T44：02 的 4×4 仿真按时钟记分钟（clock0 = 时钟 − 仿真秒数），时间轴柱子和时钟指针对得上",
+check("the 02 4×4 simulation records minutes by clock time (clock0 = clock − simulated seconds), so timeline bars line up with the clock hand",
       "s.clock0=CLOCK_EVENT-s.t;return s;" in app_js and "g.clock0=S.clock-g.t;" in app_js)
 
-# 12. T49（lead D-0930「SUMO 为主，引擎退幕后」）：SUMO 覆盖的方案（Lonsdale 这段、封 1 条道）在 04 / 05、03 附近施工、VMS 试验台
-#     不放引擎的交通结果数；渲染出来的页面由 compare_glue.mjs / vlab_glue.mjs 反向断言，这里只查接线
+# 12. SUMO primary, engine behind the scenes (docs/decisions.md D-1001-0045): plans SUMO covers (this stretch of Lonsdale, 1 lane closed) show no engine traffic results in 04 / 05, 03 nearby works or the VMS test bench;
+#     the rendered page is checked by negative assertions in compare_glue.mjs / vlab_glue.mjs; this file only checks the wiring
 LAB = (SRC / "js" / "6d-vmslab.js").read_text(encoding="utf-8")
 CSS = (SRC / "styles.css").read_text(encoding="utf-8")
-check("T49：SUMO 方案的判断和 5-app.js 的 sumoImpactHTML 同一口径（SUMO_LINK、不全封、封 1 条道）",
+check("the SUMO-plan test matches sumoImpactHTML in 5-app.js (SUMO_LINK, not a full closure, 1 lane closed)",
       "function suPlan(){return typeof SUMO_LINK==='string'&&EP.link===SUMO_LINK&&!EP.all&&EP.lanes===1;}" in CMP
       and "if(EP.link!==SUMO_LINK||EP.all||EP.lanes!==1)return'';" in app_js)
-check("T49：04 用 sumo-client.js 的 runOptions（经 5-app.js 的 sumoClient() 加载、按有没有这个方法判断），p 来自引擎读牌、带上 SU.seed；不另 import",
-      "await sumoClient()" in CMP and "typeof cli.runOptions==='function'" in CMP and "return fn(ask,{seed});" in CMP  # T50：经 cmpSuJob（缓存 + sumoLane）
+check("04 uses runOptions from sumo-client.js (loaded via sumoClient() in 5-app.js, feature-detected), p from the engine's sign reading, with SU.seed; no separate import",
+      "await sumoClient()" in CMP and "typeof cli.runOptions==='function'" in CMP and "return fn(ask,{seed});" in CMP  # via cmpSuJob (cache + sumoLane)
       and "const ask=cmpSuAsk(CP.rows);" in CMP and "function cmpSuAsk(rows){return(rows||[]).map(r=>({id:r&&r.id,p:r?cmpP(r.s):null}))" in CMP
       and "cmpUpdate();cmpExplainUpdate();cmpClashUpdate();cmpSuUpdate();" in CMP)
-check("T49：没有 runOptions / 失败 → 写原因（中英成对），不拿引擎的数顶上；报错文字进 HTML 前过 esc()",
+check("no runOptions / failure → shows the reason (EN/ZH paired), with no engine numbers standing in; error text goes through esc() before HTML",
       "this SUMO client has no runOptions yet" in CMP and "SUMO 客户端还没有 runOptions" in CMP and "${esc(su.err)}" in CMP and "${esc(s.why)}" in CMP)
-check("T49：SUMO 方案 04 表的交通几行换成 cmpSuRows（会绕行的司机 / 09:00 排队 / 每车 / 总延误 / 绕行车数 / 电车公交、行人 SUMO 暂不覆盖）",
+check("on SUMO plans the traffic rows of the 04 table are replaced by cmpSuRows (drivers who detour / 09:00 queue / per vehicle / total delay / detouring vehicles / trams, buses and pedestrians not covered by SUMO)",
       "${su?cmpSuRows(rc):mRows.map(" in CMP and "L('Drivers who detour (AI sign reading)','AI 读牌 → 会绕行的司机')" in CMP
       and "L('not covered by SUMO','SUMO 暂不覆盖')" in CMP and "L('SUMO computing the options in the cloud','SUMO 正在云端计算这几套方案')" in CMP)
-check("T49：p 一样的两套写「交通效果和 A 相同 · 模型不评价箭头板的安全作用 · 多 A$…」（中性样式，不是红色的「白花钱」）",
+check("two plans with the same p show \"same traffic effect as A · models don't value the arrow board's safety role · +A$…\" (neutral style, not the red \"wasted money\")",
       "交通效果和 ${a} 相同 · 模型不评价箭头板的安全作用 · 多 A$${amt}" in CMP and "models don't value the arrow board's safety role" in CMP
       and "<i class=\"cmp-dup\" data-eq>" in CMP and ".cmp-table .cmp-dup[data-eq]{" in CSS)
-check("T49：SUMO 方案不要 AI 解读（explain.js 读引擎的数），藏起来并说明原因",
+check("no AI explanation on SUMO plans (explain.js reads engine numbers); hidden, with the reason stated",
       "if(CP.busy||!CP.rows.length||suPlan()){" in CMP and "No AI explanation for this plan" in CMP and "这套方案不显示 AI 解读" in CMP)
-check("T49：03 附近施工在 SUMO 方案上走 clashSuHTML（叠加影响 SUMO 暂不覆盖、建议错开天数），不出引擎的错开按钮；其他方案标「引擎估算」",
+check("03 nearby works on SUMO plans goes through clashSuHTML (combined impact not covered by SUMO, suggested stagger days), with no engine stagger button; other plans are labelled \"engine estimate\"",
       "if(suPlan())return clashSuHTML();" in CLASH and "function clashSuHTML(){" in CLASH and "叠加影响 SUMO 暂不覆盖" in CLASH
       and "!(x.r.cost>0)||suPlan())return'';" in CLASH and "引擎估算。叠加冲突" in CLASH and "L('engine estimate','引擎估算')" in CMP)
-check("T49：VMS 试验台在 SUMO 方案上走 vlSuHTML（会绕行的比例、绕行信号最强、效果由第 2 步 SUMO 算，不试 DELAYS N MIN）；其他方案标「引擎估算」",
+check("the VMS test bench on SUMO plans goes through vlSuHTML (detour share, strongest detour signal, effect computed by SUMO in step 2, no DELAYS N MIN); other plans are labelled \"engine estimate\"",
       "if(suPlan())return vlSuHTML();" in LAB and "function vlBestShare(rows){" in LAB and "(suPlan()?vlBestShare:vlBest)(VL.rows)" in LAB
       and "for(const c of vlCands(b,suPlan())){" in LAB and "if(dm>=2&&!su)" in LAB
       and "由第 2 步的 SUMO 计算" in LAB and "Each row: engine estimate on this plan" in LAB)
 t49_lits = [x for x in ["918", "509", "10,493", "10493", "18,693", "18693", "33,015", "33015"] if x in CMP + CLASH + LAB]
-check("T49 反向断言：04 / 03 / 试验台源码里没有线上看到的引擎数（918 / 509 / 10,493 / 18,693 / 33,015）", not t49_lits, str(t49_lits))
+check("negative: no engine numbers seen live (918 / 509 / 10,493 / 18,693 / 33,015) in the 04 / 03 / test-bench source", not t49_lits, str(t49_lits))
 
-# 13. T48（@unicornnnnnny 10-01）：左上角换成团队最后定的 logo —— 「Ripple」跟主题的文字色（深色主题浅色字、浅色主题深色字），其余照原稿；嵌在页面里的 PNG
+# 13. @unicornnnnnny, 1 Oct: the top-left uses the team's final logo; "Ripple" takes the theme text colour (light text on dark, dark text on light), the rest follows the original artwork; PNGs embedded in the page
 CSS_ALL = (SRC / "styles.css").read_text(encoding="utf-8")
-check("T48：顶栏品牌区是新 logo（role=img、aria-label=RippleTwin），原来的圆圈图标和文字去掉了",
+check("the top-bar brand area is the new logo (role=img, aria-label=RippleTwin); the old circle icon and text are gone",
       '<span class="brand-logo" role="img" aria-label="RippleTwin"></span>' in BODY and "brand-name" not in BODY + CSS_ALL and ".brand>svg" not in CSS_ALL)
-check("T48：logo 两层都内嵌为 PNG（页面仍是单文件）：路 + Twin 照原稿；Ripple 是遮罩、用 --fg 填色，深浅主题自动跟着变",
+check("both logo layers are embedded PNGs (the page is still a single file): road + Twin follow the original artwork; Ripple is a mask filled with --fg, so it follows the dark/light theme",
       '.brand-logo{position:relative;display:block;width:148px;height:30px;background:url("data:image/png;base64,' in CSS_ALL
       and '--logo-ripple:url("data:image/png;base64,' in CSS_ALL and "background:var(--fg);-webkit-mask:var(--logo-ripple)" in CSS_ALL
       and "mask:var(--logo-ripple) left center/contain no-repeat}" in CSS_ALL)
 
-# 14. T49（@unicornnnnnny 10-01）：第 2 步镜头框住整个 4×4（16 个路口），不再只框施工处 2×2；「再点缩小」和 ⌖ 也回到 4×4
-check("T49：gridFly 用 gridFit() 框 16 个路口（S.sim.spec.junctions）+ 一圈斑马线余量，按 fitView 让开面板；没 spec 才退回 2×2",
+# 14. @unicornnnnnny, 1 Oct: the step 2 camera frames the whole 4×4 (16 junctions), not just the 2×2 at the works; "click again to zoom out" and ⌖ also return to the 4×4
+check("gridFly uses gridFit() to frame the 16 junctions (S.sim.spec.junctions) + a zebra-crossing margin, via fitView to avoid the panel; falls back to the 2×2 only without a spec",
       "function gridFit(){" in app_js and "S.sim.spec.junctions" in app_js and "return fitView(Math.min(...xs)-m,Math.max(...xs)+m,Math.min(...ys)-m,Math.max(...ys)+m,3);" in app_js
       and "const f=gridFit();if(f)flyTo(f[0],f[1],f[2],d);else flyTo((GRID_BOX.x0" in app_js and "function fitView(x0,x1,y0,y1,maxS){" in ENG)
 
-# 14. T50（@unicornnnnnny 10-01）：精细窗口（高清影像 / 楼房阴影）盖住第 2 步整个 4×4，不再一半落在矢量底图上
+# 14. @unicornnnnnny, 1 Oct: the fine window (high-resolution imagery / building shadows) covers the whole step 2 4×4, no longer half on the vector basemap
 wm = re.search(r"const WORLD=\{x0:(-?\d+),x1:(-?\d+),y0:(-?\d+),y1:(-?\d+)\};", WORLD_JS)
 wx0, wx1, wy0, wy1 = (int(v) for v in wm.groups()) if wm else (0, 0, 0, 0)
-check("T50：WORLD 盖住 16 个路口（x −195…401、y −300…9）外加一条街宽，边长能被 40 整除（CELL 2 / RISK_CELL 4 / 天气格 5、8）",
+check("WORLD covers the 16 junctions (x −195…401, y −300…9) plus one street width, with sides divisible by 40 (CELL 2 / RISK_CELL 4 / weather cells 5, 8)",
       bool(wm) and wx0 <= -195 - 30 and wx1 >= 401 + 30 and wy0 <= -300 - 30 and wy1 >= 9 + 30 and (wx1 - wx0) % 40 == 0 and (wy1 - wy0) % 40 == 0,
       str((wx0, wx1, wy0, wy1)))
-check("T50：精细窗口的街道补上 Exhibition St（x ≈ 401）和 Little Bourke St（y ≈ −300）",
+check("the fine window's streets add Exhibition St (x ≈ 401) and Little Bourke St (y ≈ −300)",
       "{id:'exhibition',name:'Exhibition St',zh:'展览街',axis:'v',c:402," in WORLD_JS and "{id:'lbourke',name:'Little Bourke St',zh:'小博克街',axis:'h',c:-300," in WORLD_JS)
 
-# 15. T51（@unicornnnnnny 10-01）：SUMO 方案的 04 表 / 05 卡片不再满屏「SUMO 暂不覆盖」—— 去掉电车公交、行人两行（表尾写「只含机动车」），
-#     叠加一行每格写「建议错开 N 天」；执行包（打印文档）照旧写明 SUMO 不覆盖电车公交和行人
-check("T51：04 表 SUMO 方案不拼电车公交 / 行人两行，表尾写 cars only / 只含机动车；叠加一行用 cmpSuStagger()",
+# 15. @unicornnnnnny, 1 Oct: the 04 table / 05 cards on SUMO plans are no longer full of "not covered by SUMO": the tram/bus and pedestrian rows are gone (the table footer says "cars only"),
+#     each cell of the clash row says "suggest staggering N days"; the execution pack (print document) still states that SUMO does not cover trams, buses or pedestrians
+check("the 04 table on SUMO plans omits the tram/bus and pedestrian rows, the footer says cars only (EN and ZH); the clash row uses cmpSuStagger()",
       "[L('Trams & buses','电车公交'),L('Pedestrians','行人')].map(" not in CMP and "around the works · cars only${" in CMP and "路网上算 · 只含机动车${" in CMP
       and "function cmpSuStagger(x){" in CMP and "x?cmpSuStagger(x):'…'" in CMP and "L('combined impact not covered by SUMO'" not in CMP)
-check("T51：05 卡片 SUMO 方案不放电车公交 / 行人两格；执行包照旧写明 SUMO 不覆盖（打印文档要写清楚）",
+check("05 cards on SUMO plans omit the tram/bus and pedestrian cells; the execution pack still states SUMO does not cover them (the print document must be explicit)",
       "${su?'':cell('transit'," in CMP and "trams, buses and pedestrians are not covered by SUMO. Hire: whole works period." in CMP)
 
 print(f"{passed} passed, {failed} failed")

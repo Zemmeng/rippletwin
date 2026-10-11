@@ -1,7 +1,7 @@
 /* sumo:begin */
 // Step 2 on the REAL network (T40): a replay of Eclipse SUMO runs on the CBD network built from OSM (network.json) with
 // SCATS weekday 08:00 flows — baked (/sumo/public/real/) or a live cloud run, both in the v2 replay format
-// (docs/contract.md §HTTP API): per scenario a manifest (vehicle table, signal heads, chunks, metrics) and chunks of
+// (docs/reference/interfaces.md §HTTP API): per scenario a manifest (vehicle table, signal heads, chunks, metrics) and chunks of
 // samples every sample_s (1 or 2 s) [i, lon×1e6, lat×1e6, angle°, speed cm/s] + every signal's state string + the works queue (m).
 // SumoReplay wears the same surface the page already draws from GridSim (4b-grid.js): isGrid, t, step(), all / agents,
 // signalHeads(), works(), stats, minute, risk … so drawAgents / drawJunctions / updateLive / gridPick need no SUMO branch.

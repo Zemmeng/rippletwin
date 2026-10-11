@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   Whole-CBD layer (T27, docs/arch/T26-T27-web-PRD.md §3). The fine window (WORLD: orthophoto, weather, the junction
+   Whole-CBD layer (T27, docs/hackathon/specs/T26-T27-web-PRD.md §3). The fine window (WORLD: orthophoto, weather, the junction
    micro-model) stays as it is. Around it the whole Hoddle Grid (+~150 m, CITY in 1-world.js) is drawn from real data:
    the real OSM vector basemap underneath (T35 — water, green space, land use, rail from OpenFreeMap's OpenMapTiles vector
    tiles, /roads/public/cbd/vectormap.json), then every building footprint (flat — no extrusion, no edge), then the road

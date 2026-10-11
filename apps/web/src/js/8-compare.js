@@ -85,7 +85,7 @@ function cmpWin(days,hours,zh){
   const d=Math.round(+days||0),h=Math.round(+hours||0);if(d<1||h<1)return'';
   return zh?`${d} 天 × ${h} 个高峰小时`:`${d} day${d===1?'':'s'} × ${h} peak hour${h===1?'':'s'}`;
 }
-// ---- T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan 04's traffic numbers come from SUMO, never the engine ----
+// ---- SUMO-primary mode (D-1001-0045): on the SUMO plan 04's traffic numbers come from SUMO, never the engine ----
 // The engine only reads each option's signs into p, the share of drivers who detour = 1 − the 'stay' route's share in the
 // option's summary (options() brief or run() summary; detour_share when there are no routes), to 0.1 % — SUMO's input. null = no reading
 function cmpP(s){
@@ -197,7 +197,7 @@ function cmpSuFoot(L){return L('Traffic figures come from SUMO (a model, not fie
 
 const CP={key:'',seq:0,busy:false,rows:[],src:'',pick:null,cl:null,by:'contractor',reason:'',mod:null,inv:null,invErr:null,loading:null,exKey:'',exSeq:0,exBusy:false,explain:null,exError:false,su:null};
 // T49: the plan SUMO covers (the Lonsdale demo works, one lane closed — as sumoImpactHTML in 5-app.js). On it no engine traffic
-// outcome is shown in 04 / 05, 03's nearby works or the VMS lab: SUMO's numbers, or 「SUMO 暂不覆盖」 where SUMO has none
+// outcome is shown in 04 / 05, 03's nearby works or the VMS lab: SUMO's numbers, or “not covered by SUMO” where SUMO has none
 function suPlan(){return typeof SUMO_LINK==='string'&&EP.link===SUMO_LINK&&!EP.all&&EP.lanes===1;}
 
 // Execution pack, AI explanation and inventory; all model text is rendered as textContent.
@@ -343,7 +343,7 @@ function cmpExplainRender(el){
   if(decide)decide.textContent=result?.decide||L('This is advice only. The person responsible chooses the plan and records why.','这只是建议，由负责人选择方案并记录理由。');
 }
 
-// ---- T49 (lead D-0930): 04 / 05 traffic numbers on the SUMO plan come from SUMO ----
+// ---- SUMO plan (D-1001-0045): 04 / 05 traffic numbers come from SUMO ----
 // Each option's p (cmpP: the engine's sign reading, behind the scenes) → the SUMO client's runOptions([{ id, p }…], { seed })
 // (sumo-client.js, T49-a; loaded by 5-app.js sumoClient(), feature-detected). Missing, failing or empty → '—' + the reason,
 // never engine numbers. CP.su = { key, busy, t0, job, res: { id: metrics | null } | null, err, src: { source, elapsedMs, why (the client's reason, labelled), seed, hour }, tick }

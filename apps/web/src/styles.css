@@ -331,7 +331,7 @@ input[type="range"]#vmsAt{width:100%;accent-color:var(--accent)}
 .eng-tr small{display:block;font:400 10.5px/1.4 var(--f-mono);margin-top:3px;white-space:normal}
 
 /* ============================================================
-   T14 liquid glass (docs/arch/T14-liquid-glass-PRD.md) — appearance only.
+   T14 liquid glass (docs/hackathon/specs/T14-liquid-glass-PRD.md) — appearance only.
    Desktop: the map fills the window and every panel floats over it as glass; .app's --safe-* say how much of the map
    the glass covers (js/7-glass.js keeps the view, scale bar and alert inside the rest). Refraction on .panel / .top
    comes from js/7-glass.js (liquid-glass.js by Deepika Rao, MIT); everything here is the frosted base it sits on.
@@ -689,7 +689,7 @@ input[type="range"]#vmsAt{accent-color:var(--sun)}
 .ai-why{font-size:11.5px;color:var(--fg-2);font-style:italic;overflow-wrap:anywhere}
 .ai-why:empty{display:none}
 .ai-note{margin:0;font-size:11px;line-height:1.4;color:var(--fg-3)}
-/* 6-step workbench (templates/workflow-preview): Back / Next at the foot, overview plan cards, evidence / check lists */
+/* 6-step workbench: Back / Next at the foot, overview plan cards, evidence / check lists */
 .nav-row{display:flex;gap:8px;align-items:stretch}
 .nav-row .btn{width:auto}
 .nav-row .nav-next{flex:1;min-width:0}

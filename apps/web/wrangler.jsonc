@@ -1,11 +1,13 @@
-// apps/web 的 Cloudflare 部署配置：纯静态页，只用 assets 托管 public/，没有 Worker 代码、没有 Durable Object。
-// 部署走 bash scripts/deploy.sh web（只有 DEPLOYER 能跑），它会调本目录的 npm run deploy。
+// Legacy standalone Cloudflare config for apps/web: a static page served from public/ with assets only, no Worker code,
+// no bindings. Production does not use it: apps/site serves this page at /web/public/ next to the engine, data and API.
+// A standalone copy has no engine or data behind it: it shows the engine-offline card over a procedural city. Deploy it with
+// bash scripts/deploy.sh web (DEPLOYER only), which runs npm run deploy in this directory.
 {
-  "name": "rippletwin",               // Worker 名 = workers.dev 链接前缀：rippletwin.<账号子域>.workers.dev
+  "name": "rippletwin",               // Worker name = workers.dev subdomain prefix: rippletwin.<account subdomain>.workers.dev
   "compatibility_date": "2026-08-01",
-  "workers_dev": true,                // 比赛期间开着拿 demo 链接
+  "workers_dev": true,                // kept on during the hackathon for a demo link
   "preview_urls": false,
   "assets": { "directory": "public" }
-  // 要绑正式域名时打开：
-  // "routes": [{ "pattern": "rippletwin.wawazhiliao.com", "custom_domain": true }]
+  // To bind a custom domain, uncomment and set your own hostname:
+  // "routes": [{ "pattern": "rippletwin.example.com", "custom_domain": true }]
 }
