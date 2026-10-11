@@ -1,46 +1,48 @@
-// Cloudflare Worker 配置（照 starters/web-worker/wrangler.jsonc；两个 Durable Object：LlmBudget 管大模型每日调用上限，WorksiteRegister 存施工登记表）
-// 部署归 DEPLOYER（hackathon.conf），bash scripts/deploy.sh all 先部署这个、再部署 site（site 用服务绑定 API 把 /api/* 转过来）
-// 🔒 key 不写在这里：npx wrangler secret put LLM_API_KEY（在本目录跑）。怎么打开大模型见 README「怎么接大模型」。详见 docs/deploy-cloudflare.md
+// Cloudflare Worker config. Two Durable Objects: LlmBudget enforces the daily LLM call cap, WorksiteRegister stores the worksite register
+// Deployed by the DEPLOYER (hackathon.conf): bash scripts/deploy.sh all deploys this Worker first, then site (site forwards /api/* here through the API service binding)
+// 🔒 The key is never written here: npx wrangler secret put LLM_API_KEY (run in this directory). To enable the LLM, see the README section "Status and re-enabling the LLM"; deployment: docs/architecture/deployment.md
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Worker 名 = apps/site/wrangler.jsonc 里 services[].service；改名两边一起改（config.test.mjs 查）。
-  // 叫 hackathon-api 不叫 api：lead 的 Cloudflare 账号里还有别的项目，免得撞名
+  // Worker name = services[].service in apps/site/wrangler.jsonc; rename both together (checked by config.test.mjs).
+  // Named hackathon-api rather than api to avoid clashing with other projects in the same Cloudflare account
   "name": "hackathon-api",
   "main": "src/worker.js",
   "compatibility_date": "2026-08-01",
 
-  // 不开 hackathon-api.<子域>.workers.dev：只让网页经 site 的服务绑定进来（绑定不需要这个网址），少一个公开入口
+  // No hackathon-api.<subdomain>.workers.dev: traffic comes in only through the site service binding (which does not need that URL), so there is one less public entry point
   "workers_dev": false,
   "preview_urls": false,
   "observability": { "enabled": true },
 
-  // public/ 下的静态文件（reader.js、rules.js、answers/）；worker.js 里没接住的路径都交给它
+  // Static files under public/ (reader.js, rules.js, answers/); any path worker.js does not handle goes here
   "assets": {
     "directory": "public",
     "binding": "ASSETS"
   },
 
   "vars": {
-    // 只有 "0" 且放了 LLM_API_KEY 才真调用大模型；其余情况一律关键词规则（/api/health 的 llm.mode 会写 rules）
-    // D-0929-2307：打开大模型（读屏 + AI 解读）。急停不用改这里：npx wrangler secret delete LLM_API_KEY
+    // The LLM is called only when this is "0" and LLM_API_KEY is set; otherwise keyword rules (/api/health shows llm.mode rules)
+    // D-0929-2307: LLM enabled (sign reading + plan explanation). Emergency stop without editing this file: npx wrangler secret delete LLM_API_KEY
+    // After the event the LLM_API_KEY secret was deleted, so production runs in rules mode with MOCK still "0"
     "MOCK": "0",
-    // OpenAI 兼容的 POST {LLM_BASE_URL}/chat/completions。换服务商只改这两行 + 换 key：
-    //   DeepSeek（默认）   https://api.deepseek.com                              deepseek-flash
-    //   百炼（国际站）      https://dashscope-intl.aliyuncs.com/compatible-mode/v1  qwen-plus（或 qwen-flash）
-    //   百炼（国内站）      https://dashscope.aliyuncs.com/compatible-mode/v1       qwen-plus
-    //   OpenAI             https://api.openai.com/v1                              gpt-4o-mini
+    // OpenAI-compatible POST {LLM_BASE_URL}/chat/completions. To switch provider, change these two lines and the key:
+    //   DeepSeek (default)          https://api.deepseek.com                              deepseek-flash
+    //   DashScope (international)   https://dashscope-intl.aliyuncs.com/compatible-mode/v1  qwen-plus (or qwen-flash)
+    //   DashScope (mainland China)  https://dashscope.aliyuncs.com/compatible-mode/v1       qwen-plus
+    //   OpenAI                      https://api.openai.com/v1                              gpt-4o-mini
     "LLM_BASE_URL": "https://api.deepseek.com",
     "LLM_MODEL": "deepseek-flash",
-    // 每个 Worker 实例每分钟最多调几次（尽力而为，不是账单上限）；演示方案一页约 20 条请求 × 3 次 = 60
-    // D-1001-0125：lead 让一起调大 → 600（演示一页的 10 倍，试验台连着改字、AI 解读每次记 5 次也碰不到）
+    // Max calls per Worker instance per minute (best effort, not a billing cap); one demo page is about 20 requests × 3 = 60
+    // D-1001-0125: raised to 600 during the event (10x one demo page, so live sign editing and explanations at 5 each never hit it)
     "LLM_MAX_CALLS_PER_MIN": "600",
-    // 全局每天最多调几次（BUDGET 计数，所有实例一本账，UTC 0 点清零），超了当天只用规则。
-    // D-1001-0125：lead 说不用设上限（DeepSeek 余额约 ¥100）→ 调到 50000 次（一次约 ¥0.002，≈ ¥100），真正的闸是服务商余额；余额用完 DeepSeek 报错，同样回规则
+    // Max global calls per day (BUDGET counter shared by all instances, reset at 00:00 UTC); past the cap only the rules run for the day.
+    // D-1001-0125: effectively uncapped during the event (DeepSeek balance about ¥100) → 50000 calls (about ¥0.002 each ≈ ¥100); the real limit was the provider balance, and when it runs out DeepSeek errors and the rules take over
+    // Restore a real cap (for example "600" per day and "60" per minute) before re-enabling the LLM
     "LLM_MAX_CALLS_PER_DAY": "50000"
   },
 
-  // BUDGET：大模型每日调用计数（src/budget.js）；REGISTER：施工登记表（src/register.js，提案 #48 第 ⑤ 步）
-  // 免费版只能用 SQLite 后端 → new_sqlite_classes；已部署的 tag 不许改，加类只能加新 tag，类改名只能加新 tag + renamed_classes
+  // BUDGET: daily LLM call counter (src/budget.js); REGISTER: worksite register (src/register.js)
+  // The free plan only allows the SQLite backend → new_sqlite_classes; deployed tags must never change: a new class needs a new tag, a renamed class a new tag + renamed_classes
   "durable_objects": {
     "bindings": [
       { "name": "BUDGET", "class_name": "LlmBudget" },
@@ -52,8 +54,8 @@
     { "tag": "v2", "new_sqlite_classes": ["WorksiteRegister"] }
   ]
 
-  // 推荐：跨访客、跨实例的读数缓存（每份新读数写 1 次；账号 09-30 起是 Workers Paid，KV 写入按月计、不再是免费版每天 1000 次）。
-  // 没有它只剩每个实例的内存缓存：网址是 *.workers.dev，Workers 自带的 Cache API 在那里不生效（/api/health 的 llm.cache 会写 memory）
-  // 1. 在本目录跑 npx wrangler kv namespace create READINGS  2. 把打印的 id 填进下面，取消注释  3. 重新部署
+  // Reading cache shared across visitors and instances (one write per new reading). During the event (from 2026-09-30) the account was on Workers Paid, so KV writes were billed monthly
+  // instead of the free plan's 1,000 a day; rules mode makes no KV writes. Without KV only the per-instance memory cache is left: the site is on *.workers.dev, where the
+  // built-in Cache API does nothing (/api/health would show llm.cache memory). To recreate: npx wrangler kv namespace create READINGS in this directory, then put the new id below
   ,"kv_namespaces": [{ "binding": "READINGS", "id": "f1729ac78da649198d3e1f5d41e30956" }]
 }

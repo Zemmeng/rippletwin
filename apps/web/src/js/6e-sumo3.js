@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   T49 (lead D-0930「SUMO 为主，引擎退幕后」): on the plan SUMO covers — the Lonsdale demo works, one lane closed
+   SUMO-primary mode (decision D-1001-0045 in docs/decisions.md): on the plan SUMO covers — the Lonsdale demo works, one lane closed
    (EP.link===SUMO_LINK && !EP.all && EP.lanes===1, the same test as sumoWant() in 5-app.js / suPlan() in 8-compare.js) —
    every traffic number on screen is SUMO's, from the step-2 run (SU.index / SU.src, 5-app.js). The engine still runs behind
    the scenes: it reads the signs (AI) and gives SUMO its detour share p. From it the page may show that reading only (seen /

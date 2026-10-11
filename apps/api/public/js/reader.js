@@ -1,6 +1,6 @@
-// 引擎只调这一个函数：readSigns(请求) → Promise<读数>（docs/contract.md §路人读数）
-// 按顺序：随网页发布的答案文件 → POST /api/read（Worker 先查 KV 再问大模型）→ 都不行用关键词规则（src: "rule"）
-// 请求不合规范直接抛 SignError：那是调用方的 bug，不拿规则掩盖
+// The engine calls only this function: readSigns(request) → Promise<reading> (docs/reference/interfaces.md, road-user reading)
+// In order: the answers file shipped with the site → POST /api/read (the Worker checks KV, then asks the LLM) → keyword rules (src: "rule")
+// An invalid request throws SignError straight away: that is a caller bug and is not hidden behind the rules
 import { normalizeRequest, canonical, sha256Hex, sanitizeReading } from "./signs.js";
 import { ruleReading } from "./rules.js";
 
@@ -8,23 +8,23 @@ export { SignError } from "./signs.js";
 
 const DEFAULTS = {
   answersUrl: new URL("../answers/demo.json", import.meta.url).href,
-  apiBase: "", // 同源部署时留空；本地单独起 Worker 时传 http://localhost:<端口>
+  apiBase: "", // empty for same-origin deployment; pass http://localhost:<port> for a separately run local Worker
   timeoutMs: 8000,
 };
 
-const memo = new Map(); // 请求规范串的哈希 → Promise<读数>：同一句话同一类人一个会话只取一次
+const memo = new Map(); // hash of the canonical request → Promise<reading>: one fetch per message and persona per session
 const answerFiles = new Map(); // answersUrl → Promise<{ [key]: { reading } }>
 
-// 测试或界面上的「重新读取」用
+// For tests or a "read again" action in the UI
 export function resetReader() {
   memo.clear();
   answerFiles.clear();
 }
 
-// 答案文件的键：规范串（persona + 规范化 signs + 排序后的 roads）的 SHA-256
+// Answers-file key: SHA-256 of the canonical string (persona + normalised signs + sorted roads)
 export const answerKey = (req) => sha256Hex(canonical(normalizeRequest(req)));
 
-// opts: { fetch, apiBase, answersUrl, timeoutMs }，测试里注入 fetch
+// opts: { fetch, apiBase, answersUrl, timeoutMs }; tests inject fetch
 export async function readSigns(request, opts = {}) {
   const req = normalizeRequest(request);
   const o = { ...DEFAULTS, ...opts };

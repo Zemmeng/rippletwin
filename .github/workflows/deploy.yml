@@ -1,17 +1,23 @@
-# deploy.yml —— 手动触发的 Cloudflare 部署（GitHub 网页上点按钮部署的备用通道）
+# deploy.yml -- manually triggered Cloudflare deploy (a backup channel for deploying from the GitHub web UI)
 #
-# 🔒 只能手动触发（workflow_dispatch），绝不因为 push / PR 自动部署。
-# 🔒 只有 DEPLOYER 能跑：hackathon.conf 的 DEPLOYER 与触发人 github.actor 比对（不分大小写），不一致直接拒绝。
-# 🔒 只有 lead 在 GitHub 仓库 Settings → Secrets and variables → Actions 里
-#    填了 CLOUDFLARE_API_TOKEN 和 CLOUDFLARE_ACCOUNT_ID 之后才能用。详见 docs/deploy-cloudflare.md。
-# 用途：Actions → deploy → Run workflow，填 module：
-#       <模块名>  部署 apps/<模块名>
-#       all       按 hackathon.conf 的 DEPLOY_MODULES 逐个部署（一次一个，不并行）
-# 部署前（plan job）依次检查：Secrets 已填 → 触发人是 DEPLOYER → 冻结期规则 → bash scripts/check.sh 全量无 ❌。
-# 冻结期：bash scripts/check.sh --time-raw 的 PHASE 是「代码冻结」或「已截止」时，
-#       只能在「Use workflow from」里选 demo-* tag 部署；确需从分支热修，勾选 hotfix（事后在 decisions 记一条）。
-# 部署完读 hackathon.conf 的 DEMO_URL 跑 bash scripts/check.sh --e2e 冒烟（DEMO_URL 为空就跳过）。
-# 日常部署首选本地 bash scripts/deploy.sh（同样的前置检查）；这里是没有本地环境时的备用。
+# 🔒 Manual trigger only (workflow_dispatch); never deploys automatically on a push or PR.
+# 🔒 Only the DEPLOYER may run it: DEPLOYER in hackathon.conf is compared with github.actor (case-insensitive);
+#    any mismatch is refused.
+# 🔒 Usable only after CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID have been added under the repository's
+#    Settings → Secrets and variables → Actions. See docs/architecture/deployment.md.
+# How to use: Actions → deploy → Run workflow, and fill in module:
+#       <module>  deploys apps/<module>
+#       all       deploys DEPLOY_MODULES from hackathon.conf one after another (one at a time, never in parallel)
+# Before deploying, the plan job checks in order: secrets present → actor is DEPLOYER → freeze rule →
+#       a full bash scripts/check.sh run has no ❌.
+# Freeze rule: when PHASE from bash scripts/check.sh --time-raw is "code freeze" or "deadline passed", deploy only
+#       from a demo-* tag (pick it under "Use workflow from"); to hotfix from a branch, tick hotfix (and record the
+#       reason in docs/decisions.md). The deadline has passed, so a deploy from main needs hotfix.
+# Each module is deployed with its own `npm run deploy` -- the same command scripts/deploy.sh runs -- so build steps
+#       such as apps/site's node build.mjs are included.
+# After deploying, it runs bash scripts/check.sh --e2e against DEMO_URL from hackathon.conf (skipped if empty).
+# The preferred way to deploy is bash scripts/deploy.sh locally (same preflight checks); this is the fallback
+# when no local environment is available.
 
 name: deploy
 
@@ -19,12 +25,12 @@ on:
   workflow_dispatch:
     inputs:
       module:
-        description: "apps/ 下的模块名；all = 按 hackathon.conf 的 DEPLOY_MODULES 逐个部署"
+        description: "Module name under apps/; all = deploy DEPLOY_MODULES from hackathon.conf one by one"
         required: true
         default: all
         type: string
       hotfix:
-        description: "代码冻结 / 已截止后仍从非 demo-* tag 部署（热修）。勾了要在 decisions 记原因"
+        description: "Deploy from a ref other than a demo-* tag during the code freeze or after the deadline (hotfix). Record the reason in docs/decisions.md"
         required: false
         default: false
         type: boolean
@@ -32,7 +38,7 @@ on:
 permissions:
   contents: read
 
-# 部署排队，不互相取消（半截部署比慢更糟）
+# Queue deploys and never cancel one (a half-finished deploy is worse than a slow one)
 concurrency:
   group: deploy
   cancel-in-progress: false
@@ -49,7 +55,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # check.sh [3] 要算 merge-base
+          fetch-depth: 0 # check.sh [3] computes a merge-base
 
       - uses: actions/setup-node@v5
         with:
@@ -59,7 +65,7 @@ jobs:
         with:
           python-version: "3.9"
 
-      - name: 前置检查并生成模块列表
+      - name: Preflight checks and module list
         id: plan
         env:
           MODULE: ${{ inputs.module }}
@@ -71,21 +77,21 @@ jobs:
           conf() { grep -E "^$1=" hackathon.conf | cut -d= -f2- | sed 's/#.*//' | xargs; }
 
           if [ "$HAS_TOKEN" != "true" ] || [ "$HAS_ACCOUNT" != "true" ]; then
-            echo "::error::缺 GitHub Secrets：CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID。lead 先按 docs/deploy-cloudflare.md 填好再跑。"
+            echo "::error::Missing GitHub secrets: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID. Add them as described in docs/architecture/deployment.md, then run again."
             exit 1
           fi
 
           deployer=$(conf DEPLOYER)
           lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
           if [ -z "$deployer" ] || [ "$(lower "$ACTOR")" != "$(lower "$deployer")" ]; then
-            echo "::error::只有 DEPLOYER（hackathon.conf 里的 ${deployer:-未填}）能部署，当前是 $ACTOR。"
+            echo "::error::Only the DEPLOYER (${deployer:-not set} in hackathon.conf) can deploy; this run was started by $ACTOR."
             exit 1
           fi
 
           if [ "$MODULE" = "all" ]; then
             mods=$(conf DEPLOY_MODULES)
             if [ -z "$mods" ]; then
-              echo "::error::hackathon.conf 的 DEPLOY_MODULES 是空的：kickoff 后由 lead 填（空格分隔的 apps/ 模块名）。"
+              echo "::error::DEPLOY_MODULES in hackathon.conf is empty: list the apps/ modules to deploy there (space-separated)."
               exit 1
             fi
           else
@@ -96,48 +102,48 @@ jobs:
           for m in $mods; do
             case "$m" in
               ""|.*|*[!A-Za-z0-9._-]*)
-                echo "::error::模块名不合法：$m（只允许字母、数字、. _ -）"; exit 1 ;;
+                echo "::error::Invalid module name: $m (only letters, digits, . _ - are allowed)"; exit 1 ;;
             esac
             if [ ! -d "apps/$m" ]; then
-              echo "::error::apps/$m 不存在"; exit 1
+              echo "::error::apps/$m does not exist"; exit 1
             fi
             if [ ! -f "apps/$m/wrangler.jsonc" ] && [ ! -f "apps/$m/wrangler.json" ] && [ ! -f "apps/$m/wrangler.toml" ]; then
-              echo "::error::apps/$m 里没有 wrangler 配置，不是 Cloudflare 模块（py-tool 类模块不用部署）"; exit 1
+              echo "::error::apps/$m has no wrangler config, so it is not a Cloudflare module (nothing to deploy)"; exit 1
             fi
             json="$json${json:+,}\"$m\""
           done
           echo "modules=[$json]" >> "$GITHUB_OUTPUT"
-          echo "将部署：$mods"
+          echo "Will deploy: $mods"
 
-      - name: 冻结期检查
+      - name: Freeze rule
         env:
           REF: ${{ github.ref }}
           HOTFIX: ${{ inputs.hotfix }}
         run: |
           phase=$(bash scripts/check.sh --time-raw | grep -E '^PHASE=' | head -n 1 | cut -d= -f2-)
-          echo "阶段：${phase:-（读不到）} · ref：$REF · hotfix：$HOTFIX"
+          echo "Phase: ${phase:-(unreadable)} · ref: $REF · hotfix: $HOTFIX"
           case "$phase" in
-            *代码冻结*|*已截止*)
+            *"code freeze"*|*"deadline passed"*)
               case "$REF" in
-                refs/tags/demo-*) echo "冻结期，从 $REF 部署：允许" ;;
+                refs/tags/demo-*) echo "Freeze rule: deploying from $REF is allowed" ;;
                 *)
                   if [ "$HOTFIX" = "true" ]; then
-                    echo "::warning::冻结期从 $REF 热修部署（hotfix 已勾选）：记得在 docs/decisions.md 记一条原因。"
+                    echo "::warning::Hotfix deploy from $REF during the freeze (hotfix ticked): record the reason in docs/decisions.md."
                   else
-                    echo "::error::现在是「$phase」：只能从 demo-* tag 部署（Run workflow 时在「Use workflow from」里选 tag），确需热修请勾选 hotfix。"
+                    echo "::error::Phase is \"$phase\": deploy only from a demo-* tag (pick the tag under \"Use workflow from\" when you run the workflow), or tick hotfix for an urgent fix."
                     exit 1
                   fi ;;
               esac ;;
           esac
 
-      - name: bash scripts/check.sh（全量，有 ❌ 不部署）
+      - name: Full check (bash scripts/check.sh; no deploy on any ❌)
         run: bash scripts/check.sh
 
-      - name: 汇总写进 job summary
+      - name: Write the summary to the job summary
         if: failure()
         run: |
-          if [ -f logs/last-check.txt ] && grep -q '^======== 汇总' logs/last-check.txt; then
-            { echo "## ❌ 部署前检查没过"; echo '```'; sed -n '/^======== 汇总/,$p' logs/last-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f logs/last-check.txt ] && grep -q '^======== Summary' logs/last-check.txt; then
+            { echo "## ❌ Pre-deploy check failed"; echo '```'; sed -n '/^======== Summary/,$p' logs/last-check.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           fi
 
   deploy:
@@ -157,10 +163,10 @@ jobs:
         with:
           node-version: lts/*
 
-      # 先装模块自己的依赖：wrangler 若在 devDependencies 里，装好后 wrangler-action 会直接用这份
-      # （有 package-lock.json 时版本被 lock 精确固定；没有 lock 时按 package.json 的范围取当时最新）。
-      # 模块没装 wrangler 时，wrangler-action 会自己装它内置的默认版本 —— 要固定就在下面 with: 里加 wranglerVersion。
-      - name: 安装依赖
+      # Install the module's own dependencies first: wrangler is a devDependency of every Worker module, so the
+      # deploy below uses the version pinned in package-lock.json (without a lockfile, the newest version allowed
+      # by package.json at the time).
+      - name: Install dependencies
         working-directory: apps/${{ matrix.module }}
         run: |
           if [ -f package-lock.json ]; then
@@ -169,23 +175,27 @@ jobs:
             npm install --no-package-lock --no-audit --no-fund
           fi
 
-      - name: wrangler deploy
-        id: wrangler
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          workingDirectory: apps/${{ matrix.module }}
-          command: deploy
+      # Same command as scripts/deploy.sh: the module's own deploy script, which also runs any build step it needs
+      # (apps/site: node build.mjs && wrangler deploy; its out/ directory is gitignored, so a bare wrangler deploy
+      # would have no assets). Modules without a deploy script fall back to a plain wrangler deploy.
+      - name: Deploy (npm run deploy)
+        working-directory: apps/${{ matrix.module }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -f package.json ] && node -e 'process.exit((require("./package.json").scripts || {}).deploy ? 0 : 1)'; then
+            npm run deploy
+          else
+            npx --yes wrangler deploy
+          fi
 
-      - name: 部署记录写进 job summary
+      - name: Write the deploy record to the job summary
         env:
           MODULE: ${{ matrix.module }}
-          URL: ${{ steps.wrangler.outputs.deployment-url }}
           REF: ${{ github.ref_name }}
         run: |
-          echo "- ✅ \`$MODULE\` · $REF@${GITHUB_SHA:0:7} · $(date -u '+%Y-%m-%d %H:%M UTC') · ${URL:-（看上一步日志里的 URL）}" >> "$GITHUB_STEP_SUMMARY"
-          echo "提醒 lead 更新 docs/3-tasks.md 顶部的「线上版本」。" >> "$GITHUB_STEP_SUMMARY"
+          echo "- ✅ \`$MODULE\` · $REF@${GITHUB_SHA:0:7} · $(date -u '+%Y-%m-%d %H:%M UTC') · URL: see the deploy step log" >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
     name: e2e smoke
@@ -199,7 +209,7 @@ jobs:
         run: |
           url=$(grep -E '^DEMO_URL=' hackathon.conf | cut -d= -f2- | sed 's/#.*//' | xargs)
           if [ -z "$url" ]; then
-            echo "::warning::hackathon.conf 的 DEMO_URL 为空，跳过线上冒烟。"
+            echo "::warning::DEMO_URL in hackathon.conf is empty, skipping the live smoke test."
             exit 0
           fi
           bash scripts/check.sh --e2e "$url"

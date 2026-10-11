@@ -1,9 +1,9 @@
-"""把 src/ 打包成单文件网页。
+"""Bundle src/ into a single-file web page.
 
-用法：python3 apps/web/build.py（任意目录都能跑）
-产物：
-  public/index.html     完整 HTML 文档，Cloudflare Pages / 任何静态服务器直接托管（进仓库）
-  out/web-artifact.html 只有 body 级内容，给 Claude Artifact 发布用（out/ 不进仓库）
+Usage: python3 apps/web/build.py (works from any directory)
+Outputs:
+  public/index.html     the full HTML document, served as-is by apps/site or any static server (committed)
+  out/web-artifact.html body-level content only, for publishing as a Claude Artifact (out/ is not committed)
 """
 import pathlib
 
@@ -28,7 +28,7 @@ def bundle():
 
 
 def write(path, text):
-    # Path.write_text(newline=) 要 Python 3.10；Mac 自带的 python3 是 3.9
+    # Path.write_text(newline=) needs Python 3.10; the python3 that ships with macOS is 3.9
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
 

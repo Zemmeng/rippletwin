@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""真实 CBD 路网上的 SUMO 回放（contract v2 "real network"）。
-路网 = apps/roads/public/cbd/network.json（OSM），信号口 = signals.json（SCATS），需求 = flows.json 工作日 08:00–09:00。
-三个情景：baseline（无施工）/ original（封一条车道 + 原方案绕行比例）/ ai（封一条车道 + AI 方案绕行比例）。
-T48：跑满 08:00–09:00 一整小时（07:57 空网起步预热 180 s、不展示；施工 08:00 整才封），SUMO 自己算 09:00 的排队；
-路网往东（Spring 以东的 Albert St）、往南（到 Collins）、往北（过 La Trobe）扩出来，排队和回溢有地方放；
-回放只给 original / ai 两个情景、只给页面视野里的车（baseline 只出指标）。
-T49 方案模式：options = [{id:'A'…'E', p}] → baseline + 每个方案一个 opt-<id>（封一条车道 + 这个方案的绕行比例 p），默认只出指标；
-p 相同的方案只跑一次、后面的照抄（reused_from）。原来的 {p_original, p_ai, scenarios} 输出不变。
-只跑原生 SUMO，不编造轨迹；路网和候选路线缓存在 SUMO_REAL_CACHE（默认系统临时目录），同一 seed 结果可复现。
-用 requirements.txt 的 venv 跑；第一次建缓存要 numpy + scipy（SUMO 自带的 routeSampler.py 要）。
+"""SUMO replay on the real CBD network (contract v2 "real network").
+Network = apps/roads/public/cbd/network.json (OSM), signalised sites = signals.json (SCATS), demand = flows.json weekday 08:00–09:00.
+Three scenarios: baseline (no works) / original (one lane closed + the original plan's diversion share) / ai (one lane closed + the AI plan's diversion share).
+Runs the full hour 08:00–09:00 (starts from an empty network at 07:57 with 180 s of warm-up that is not shown; the works close at exactly 08:00); SUMO computes the 09:00 queue itself.
+The network is extended east (Albert St beyond Spring St), south (to Collins St) and north (past La Trobe St) so queues and spill-back have room.
+Replays are written only for original / ai and only for vehicles inside the page's view (baseline produces metrics only).
+Options mode: options = [{id:'A'…'E', p}] → baseline + one opt-<id> per option (one lane closed + that option's diversion share p), metrics only by default;
+options with the same p run once and the rest copy it (reused_from). The original {p_original, p_ai, scenarios} output is unchanged.
+Runs native SUMO only and never fabricates trajectories; the network and candidate routes are cached in SUMO_REAL_CACHE (default: the system temp directory), and the same seed reproduces the same result.
+Run it in the venv from requirements.txt; the first cache build also needs numpy + scipy (for SUMO's bundled routeSampler.py).
 """
 import argparse
 import bisect
@@ -30,55 +30,55 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[4]
 VERSION = '1.27.1'
 HOUR = 8
-# 本地平面坐标（等距近似）：net 坐标 = xy(lat, lon)，netconvert 关掉 offset 归一化，所以反算就是精确逆变换
+# Local planar coordinates (equirectangular approximation): net coordinates = xy(lat, lon); netconvert has offset normalisation disabled, so the inverse is exact
 LAT0, LON0 = -37.8115, 144.9660
 KX, KY = math.cos(math.radians(LAT0))*111320.0, 110540.0
-# 沿 Lonsdale 的坐标系：u = 从 Spring/Lonsdale 往 Elizabeth/Lonsdale 的米数（西为正），v = 横向米数（南为正）
-# 实测：Exhibition u≈233、Russell 462、2935 582、Elizabeth 925；La Trobe v≈−231、Little Lonsdale −116、Little Bourke 115、Bourke 230、Collins 461
+# Frame along Lonsdale St: u = metres from Spring/Lonsdale towards Elizabeth/Lonsdale (west positive), v = lateral metres (south positive)
+# Measured: Exhibition u≈233, Russell 462, 2935 582, Elizabeth 925; La Trobe v≈−231, Little Lonsdale −116, Little Bourke 115, Bourke 230, Collins 461
 SPRING_LONSDALE, ELIZABETH_LONSDALE = (-37.809404, 144.97214), (-37.812282, 144.962257)
-# 研究区 = 两个 u/v 矩形的并集（T48 为排队和回溢留地方）：
-#   原来的 Elizabeth–Spring × Bourke–La Trobe（外扩 35 m）；
-#   Russell St 以东到 network.json 的东边界（Albert St 过 Gisborne St，Lonsdale 西行排队往东接着排），南到 Collins（+35 m）、北过 La Trobe 约 170 m。
-# 试过只切 Albert St 一条走廊、不要 Victoria Pde / Nicholson 那几个 OSM 合并大路口（它们在 netconvert 默认配时下无施工也进不去车）：
-# routeSampler 换了一套路线，Russell 南行从 La Trobe 以北进来的车在 Russell × Lonsdale 右转时锁死，无施工情景 09:00 就有
-# 近 200 辆要过施工段的车排着等进路网 —— 比留着东北角更糟，所以留着；东北角的插入积压跟施工无关（报在 insertion_backlog_end）
+# Study area = union of two u/v rectangles (leaving room for queues and spill-back):
+#   the original Elizabeth–Spring × Bourke–La Trobe (35 m margin);
+#   east of Russell St to the eastern edge of network.json (Albert St past Gisborne St, so the Lonsdale westbound queue can continue east), south to Collins (+35 m) and about 170 m north of La Trobe.
+# Tried cutting only the Albert St corridor, without the large merged OSM junctions at Victoria Pde / Nicholson St (which cannot insert vehicles under netconvert's default signal plans even without works):
+# routeSampler picked a different set of routes, southbound Russell traffic entering north of La Trobe locked up turning right at Russell × Lonsdale, and in the no-works scenario at 09:00
+# nearly 200 vehicles bound through the works were waiting to enter the network — worse than keeping the north-east corner, so it stays; the north-east insertion backlog is unrelated to the works (reported as insertion_backlog_end)
 AREA_BOXES = [(-35, 985, -266, 266), (-345, 500, -400, 496)]
-# 页面视野（回放只写这里面的车）：La Trobe–Little Bourke × Elizabeth–Exhibition 的 16 个路口（外扩 12 m，刚好盖住外圈街道的车行道），
-# 往东（朝 Spring）140 m。一小时每 2 s 一帧，每个情景约 15 MB；再宽就超了
+# Page view (replays only include vehicles inside it): the 16 junctions of La Trobe–Little Bourke × Elizabeth–Exhibition (12 m margin, just enough to cover the outer streets' carriageways),
+# extended 140 m east (towards Spring). One frame every 2 s for an hour is about 15 MB per scenario; any wider would exceed that
 VIEW_BOX = (93, 937, -243, 127)
-WORKS = 'l595594354_9756035316'  # Lonsdale 西行、Russell 与 2935 人行灯之间 42 m，两车道
-WORKS_LANE = WORKS+'_1'          # 靠左行驶的路网里 index 1 = 中央侧（右侧）车道
-WORKS_SPEED = 30/3.6             # 剩下那条车道限速 30 km/h
-# Lonsdale 西行、施工段上游的路段，由近到远到 Spring（路口内部段靠 60 m 断档规则跨过去）；再往东的 Albert St 西行在 prepare() 里顺着路网接上
+WORKS = 'l595594354_9756035316'  # Lonsdale westbound, 42 m between Russell St and the 2935 pedestrian signal, two lanes
+WORKS_LANE = WORKS+'_1'          # in a left-hand-traffic network, index 1 = the median-side (right) lane
+WORKS_SPEED = 30/3.6             # the remaining lane is limited to 30 km/h
+# Lonsdale westbound links upstream of the works, nearest first, out to Spring (junction-internal segments are bridged by the 60 m gap rule); Albert St westbound further east is joined along the network in prepare()
 CHAIN = ['l595594353_595594354','l595594352_595594353','l6696274751_9756035317','l6381474061_6696274751',
          'l595594348_6381474061','l6207022860_595594347','l6207022858_6207022860','l317537930_6207022858']
 CHAIN_NAMES = ('Lonsdale Street', 'Albert Street')
-# 绕行：Lonsdale 西行在 Russell 左转（靠路缘，不跟对向车冲突）→ Little Bourke 西行 → Swanston → Lonsdale
+# Detour: Lonsdale westbound turns left at Russell (kerbside, no conflict with oncoming traffic) → Little Bourke westbound → Swanston → Lonsdale
 DETOUR_TURN, DETOUR_FIRST = 'l6696274751_9756035317', 'l1985557927_13807338304'
-# 研究区切口的副作用：有些直行车的终点是施工段后面两段很短的路（QV / 停车场一侧），绕行车绕不回去，改送到 Lonsdale 西行 Swanston→Elizabeth
+# Side effect of the study-area cut: some through vehicles end on two very short links past the works (QV / car park side) that detouring vehicles cannot get back to; send them to Lonsdale westbound Swanston→Elizabeth instead
 DEST_FIX = {'l9756035316_4544002877':'l9086096512_2190483592','l4544002877_9756035309':'l9086096512_2190483592'}
-SITE_2935 = {'n245537592','n4544002877','n9756035315','n9756035316'}  # LONSDALE NR SWANSTON（POS）两侧车行道的节点
+SITE_2935 = {'n245537592','n4544002877','n9756035315','n9756035316'}  # nodes of the carriageways either side of LONSDALE NR SWANSTON (POS)
 CYCLE = 90
-# 2935 给 Lonsdale 车流的绿 + 黄占周期比例（假设）。T48 定 50%：两车道放行约 1 800 辆/小时、封一条后约 800 辆/小时，
-# 对上引擎的通行能力假设（1 800 × ½ × 0.9 = 810 辆/小时）；实测放行量写在 metrics.works_throughput_vph
+# Share of the cycle (green + amber) that 2935 gives Lonsdale traffic (assumption). Set to 50%: about 1,800 veh/h through two lanes and about 800 veh/h with one closed,
+# matching the engine's capacity assumption (1,800 × ½ × 0.9 = 810 veh/h); the measured discharge is written to metrics.works_throughput_vph
 GREEN_2935 = .50
-ENGINE_CAPACITY_VPH = 810        # 引擎：施工段 1 800 辆/小时 × 剩一半车道 × 0.9
-PRE = 180                        # 07:57:00 空网开始，前 180 s 预热（还没施工）不展示；施工 08:00:00 整封（rerouter + 限速牌）
-SHOWN = 3600                     # 展示 08:00–09:00
+ENGINE_CAPACITY_VPH = 810        # engine: works link 1,800 veh/h × half the lanes left × 0.9
+PRE = 180                        # empty network from 07:57:00; the first 180 s are warm-up (no works yet) and not shown; the works close at exactly 08:00:00 (rerouter + speed sign)
+SHOWN = 3600                     # shown: 08:00–09:00
 END = PRE+SHOWN
 STEP = .5
-SAMPLE = 2                       # 回放每 2 s 一帧（FCD 同周期）
-CHUNK_FRAMES = 60                # 每块 60 帧 = 2 分钟
-CHUNK_BYTES = 1300000            # 单个文件硬上限 1.5 MB，留余量
-QUEUE_SPEED = 1.5                # 排队：速度 < 1.5 m/s 且前后车距 ≤ 60 m 连成一串
+SAMPLE = 2                       # one replay frame every 2 s (same period as the FCD)
+CHUNK_FRAMES = 60                # 60 frames per chunk = 2 minutes
+CHUNK_BYTES = 1300000            # hard limit of 1.5 MB per file, with headroom
+QUEUE_SPEED = 1.5                # queue: vehicles slower than 1.5 m/s with gaps ≤ 60 m form one chain
 QUEUE_GAP = 60
-HALT_SPEED = .1                  # SUMO 的 halting 定义
-HARSH_DECEL = -4.5               # 急刹：踩到 SUMO 小汽车的最大常规减速度 4.5 m/s²（约 0.46 g）的起点，每辆车每次只算一次
-VEH_M, LANES_M = 7.0, 2          # 引擎的换算：每辆车 7 m、按两条车道摊
-# 防死锁：堵在路口里 ≥ 60 s 的车，冲突车流不再让它（SUMO --ignore-junction-blocker）；原地一动不动 ≥ 300 s 的车才瞬移到前方（SUMO 默认值）。
-# 试跑过完全关掉瞬移：无施工情景 07:03 起 Little Bourke × Swanston 一辆右转车等不到下游空位，Swanston / La Trobe / Elizabeth 一圈锁死，
-# 09:00 有 500 多辆车原地不动 —— 那是 SUMO 路口模型的死锁，不是施工造成的。施工排队里的车每个信号周期（90 s）都会往前挪，
-# 等不到 300 s，所以不会被瞬移；每一次瞬移都记在 metrics（总数、施工路线上的、在哪几段路）
+HALT_SPEED = .1                  # SUMO's definition of halting
+HARSH_DECEL = -4.5               # harsh braking: reaching SUMO's maximum normal deceleration for passenger cars, 4.5 m/s² (about 0.46 g); counted once per vehicle per event
+VEH_M, LANES_M = 7.0, 2          # engine conversion: 7 m per vehicle, spread over two lanes
+# Deadlock guard: crossing traffic stops yielding to a vehicle that has blocked a junction for ≥ 60 s (SUMO --ignore-junction-blocker); only a vehicle that has not moved at all for ≥ 300 s is teleported ahead (SUMO default).
+# A trial run with teleporting fully disabled: in the no-works scenario, from 07:03 a right-turning vehicle at Little Bourke × Swanston could not find space downstream and a loop of Swanston / La Trobe / Elizabeth locked up;
+# at 09:00 more than 500 vehicles were stationary — a deadlock of SUMO's junction model, not caused by the works. Vehicles in the works queue move up every signal cycle (90 s),
+# well within 300 s, so they are never teleported; every teleport is recorded in the metrics (total, on the works route, which links)
 JUNCTION_BLOCKER_S = 60
 TELEPORT_S = 300
 CAR = (4.6,1.8)
@@ -160,7 +160,7 @@ def _uv_frame():
     return lambda x, y: ((x-sx)*ux+(y-sy)*uy, (x-sx)*(-uy)+(y-sy)*ux)
 
 
-UV = _uv_frame()  # net 坐标 (x, y) → (u, v)
+UV = _uv_frame()  # net coordinates (x, y) → (u, v)
 
 
 def in_box(box, u, v):
@@ -168,13 +168,13 @@ def in_box(box, u, v):
 
 
 def centre(x, y, angle, length):
-    """FCD 给的是车头；沿车头朝向（0 = 北、顺时针）往回退半个车长就是车身中心。"""
+    """FCD reports the front bumper; stepping back half a vehicle length along the heading (0 = north, clockwise) gives the vehicle centre."""
     r = math.radians(angle)
     return x-math.sin(r)*length/2, y-math.cos(r)*length/2
 
 
 def plain_network(folder):
-    """network.json → 研究区的 nod / edg 明文 XML（原型 build_net.py 的做法）。施工不改路网，靠 works.add.xml 在 08:00 封道。"""
+    """network.json → plain nod / edg XML for the study area (as in the prototype build_net.py). The works do not change the network; works.add.xml closes the lane at 08:00."""
     net = json.loads((roads_dir()/'network.json').read_text())
     keep = {n['id'] for n in net['nodes'] if any(in_box(b, *UV(*xy(n['lat'], n['lon']))) for b in AREA_BOXES)}
     links = [l for l in net['links'] if l['from'] in keep and l['to'] in keep and l['highway'] != 'living_street']
@@ -185,7 +185,7 @@ def plain_network(folder):
         n = N[nid]; x, y = xy(n['lat'], n['lon'])
         a = {'id':nid,'x':'%.2f' % x,'y':'%.2f' % y,'type':'priority'}
         if n.get('signal'):
-            a.update(type='traffic_light', tl='tls'+n['signal'])  # 同一 SCATS 口的 OSM 节点共用一个控制器
+            a.update(type='traffic_light', tl='tls'+n['signal'])  # OSM nodes of the same SCATS site share one controller
         ET.SubElement(nodes, 'node', a)
     edges = ET.Element('edges')
     for l in links:
@@ -203,7 +203,7 @@ def netconvert(folder, bins, name, green):
              '--tls.default-type','static','--tls.cycle.time',str(CYCLE),'--keep-edges.components','1','--junctions.corner-detail','5',
              '--rectangular-lane-cut','true','--edges.join','false','--geometry.remove','false','--offset.disable-normalization','true',
              '--no-warnings','true','--output-file',name], folder)
-    # 2935 人行灯：netconvert 默认 82 s 绿 / 3 s 黄 / 5 s 红，改成假设的绿信比
+    # 2935 pedestrian signal: netconvert's default is 82 s green / 3 s amber / 5 s red; change it to the assumed green split
     tree = ET.parse(folder/name); root = tree.getroot(); patched = 0
     for tl in root.findall('tlLogic'):
         if not any(n in tl.get('id') for n in SITE_2935):
@@ -228,14 +228,14 @@ def cache_key(version, green):
 
 
 def gap(a, b):
-    """路口内部那一段：上一路段终点到下一路段起点的直线距离（近似）。"""
+    """The junction-internal segment: straight-line distance from the end of one link to the start of the next (approximation)."""
     p, q = a.getShape()[-1], b.getShape()[0]
     return math.hypot(p[0]-q[0], p[1]-q[1])
 
 
 def works_chain(net):
-    """施工段上游的西行链：CHAIN（到 Spring）再顺着 Lonsdale / Albert St 往东接到研究区边上。返回 [(edge, off)]，
-    off = 这段的下游端到施工段起点的距离（中间路口按直线补上）。"""
+    """Westbound chain upstream of the works: CHAIN (to Spring), then on east along Lonsdale / Albert St to the edge of the study area. Returns [(edge, off)],
+    off = distance from this link's downstream end to the start of the works (junctions in between bridged in a straight line)."""
     chain, e, acc = [], net.getEdge(WORKS), 0.0
     while True:
         ins = [c for c in e.getIncoming() if c.getName() in CHAIN_NAMES and c.getID() not in {x for x, _ in chain} and c.getID() != WORKS]
@@ -252,7 +252,7 @@ def works_chain(net):
 
 
 def to_works(net, edges):
-    """路线上施工段之前每一段的「段末 → 施工段起点」距离；不经过施工段就是 None。"""
+    """For each link on the route before the works, the distance "link end → start of the works"; None if the route does not pass through the works."""
     if WORKS not in edges: return None
     w = edges.index(WORKS); out = {}; acc = 0.0
     for i in range(w-1, -1, -1):
@@ -264,7 +264,7 @@ def to_works(net, edges):
 
 
 def prepare(bins, version, tools, green=GREEN_2935):
-    """建（或复用）缓存：base.net.xml、demand.json（routeSampler 选出的路线 + 每小时车数 + 绕行路线 + 到施工段的距离）。"""
+    """Build (or reuse) the cache: base.net.xml, demand.json (routes picked by routeSampler + vehicles per hour + detour routes + distances to the works)."""
     root = Path(os.environ.get('SUMO_REAL_CACHE') or Path(tempfile.gettempdir())/'rippletwin-sumo-real-cache')
     cache = root/cache_key(version, green)
     if (cache/'demand.json').exists():
@@ -280,7 +280,7 @@ def prepare(bins, version, tools, green=GREEN_2935):
         import sumolib
         net = sumolib.net.readNet(str(tmp/'base.net.xml'))
         for e in CHAIN+[WORKS, DETOUR_FIRST]:
-            net.getEdge(e)  # 路段名对不上就在这里报错
+            net.getEdge(e)  # fails here if a link id does not match
         if len(net.getEdge(WORKS).getLanes()) != 2:
             raise RuntimeError('Works link must have two lanes')
         chain = works_chain(net)
@@ -337,7 +337,7 @@ def prepare(bins, version, tools, green=GREEN_2935):
 
 
 def vehicles(routes, seed):
-    """每条路线按泊松到达生成 [0, END) 的车（仿真时间，0 = 07:57）；同一 seed 各情景同一批车，绕行抽签也是同一个数（共用随机数）。"""
+    """Poisson arrivals on each route over [0, END) (simulation time, 0 = 07:57); with the same seed every scenario gets the same vehicles and the same diversion draw (common random numbers)."""
     rng = random.Random(seed)
     rows = []
     for k, r in enumerate(routes):
@@ -350,7 +350,7 @@ def vehicles(routes, seed):
 
 
 def assign(rows, routes, share):
-    """每辆车实际走的路线：有资格绕行的（路线在 Russell 之前的 Lonsdale 西行、要穿过施工段），抽签数 < 比例就走绕行。"""
+    """The route each vehicle actually takes: an eligible vehicle (route on Lonsdale westbound before Russell, passing through the works) takes the detour if its draw < the share."""
     out = []
     for v in rows:
         r = routes[v['route']]
@@ -369,7 +369,7 @@ def write_routes(folder, plan):
 
 
 def write_additional(folder, closed):
-    """施工段末端两条车道各一个瞬时线圈（逐车记通过时刻）；施工情景再加 08:00 封中央侧车道（rerouter）和剩下车道限速 30 km/h（限速牌）。"""
+    """One instantaneous induction loop on each of the two lanes at the end of the works (records each vehicle's passing time); scenarios with works also close the median-side lane at 08:00 (rerouter) and limit the remaining lane to 30 km/h (speed sign)."""
     root = ET.Element('additional')
     for i in (0, 1):
         ET.SubElement(root, 'instantInductionLoop', id='works_out_%d' % i, lane='%s_%d' % (WORKS, i), pos='-1', file='works_out.xml')
@@ -393,7 +393,7 @@ def sumo_args(bins, net, seed):
 
 
 def net_info(path):
-    """信号灯程序、信号头（每个进口道一个）、施工车道形状、路段长度。"""
+    """Signal programs, signal heads (one per approach), works lane shape, link lengths."""
     root = ET.parse(path).getroot()
     programs = {}
     for tl in root.findall('tlLogic'):
@@ -427,7 +427,7 @@ def tls_state(p, t):
 
 
 def queue_now(stopped, length=None):
-    """施工段起点往上游、断档 ≤ 60 m 的连续排队长度（原型 run_scen.py 的规则）。"""
+    """Continuous queue length upstream from the start of the works, with gaps ≤ 60 m (the rule from the prototype run_scen.py)."""
     ext = prev = 0.0
     for d in sorted(stopped):
         if d-prev > QUEUE_GAP: break
@@ -436,12 +436,12 @@ def queue_now(stopped, length=None):
 
 
 def queue_count(dists):
-    """同一规则数车：从施工段起点往上游，断档 ≤ 60 m 连着的有几辆。"""
+    """Count vehicles with the same rule: how many are connected upstream from the start of the works with gaps ≤ 60 m."""
     return queue_parts([(d, 0) for d in dists])[0]
 
 
 def queue_parts(items):
-    """items = [(沿路线到施工段的距离, 在 Lonsdale / Albert 链上 1 / 横街 0)]：连着的有几辆、其中几辆在链上。"""
+    """items = [(distance along the route to the works, 1 on the Lonsdale / Albert chain / 0 on a side street)]: how many are connected, and how many of those are on the chain."""
     n = c = 0; prev = 0.0
     for d, on_chain in sorted(items):
         if d-prev > QUEUE_GAP: break
@@ -450,7 +450,7 @@ def queue_parts(items):
 
 
 def minute_series(ts, qs, es):
-    """每分钟一项 [分钟, 实际排队 m, 引擎算法 m]：取到这一分钟为止的最后一个 90 s 信号周期——实际排队取最长（队尾），引擎算法取平均。"""
+    """One entry per minute [minute, physical queue m, engine method m] over the last 90 s signal cycle up to that minute: the longest physical queue (back of queue) and the mean for the engine method."""
     out = []
     for m in range(SHOWN//60+1):
         hi = m*60; lo = bisect.bisect_right(ts, hi-CYCLE); j = bisect.bisect_right(ts, hi)
@@ -460,7 +460,7 @@ def minute_series(ts, qs, es):
 
 
 def run_job(spec):
-    """一个情景：写路线 → 跑 SUMO → 读 FCD 出回放块和指标。单独进程跑（build() 用子进程并行几个情景）。"""
+    """One scenario: write routes → run SUMO → read the FCD into replay chunks and metrics. Runs in its own process (build() runs several scenarios in parallel subprocesses)."""
     t0 = time.time()
     k, folder, out = spec['scenario'], Path(spec['folder']), Path(spec['out'])
     cache = Path(spec['cache'])
@@ -486,7 +486,7 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
     shown_tls = sorted({h['tls'] for h in heads})
     for h in heads: del h['_uv']
     routes = demand['routes']
-    info = {}  # 车 → (到施工段距离表 or None)
+    info = {}  # vehicle → (distance-to-works table or None)
     for v, edges, diverted, _ in plan:
         info[v['id']] = None if diverted else routes[v['route']]['to_works']
     catalog, index, seen = [], {}, set()
@@ -530,10 +530,10 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
                     agents.append([index[vid], lon, lat, round(ang) % 360, round(v*100)])
             if v >= QUEUE_SPEED: continue
             pos = float(a.get('pos'))
-            # 实际排队：Lonsdale / Albert St 西行这一串上停着的车
+            # physical queue: stopped vehicles on the Lonsdale / Albert St westbound chain
             if edge == WORKS: stopped.append(0.0)
             elif edge in chain: stopped.append(chain[edge]+length[edge]-pos)
-            # 引擎算法：还要穿过施工段的车（路线上施工段在前面），按沿路线到施工段的距离
+            # engine method: vehicles that still have to pass through the works (the works lie ahead on their route), by distance along the route to the works
             tw = info.get(vid)
             if tw is None: continue
             if edge == WORKS: queued.append((0.0, 1))
@@ -553,7 +553,7 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
     flush()
     if ts != list(range(0, SHOWN+1, SAMPLE)):
         raise RuntimeError('FCD covers %d of %d samples' % (len(ts), SHOWN//SAMPLE+1))
-    # 还没进路网的车（插入被堵住）：要穿过施工段的也算在引擎算法的排队里
+    # vehicles not yet in the network (insertion blocked): those bound through the works also count in the engine-method queue
     trips = {}
     for r in ET.parse(folder/'trips.xml').getroot().iter('tripinfo'):
         trips[r.get('id')] = r
@@ -569,12 +569,12 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
     ep = [bisect.bisect_right(starts, t+PRE)-bisect.bisect_right(ends, t+PRE) for t in ts]
     es = [a+b for a, b in zip(es, ep)]
     series = minute_series(ts, qs, es)
-    # 09:00 那个数拆开看（最后一个周期的平均车数）：排在 Lonsdale / Albert 西行链上的、回溢到横街上的、还没能进路网的
+    # breakdown of the 09:00 figure (mean vehicles over the last cycle): queued on the Lonsdale / Albert westbound chain, spilled back onto side streets, not yet able to enter the network
     lo = bisect.bisect_right(ts, SHOWN-CYCLE); mean = lambda xs: round(sum(xs[lo:])/(len(ts)-lo), 1)
     parts = {'lonsdale_albert':mean(ec),'side_streets':mean([a-b-c for a, b, c in zip(es, ec, ep)]),'waiting_to_enter':mean(ep)}
     backlog_end = sum(1 for a, b in waiting_all if a <= END < b)
     tele_log = teleports(folder, info)
-    # 施工段末端线圈：每辆车第一次通过的时刻
+    # loop at the end of the works: the first time each vehicle passes
     passed = {}
     wo = folder/'works_out.xml'
     if wo.exists():
@@ -584,8 +584,8 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
     throughput = sum(1 for tt in passed.values() if PRE <= tt < END)
     stats = ET.parse(folder/'statistics.xml').getroot()
     safety, tele = stats.find('safety'), stats.find('teleports')
-    # 车道上的碰撞 = 失败；路口内部的「碰撞」单独报：OSM 合并出来的路口内部车道几何会重叠（SUMO 默认根本不查路口），
-    # 用 warn 只记录不改变动力学；ignore-junction-blocker 放行的车穿过堵路口的车也记在这里，所以两种都诚实写进 metrics
+    # A collision on a lane = failure; "collisions" inside junctions are reported separately: the internal lane geometry of merged OSM junctions overlaps (by default SUMO does not check junctions at all),
+    # and warn only records them without changing the dynamics; vehicles released by ignore-junction-blocker passing through a vehicle that blocks the junction are also recorded here, so both are reported honestly in metrics
     kinds = [c.get('type') for c in ET.parse(folder/'collisions.xml').getroot().findall('collision')]
     junction = sum(1 for k in kinds if k == 'junction')
     collisions = max(len(kinds)-junction, int(safety.get('collisions'))-junction)
@@ -620,7 +620,7 @@ def export(folder, out, scenario, net_path, demand, plan, closed, write_frames):
 
 
 def teleports(folder, info):
-    """run.log 里每一条瞬移：08:00–09:00 的条数、其中还没过施工段的施工路线车（会让排队变短）、按路段最多的 5 段。"""
+    """Every teleport in run.log: the count in 08:00–09:00, how many of those were works-route vehicles that had not yet passed the works (which shortens the queue), and the top 5 links."""
     rows = []
     for line in (folder/'run.log').read_text(encoding='utf-8', errors='replace').splitlines():
         m = re.search(r"Teleporting vehicle '([^']+)';.*?lane='([^']*)'.*?time=([0-9]+(?:\.[0-9]+)?)", line)
@@ -633,7 +633,7 @@ def teleports(folder, info):
 
 
 def delayed_vs_baseline(passed_k, passed_b, bound):
-    """同一批车（这个情景里要穿过施工段的），09:00 前「无施工时已经过了施工点、这里还没过」的车数 —— 就是引擎 D/D/1 里的排队车数。"""
+    """For the same vehicles (those bound through the works in this scenario), the number that by 09:00 had passed the works in the no-works run but not here — the queued vehicles of the engine's D/D/1 model."""
     n = 0
     for v in bound:
         b, k = passed_b.get(v, math.inf), passed_k.get(v, math.inf)
@@ -651,7 +651,7 @@ def validate_real(payload):
     payload = dict(payload)
     if payload.pop('network', 'real') != 'real':
         raise ValueError('network must be "real"')
-    if 'options' in payload: return validate_options(payload)  # T49：任意方案的绕行比例
+    if 'options' in payload: return validate_options(payload)  # options mode: a diversion share per option
     extra = set(payload)-DEFAULT_KEYS
     if extra:
         raise ValueError('Unknown field: '+', '.join(sorted(extra)))
@@ -671,14 +671,14 @@ def validate_real(payload):
     return config
 
 
-# ---- T49：任意方案（A–E）各自的绕行比例 p → 各跑一个情景 opt-<id>（和 original / ai 一样封一条车道，只是 p 不同）----
+# ---- Options mode: each option (A–E) has its own diversion share p → one scenario opt-<id> each (one lane closed as in original / ai; only p differs) ----
 OPTION_IDS = ('A','B','C','D','E')
 OPTION_KEYS = {'seed','options','frames'}
 
 
 def validate_options(payload):
-    """{seed?, options:[{id:'A'…'E', p:0…1}]（1–5 个，id 不重复）, frames?:false} → config；
-    scenarios = baseline + opt-<id>（按 id 排序）。不能和 p_original / p_ai / scenarios 混用。"""
+    """{seed?, options:[{id:'A'…'E', p:0…1}] (1–5, unique ids), frames?:false} → config;
+    scenarios = baseline + opt-<id> (sorted by id). Cannot be combined with p_original / p_ai / scenarios."""
     extra = set(payload)-OPTION_KEYS
     if extra:
         raise ValueError('Unknown field with options: '+', '.join(sorted(extra)))
@@ -706,16 +706,16 @@ def validate_options(payload):
 
 
 def run_config(args):
-    """build(args) 的入参：带 options 走方案模式，否则照旧取 seed / p_original / p_ai / scenarios。"""
+    """Input for build(args): with options, options mode; otherwise seed / p_original / p_ai / scenarios as before."""
     if getattr(args, 'options', None) is not None:
         return {k: getattr(args, k) for k in OPTION_KEYS if getattr(args, k, None) is not None}
     return {k: getattr(args, k) for k in DEFAULTS}
 
 
 def scenario_plan(config):
-    """→ ({情景: 绕行比例}, {情景: 写不写逐帧}, {复用的情景: 真跑的那个})。
-    旧三情景照 SCENARIOS（只 original / ai 写帧）；方案模式 baseline 只出指标，opt-<id> 按 frames（默认不写）。
-    同一 seed 各情景是同一批车、同一个抽签数，p 相同结果就一模一样，所以只跑第一个、后面的照抄。"""
+    """→ ({scenario: diversion share}, {scenario: write frames or not}, {reused scenario: the one actually run}).
+    The original three scenarios follow SCENARIOS (only original / ai write frames); in options mode baseline produces metrics only and opt-<id> follows frames (off by default).
+    With the same seed every scenario has the same vehicles and the same draws, so equal p gives identical results: only the first one runs and the rest copy it."""
     if 'options' not in config:
         shares = {'baseline':0.0,'original':config['p_original'],'ai':config['p_ai']}
         return shares, {k: SCENARIOS[k]['frames'] for k in shares}, {}
@@ -737,7 +737,7 @@ def label(k):
 
 
 def copy_reused(out, reuse, results):
-    """p 相同的方案照抄真跑那个的结果（深拷贝；有逐帧就连 frames-NNN.json 一起抄，sha256 不变），manifest 标 reused_from。"""
+    """Options with the same p copy the result of the one actually run (deep copy; frames-NNN.json files are copied too when present, sha256 unchanged); the manifest is marked reused_from."""
     for k, src in reuse.items():
         r = json.loads(json.dumps(results[src]))
         r['manifest']['scenario'] = k; r['manifest']['reused_from'] = src
@@ -759,7 +759,7 @@ def build(args):
     cache = prepare(bins, version, tools, green)
     t_prep = time.time()
     demand = json.loads((cache/'demand.json').read_text())
-    shares, frames, reuse = scenario_plan(config)  # T49：原来三情景 / options 的 opt-<id>；p 相同的方案只跑一次
+    shares, frames, reuse = scenario_plan(config)  # the original three scenarios / options-mode opt-<id>; options with the same p run only once
     jobs = max(1, int(os.environ.get('SUMO_REAL_JOBS') or min(3, os.cpu_count() or 1)))
     pending = [k for k in config['scenarios'] if k not in reuse]; walls = {}; procs = {}
     while pending or procs:
@@ -771,14 +771,14 @@ def build(args):
                     'closed':closed(k),'frames':frames[k]}
             (folder/'job.json').write_text(json.dumps(spec, indent=1)+'\n')
             log = open(folder/'stdout.log', 'w')
-            # 每个情景一个子进程：SUMO + 读 FCD 都在里面，几个情景真并行（Python 解析是 CPU 活，线程不顶用）
+            # one subprocess per scenario: SUMO and FCD parsing both run inside it, so scenarios truly run in parallel (Python parsing is CPU-bound; threads would not help)
             procs[k] = (subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--job', str(folder/'job.json')], cwd=folder,
                                          stdout=log, stderr=subprocess.STDOUT), time.time(), log)
         for k, (p, t0, log) in list(procs.items()):
             try:
                 rc = p.wait(timeout=.1)
             except subprocess.TimeoutExpired:
-                if time.time()-t0 > 1800:  # 正常一个情景十几秒到一分钟；卡住就全部停掉，不留孤儿进程
+                if time.time()-t0 > 1800:  # a scenario normally takes 10–60 s; if one hangs, stop them all and leave no orphan processes
                     for q, _, lg in procs.values(): q.kill(); lg.close()
                     raise RuntimeError('SUMO timed out: '+k)
                 continue
@@ -804,10 +804,10 @@ def build(args):
             bl, kl = base['loss'], results[k]['loss']
             ids = [v for v in bl if v in kl]
             mt['mean_extra_s'] = round(sum(kl[v]-bl[v] for v in ids)/len(ids), 1) if ids else None
-            # 原路线要穿过施工段的那批车（含绕行的）：指示牌管的就是它们
+            # vehicles whose original route passes through the works (including those that detour): these are the ones the sign addresses
             w = [v for v in ids if v in through]
             mt['works_traffic_extra_s'] = round(sum(kl[v]-bl[v] for v in w)/len(w), 1) if w else None
-            # 对照组算法：同一批车无施工时 09:00 前已经过了施工点、有施工时还没过 → D/D/1 的排队车数 × 7 m ÷ 2
+            # baseline-comparison method: the same vehicles that by 09:00 had passed the works without works but not with works → D/D/1 queued vehicles × 7 m ÷ 2
             n = delayed_vs_baseline(results[k]['passed'], base['passed'], results[k]['bound'])
             mt['works_queue_vs_baseline_end_m'] = round(n*VEH_M/LANES_M, 1)
         m.update(engine=version, seed=config['seed'], diversion_share=shares[k])
@@ -845,11 +845,11 @@ if __name__ == '__main__':
     parser.add_argument('--scenarios', nargs='+', choices=list(SCENARIOS), default=list(SCENARIOS))
     parser.add_argument('--output')
     parser.add_argument('--work-dir')
-    parser.add_argument('--green-2935', type=float, default=GREEN_2935, help='2935 人行灯给 Lonsdale 车流的绿 + 黄占比（只给烘焙 / 敏感性用，不进 API）')
-    parser.add_argument('--prepare-only', action='store_true', help='只建缓存（路网 + 需求），镜像构建时预热用')
-    parser.add_argument('--options', nargs='+', metavar='ID=P', help='T49 方案模式：如 A=0.14 B=0.14 C=0.607 → baseline + opt-A/B/C（忽略 --p-original / --p-ai / --scenarios）')
-    parser.add_argument('--frames', action='store_true', help='方案模式也给 opt-<id> 写逐帧文件（默认只写指标）')
-    parser.add_argument('--job', help=argparse.SUPPRESS)  # build() 内部用：跑一个情景
+    parser.add_argument('--green-2935', type=float, default=GREEN_2935, help='Share of the cycle (green + amber) the 2935 pedestrian signal gives Lonsdale traffic (for baking / sensitivity runs only; not exposed in the API)')
+    parser.add_argument('--prepare-only', action='store_true', help='Only build the cache (network + demand); used to warm it during the image build')
+    parser.add_argument('--options', nargs='+', metavar='ID=P', help='Options mode, e.g. A=0.14 B=0.14 C=0.607 → baseline + opt-A/B/C (ignores --p-original / --p-ai / --scenarios)')
+    parser.add_argument('--frames', action='store_true', help='In options mode, also write per-frame files for opt-<id> (default: metrics only)')
+    parser.add_argument('--job', help=argparse.SUPPRESS)  # used internally by build(): runs one scenario
     args = parser.parse_args()
     if args.options is not None:
         try: args.options = [{'id':x.split('=', 1)[0],'p':float(x.split('=', 1)[1])} for x in args.options]

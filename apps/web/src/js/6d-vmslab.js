@@ -35,7 +35,7 @@ function vlBest(rows){
   rows.forEach((r,i)=>{if(!Number.isFinite(r.q))return;const b=rows[bi];if(!b||r.q<b.q||(r.q===b.q&&vlWords(r.frames)<vlWords(b.frames)))bi=i;});
   return bi>=0&&base&&rows[bi].q<base.q?bi:-1;
 }
-// T49 (the SUMO plan, lead D-0930): no engine queue on screen, so the pick is the strongest detour signal — the highest share of
+// SUMO plan (D-1001-0045): no engine queue on screen, so the pick is the strongest detour signal — the highest share of
 // drivers who detour in the engine's sign reading (rows[i].share, SUMO's input); a tie goes to fewer words. -1 when none beats the baseline
 function vlBestShare(rows){
   const base=rows.find(r=>r.k==='base');let bi=-1;
@@ -71,7 +71,7 @@ async function vlRun(){
   VL.busy=false;vlRender();
 }
 function vlUse(frames,at){EP.f1=frames[0].join('\n');EP.f2=(frames[1]||[]).join('\n');if(at!=null)EP.vmsAt=at;renderPanel();engChanged(0);}
-// T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan each row shows the share of drivers who detour in the engine's
+// SUMO-primary mode (D-1001-0045): on the SUMO plan each row shows the share of drivers who detour in the engine's
 // sign reading (SUMO's input) instead of the engine's queue; what that does to traffic is SUMO's job in step 2. Same rows,
 // same clicks; the pick is the strongest detour signal (vlBestShare), worded without any queue claim
 function vlSuHTML(){

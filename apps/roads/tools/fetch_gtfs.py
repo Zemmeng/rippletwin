@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""用途：从 DataVic「GTFS Schedule」总包（约 275 MB）里只抽电车和市区巴士两个子包，存到 raw/gtfs/。
+"""Purpose: extract only the tram and metropolitan bus sub-feeds from the DataVic "GTFS Schedule" bundle (about 275 MB) into raw/gtfs/.
 
-用法：python3 apps/roads/tools/fetch_gtfs.py [--modes 3,4] [--out raw/gtfs]
-      → raw/gtfs/3.zip（电车，约 14 MB 下载）、raw/gtfs/4.zip（市区巴士，约 87 MB 下载）；已存在就跳过
-退出码：0 成功；1 找不到总包或子包
-依赖：只用 Python 标准库（复用 fetch_scats.py 的 HTTP Range 读法）。数据许可证 CC BY 4.0（维州交通与规划部 / PTV）。
-坑：子包在总包里是压缩存放的（deflate），只能整个子包下，不能再往里 Range。
-    子包编号按 PTV 惯例（3 电车、4 市区巴士），以 routes.txt 的 route_type 为准（0 = 电车、3 = 巴士）。
+Usage: python3 apps/roads/tools/fetch_gtfs.py [--modes 3,4] [--out raw/gtfs]
+      -> raw/gtfs/3.zip (tram, about 14 MB download), raw/gtfs/4.zip (metropolitan bus, about 87 MB download); skipped if already present
+Exit code: 0 success; 1 bundle or sub-feed not found
+Dependencies: Python standard library only (reuses the HTTP Range reader from fetch_scats.py). Data licence CC BY 4.0 (Victorian Department of Transport and Planning / PTV).
+Gotchas: the sub-feeds are stored compressed (deflate) inside the bundle, so each one must be downloaded whole; you cannot Range into it.
+    Sub-feed numbers follow the PTV convention (3 tram, 4 metropolitan bus); route_type in routes.txt is authoritative (0 = tram, 3 = bus).
 """
 import argparse, os, shutil, sys
 
@@ -24,19 +24,19 @@ def main():
     os.makedirs(a.out, exist_ok=True)
     zips = [r['url'] for r in resources('gtfs-schedule') if r['url'].lower().endswith('.zip')]
     if not zips:
-        print('❌ gtfs-schedule 数据集里没有 zip'); sys.exit(1)
+        print('❌ the gtfs-schedule dataset has no zip'); sys.exit(1)
     z, f = remote_zip(zips[0])
     names = set(z.namelist())
     for m in a.modes.split(','):
         member, dst = '%s/google_transit.zip' % m, os.path.join(a.out, '%s.zip' % m)
         if os.path.exists(dst):
-            print('·  %s 已存在，跳过' % dst); continue
+            print('·  %s already exists, skipping' % dst); continue
         if member not in names:
-            print('❌ 总包里没有 %s' % member); sys.exit(1)
+            print('❌ %s is not in the bundle' % member); sys.exit(1)
         with z.open(member) as src, open(dst + '.part', 'wb') as out:
             shutil.copyfileobj(src, out, 1 << 20)
         os.replace(dst + '.part', dst)
-        print('✅ %s → %s（累计下载 %.1f MB）' % (member, dst, f.fetched / 1e6), flush=True)
+        print('✅ %s → %s (%.1f MB downloaded so far)' % (member, dst, f.fetched / 1e6), flush=True)
 
 
 if __name__ == '__main__':

@@ -1,7 +1,7 @@
-"""T14 液态玻璃的静态断言：不开浏览器，只读源码和打包产物（docs/arch/T14-liquid-glass-PRD.md）。
+"""Static assertions for the liquid-glass UI: no browser, only the sources and the bundle are read (docs/hackathon/specs/T14-liquid-glass-PRD.md).
 
-用法：python3 apps/web/tests/test_glass.py
-最后一行固定输出「N passed, M failed」，有失败退出码 1。
+Usage: python3 apps/web/tests/test_glass.py
+The last line is always "N passed, M failed"; any failure exits with code 1.
 """
 import pathlib
 import re
@@ -28,11 +28,11 @@ def check(name, ok, detail=""):
         print(f"✅ {name}")
     else:
         failed += 1
-        print(f"❌ {name}{('：' + detail) if detail else ''}")
+        print(f"❌ {name}{(': ' + detail) if detail else ''}")
 
 
 def block(src, head):
-    """head 开头的 @media / @supports 块的内容（按花括号配对）"""
+    """Contents of the @media / @supports block starting with head (matched by brace pairing)"""
     i = src.find(head)
     if i < 0:
         return ""
@@ -45,142 +45,142 @@ def block(src, head):
     return src[j:k - 1]
 
 
-# 1. 降级：减少透明度 → 实底、不模糊；不支持 backdrop-filter → 实底；减少动态 → 不做过渡
+# 1. Fallbacks: reduced transparency → solid, no blur; no backdrop-filter support → solid; reduced motion → no transitions
 rt = block(CSS, "@media (prefers-reduced-transparency: reduce)")
-check("prefers-reduced-transparency：玻璃改实底并关掉 backdrop-filter",
+check("prefers-reduced-transparency: glass turns solid and backdrop-filter is switched off",
       "var(--shell-solid)" in rt and re.search(r"(?<!-)backdrop-filter:none", rt))
-check("prefers-reduced-transparency 时 JS 不挂折射滤镜", "prefers-reduced-transparency: reduce" in GLASS)
-check("@supports not (backdrop-filter)：玻璃改实底", "var(--shell-solid)" in block(CSS, "@supports not ((backdrop-filter"))
-check("prefers-reduced-motion：面板收起 / 折叠箭头不做过渡", "transition:none" in block(CSS, "@media (prefers-reduced-motion: reduce){\n  .panel"))
+check("with prefers-reduced-transparency the JS does not attach the refraction filter", "prefers-reduced-transparency: reduce" in GLASS)
+check("@supports not (backdrop-filter): glass turns solid", "var(--shell-solid)" in block(CSS, "@supports not ((backdrop-filter"))
+check("prefers-reduced-motion: no transitions on panel collapse / fold arrows", "transition:none" in block(CSS, "@media (prefers-reduced-motion: reduce){\n  .panel"))
 
-# 2. 可读性：玻璃底色很浅（像 Apple 那样透），靠 --glass-tone 把背后的地图压暗（深色）/ 提亮（浅色）保住 4.5:1。
-#    实测（09-29，1440×900，3 种底图 × 6 种天气 × 深浅两套，最小字 --fg-3 叠上高光和卡片的最坏情况）：
-#    底色 0.40 时深色 ≥ 4.50、浅色 ≥ 4.57；09-29 晚再调透到 0.30（压暗 .44 / 提亮 1.24）后深色 ≥ 4.63、浅色 ≥ 4.57
+# 2. Legibility: the glass tint is very light (see-through, Apple style); --glass-tone darkens (dark theme) / brightens (light theme) the map behind it to keep 4.5:1.
+#    Measured (29 Sep, 1440×900, 3 basemaps × 6 weather types × dark and light, worst case of the smallest text --fg-3 over highlights and cards):
+#    at tint 0.40 dark ≥ 4.50, light ≥ 4.57; after making it more transparent that evening (0.30, darken .44 / brighten 1.24) dark ≥ 4.63, light ≥ 4.57
 t14 = CSS[CSS.find("T14 liquid glass"):]
 shells = [float(a) for a in re.findall(r"--shell:rgba\([^)]*,\s*(\.\d+)\)", t14)]
-check(f"常规玻璃底色是浅的（--shell 不透明度 ≤ 0.35，{len(shells)} 处）", len(shells) == 3 and max(shells) <= .35, f"{shells}")
+check(f"the regular glass tint is light (--shell opacity ≤ 0.35, {len(shells)} places)", len(shells) == 3 and max(shells) <= .35, f"{shells}")
 tones = re.findall(r"--glass-tone:(brightness[^;]+);", t14)
-check("深浅两套都有 --glass-tone：深色压暗（brightness < 1），浅色提亮（brightness > 1）",
+check("both themes have --glass-tone: dark darkens (brightness < 1), light brightens (brightness > 1)",
       len(tones) == 3 and float(re.search(r"brightness\(([\d.]+)", tones[0]).group(1)) < 1
       and all(float(re.search(r"brightness\(([\d.]+)", t).group(1)) > 1 for t in tones[1:]))
-check("玻璃块的 backdrop-filter 都带 var(--glass-tone)",
+check("every glass block's backdrop-filter includes var(--glass-tone)",
       re.search(r"\.top,\.rail,\.panel,\.timeline,\.panel-open\{[^}]*backdrop-filter:blur\(\d+px\) var\(--glass-tone\)", t14) is not None
       and re.search(r"\.glass\{[^}]*backdrop-filter:blur\(\d+px\) var\(--glass-tone\)", t14) is not None)
-check("折射也走 CSS：.lg-on 用 var(--lg-url) + var(--glass-tone)，JS 只设 --lg-url",
+check("refraction also goes through CSS: .lg-on uses var(--lg-url) + var(--glass-tone); the JS only sets --lg-url",
       "backdrop-filter:var(--lg-url) blur(var(--lg-blur,12px)) var(--glass-tone)" in t14
       and "setProperty('--lg-url'" in GLASS and "el.style.backdropFilter=" not in GLASS)
-check("随背景自适应：深色底图 / 高温时用 --tone-deep，浓雾时用 --tone-fog",
+check("adapts to the background: --tone-deep on dark basemaps / heat, --tone-fog in thick fog",
       ':root[data-bm="imagery"],:root[data-bm="nir"],:root[data-wx="heat"]{--glass-tone:var(--tone-deep)' in t14
       and ':root[data-wx="fog"]{--glass-tone:var(--tone-fog)}' in t14 and t14.count("--tone-deep:") == 3)
-check("JS 把当前底图 / 天气写到 <html data-bm / data-wx>",
+check("the JS writes the current basemap / weather to <html data-bm / data-wx>",
       "document.documentElement.dataset.bm=S.basemap" in APP and "document.documentElement.dataset.wx=k" in APP
       and "document.documentElement.dataset.wx=S.wx" in APP)
 
-# 3. 折射只在 Chromium 桌面上挂，只挂 1–2 块（PRD：backdrop-filter 只给少数 HUD，折射只给 1–2 个面板）
-check("折射只在桌面宽度（≥ 821px）挂", "(min-width: 821px)" in GLASS)
-check("Safari / Firefox 不挂 SVG 折射（走 CSS 磨砂）", re.search(r"Firefox.*Safari", GLASS) is not None)
+# 3. Refraction only on desktop Chromium, on 1–2 panels only (PRD: backdrop-filter for a few HUD elements, refraction for 1–2 panels)
+check("refraction only at desktop widths (≥ 821px)", "(min-width: 821px)" in GLASS)
+check("Safari / Firefox get no SVG refraction (CSS frosted glass instead)", re.search(r"Firefox.*Safari", GLASS) is not None)
 n_fx = len(re.findall(r"GL\.fx\.push\(liquidGlass\(", GLASS))
-check(f"折射面板 {n_fx} 块（≤ 2）", 1 <= n_fx <= 2)
-check("滤镜用 sRGB 插值（不然中性灰会变成常量位移）", "'color-interpolation-filters','sRGB'" in GLASS)
+check(f"{n_fx} refracting panel(s) (≤ 2)", 1 <= n_fx <= 2)
+check("the filter interpolates in sRGB (otherwise neutral grey becomes a constant displacement)", "'color-interpolation-filters','sRGB'" in GLASS)
 
-# 4. 许可：参考的 liquid-glass.js 是 MIT，署名留在源码里；页面仍只连 Google Fonts（test_web 查外部地址）
-check("署名 liquid-glass.js · Deepika Rao · MIT", "Deepika Rao" in GLASS and "sven1577/liquid-glass" in GLASS and "MIT" in GLASS)
-check("没有引入第三方库（D-03）", not re.search(r"<script[^>]+src=", PAGE))
+# 4. Licence: the referenced liquid-glass.js is MIT and the attribution stays in the source; the page still only connects to Google Fonts (test_web checks external URLs)
+check("attribution: liquid-glass.js · Deepika Rao · MIT", "Deepika Rao" in GLASS and "sven1577/liquid-glass" in GLASS and "MIT" in GLASS)
+check("no third-party libraries pulled in", not re.search(r"<script[^>]+src=", PAGE))
 
-# 5. 地图铺满，玻璃浮在上面；--safe-* 是 JS 读的遮挡量
+# 5. The map fills the window and the glass floats on top; --safe-* are the occlusion insets the JS reads
 desk = block(CSS, "@media (min-width:821px){")
-check("桌面：地图 fixed 铺满窗口", re.search(r"\.map\{position:fixed;inset:0", desk))
-check("桌面：.app 声明 --safe-t / --safe-b / --safe-l / --safe-r",
+check("desktop: the map is fixed and fills the window", re.search(r"\.map\{position:fixed;inset:0", desk))
+check("desktop: .app declares --safe-t / --safe-b / --safe-l / --safe-r",
       all(f"--safe-{k}:" in desk for k in "tblr"))
-check("JS 读 --safe-*（readInsets），视图 / 比例尺 / 告警都避开玻璃",
+check("the JS reads --safe-* (readInsets); view / scale bar / alerts all avoid the glass",
       "--safe-l" in GLASS and "insets()" in APP and "GL.ins.l+22" in APP)
-check("窄屏回到纵向堆叠（≤ 820px 不用浮层）", "@media (max-width:820px)" in CSS and "(min-width:821px)" in CSS)
+check("narrow screens go back to a vertical stack (no floating layers at ≤ 820px)", "@media (max-width:820px)" in CSS and "(min-width:821px)" in CSS)
 
-# 6. 右侧面板精简：简洁 / 详细切换、折叠标题、收起按钮都有中英文
-check("简洁 / 详细切换有中文", "L('Compact','简洁')" in GLASS and "L('Details','详细')" in GLASS)
-check("收起面板按钮有中文", "收起面板" in GLASS)
-check("展开面板按钮（body.html）有 data-zh / data-zh-aria-label",
+# 6. Leaner right panel: the compact / details toggle, fold headings and the collapse button all have EN and ZH
+check("the compact / details toggle has Chinese", "L('Compact','简洁')" in GLASS and "L('Details','详细')" in GLASS)
+check("the collapse-panel button has Chinese", "收起面板" in GLASS)
+check("the expand-panel button (body.html) has data-zh / data-zh-aria-label",
       'id="panelOpen"' in BODY and 'data-zh-aria-label="展开分析面板"' in BODY and 'data-zh="分析面板"' in BODY)
-check("折叠标题可用键盘操作（role=button + Enter / 空格）",
+check("fold headings work from the keyboard (role=button + Enter / Space)",
       "setAttribute('role','button')" in GLASS and "e.key==='Enter'" in GLASS and "aria-expanded" in GLASS)
-check("简洁模式只藏说明文字，不藏数字（.metrics / 输入框 / 方案卡默认展开）",
+check("compact mode hides only explanatory text, never numbers (.metrics / inputs / plan cards expanded by default)",
       ".panel.compact p.muted{display:none}" in CSS and ".metrics" in GLASS and "textarea" in GLASS)
-check("复制失败的提示在简洁模式下仍显示", "#copyFallback p.muted{display:block}" in CSS)
+check("the copy-failed hint still shows in compact mode", "#copyFallback p.muted{display:block}" in CSS)
 
-# 6b. 统一操作色（09-29 定）：主按钮、播放键、选中态都用 --sun；浅色主题下橙色文字用更深的 --sun-ink（对比度）
+# 6b. One action colour (decided 29 Sep): primary buttons, the play key and selected states use --sun; in the light theme orange text uses the darker --sun-ink (contrast)
 act = CSS[CSS.find("one action colour"):CSS.find("floating layout (desktop)")]
-check("主按钮 / 播放键 / 选中的 chips、倍速、语言都用 --sun",
+check("primary buttons / play key / selected chips, speed and language all use --sun",
       all(re.search(sel + r"[^{]*\{[^}]*background:var\(--sun\)", act) for sel in (r"\.btn", r"\.play", r"\.chips \[aria-pressed")))
-check("浅色主题有更深的橙色文字色 --sun-ink", CSS.count("--sun-ink:#874800") == 2)
+check("the light theme has a darker orange text colour --sun-ink", CSS.count("--sun-ink:#874800") == 2)
 
-# 7. 道路比建筑清楚（09-29 需求）：底图重画时压暗屋顶、描路沿
-check("底图重画时调 emphasizeRoads（每次视图变化一次，不是每帧）",
+# 7. Roads clearer than buildings (requested 29 Sep): basemap redraw darkens roofs and outlines kerbs
+check("basemap redraw calls emphasizeRoads (once per view change, not every frame)",
       re.search(r"function renderBase\(\)\{[\s\S]*?emphasizeRoads\(", APP) is not None
       and not re.search(r"function render\(dt\)\{[^}]*emphasizeRoads", APP))
 
-# 09-30 @unicornnnnnny：面板底部按钮一直悬浮（不用滑到最下面）；左侧图层栏缩小、位置不变
+# 30 Sep, @unicornnnnnny: the panel's bottom buttons always float (no scrolling to the end); the left layer bar is smaller, same position
 CLASH = (SRC / "js" / "8-clash.js").read_text(encoding="utf-8")
 desk = CSS[CSS.index("@media (min-width:821px){"):]
-check("桌面：面板里的 .cta（找更好的方案 / 错开 N 天 / 复制处置手册）sticky 悬浮在面板底部，没有底栏也没有卡片；每个按钮是一块深色液态玻璃（照天气图例 .glass：高光、亮边、阴影），不用橙色",
+check("desktop: the panel's .cta (find a better plan / stagger N days / copy playbook) is sticky at the panel bottom with no bar and no card; each button is a dark liquid-glass block (like the weather legend .glass: highlight, bright rim, shadow), not orange",
       ".panel .cta{position:sticky;bottom:-8px;z-index:2;margin:auto -8px -8px;padding:10px 8px 8px;background:none;border:0;box-shadow:none}" in desk
       and re.search(r"\.panel \.cta \.btn:not\(:disabled\)\{background:linear-gradient\(150deg,var\(--hl\)[^}]*color-mix\(in srgb,var\(--shell-solid\) 95%,transparent\);color:var\(--fg\);[^}]*var\(--rim\)", desk) is not None
       and "var(--sun)" not in desk[desk.index(".panel .cta{"):desk.index(".panel .cta .note{")])
-check("没有毛玻璃 / 减少透明度时，玻璃块是实心背景（按钮自己已经近乎实心，底部不再有底栏）",
+check("without frosted glass / with reduced transparency, glass blocks get a solid background (the buttons are already nearly solid; no bottom bar any more)",
       all(".glass{background:var(--shell-solid)" in blk for blk in [CSS[CSS.index("@supports not"):], CSS[CSS.index("prefers-reduced-transparency"):]]))
-check("「错开 N 天」挪进底部按钮条的 #clashAct 槽位（clashBtnHTML），叠加检查那一节只留说明",
+check("\"Stagger N days\" moved into the #clashAct slot of the bottom button strip (clashBtnHTML); the clash-check section keeps only the explanation",
       "cta.prepend(a)" in CLASH and "a.id='clashAct'" in CLASH and "function clashBtnHTML()" in CLASH
       and CLASH.count('id="clashStagger"') == 1 and "面板底部的「错开 ${n} 天」" in CLASH)
-check("左侧图层栏缩小（50 px 宽、按钮 36 px、图标 17 px），仍按顶栏和时间轴之间居中",
+check("left layer bar is smaller (50 px wide, 36 px buttons, 17 px icons) and still centred between the top bar and the timeline",
       "left:12px;width:50px;" in desk and "translateY(-50%)" in desk[desk.index("  .rail{"):desk.index("  .rail{") + 200]
       and ".rail button{width:36px;height:36px;" in CSS and ".rail button svg{width:17px;height:17px}" in CSS)
 
-# 09-30 @unicornnnnnny：数据来源不要边框、居中在地图下方；网页默认英文
+# 30 Sep, @unicornnnnnny: data sources without a border, centred below the map; the site defaults to English
 cr = desk[desk.index("  .credits{"):desk.index("}", desk.index("  .credits{"))]
-check("数据来源一行：不是 .glass（没有框和底），桌面居中在地图可见区域下方，文字带一圈底色光晕保证看得清",
+check("data-sources line: not .glass (no frame or background), centred below the visible map on desktop, text has a halo in the background colour for legibility",
       'class="credits" id="credits"' in BODY and "translateX(-50%)" in cr and "justify-content:center" in cr
       and "text-shadow:0 0 2px var(--shell-solid)" in cr and "border-radius" not in cr and "padding" not in cr)
-check("第一次打开是英文：只认用户自己点过的 中文（rt-lang），不再按浏览器语言切中文",
+check("first visit is in English: Chinese only if the user chose it (rt-lang), no switching by browser language",
       "LANG.cur=lg==='zh'?'zh':'en';" in APP and "navigator.language" not in APP and "const LANG={cur:'en'}" in (SRC / "js" / "0-i18n.js").read_text(encoding="utf-8"))
-check("第一次打开是深色：<html data-theme=\"dark\">（脚本跑之前不闪浅色），开机只认用户自己点过的浅色（rt-theme），不跟系统设置",
+check("first visit is dark: <html data-theme=\"dark\"> (no light flash before scripts run); start-up only honours a light theme the user chose (rt-theme), not the system setting",
       '<html lang="en" data-theme="dark">' in PAGE and "document.documentElement.dataset.theme=ls.get('rt-theme')==='light'?'light':'dark';" in APP)
 
-# 09-30 tutor：右侧文字太多（limit the words）—— 简洁模式只留数字、按钮和一行假设；来源脚注、每套方案的 AI 解读、倾向的理由放「详细」
+# 30 Sep, tutor feedback: too much text on the right ("limit the words"). Compact mode keeps only numbers, buttons and one assumptions line; source footnotes, each plan's AI explanation and the leaning rationale move to "Details"
 ENGJS = (SRC / "js" / "6-engine.js").read_text(encoding="utf-8")
 CMPJS = (SRC / "js" / "8-compare.js").read_text(encoding="utf-8")
-check("简洁模式隐藏来源脚注（.legend-src）、每套方案的 AI 解读（.cmp-explain）、倾向的理由（.cmp-lean-why）、重复的来源徽章（.eng-badges）、第 1 步的公交行人小行（.eng-impacts）和第 4 步节省量的单位说明（.eng-units，卡片和表头已标单位），详细模式照旧都在",
+check("compact mode hides the source footnotes (.legend-src), each plan's AI explanation (.cmp-explain), the leaning rationale (.cmp-lean-why), duplicate source badges (.eng-badges), the step 1 transit/pedestrian line (.eng-impacts) and the step 4 savings unit note (.eng-units; cards and headers already carry units); details mode still shows them all",
       ".panel.compact .legend-src,.panel.compact .cmp-explain,.panel.compact .cmp-lean-why,.panel.compact .eng-badges,.panel.compact .eng-impacts,.panel.compact .eng-units,.panel.compact .note-more,.panel.compact .eng-assume{display:none}" in CSS
       and "w.className='cmp-lean-why'" in CMPJS and 'class="cmp-explain"' in CMPJS)
-check("假设说明缩成一行，但意思不丢：读懂比例 · 绕行比例 · 路线选择模型 · 信任度是假设值",
+check("the assumptions note is shortened to one line without losing meaning: share who understand · detour share · route-choice model · trust is an assumed value",
       "of drivers understand the sign · `" in ENGJS and "(route-choice model; trust in signs is an assumed value)" in ENGJS
       and "arrive, ${fmtN(l.cap)} veh/h get past" in ENGJS and "the route-choice model's per-driver-type parameters" not in ENGJS)
-check("反向：「Reword」换成直白的「Edit sign」；第 1 步按钮说明不再写死 La Trobe × Swanston（第 2 步已是 4 个路口）",
+check("negative: \"Reword\" replaced by the plainer \"Edit sign\"; the step 1 button note no longer hard-codes La Trobe × Swanston (step 2 covers 4 junctions now)",
       "Reword" not in ENGJS + CMPJS and "L('Edit sign','改字')" in ENGJS and "Micro-simulation of the La Trobe × Swanston junction" not in APP)
 
 CLASHJS = (SRC / "js" / "8-clash.js").read_text(encoding="utf-8")
-check("简洁模式默认收起「车往哪走」（SEC_FOLD）；叠加检查、方案对比有自己的页签 / 步骤，标题行仍写要点：叠加检查写冲突成本，方案对比写倾向哪套",
+check("compact mode collapses \"Where traffic goes\" by default (SEC_FOLD); clash check and plan comparison have their own tab / step, and their heading rows still show the key point: clash check shows the clash cost, comparison shows the leaning plan",
       "const SEC_FOLD='.eng-where';" in GLASS and "hd.textContent=row?L('Leaning: ','倾向：')+cmpLabel(row)" in CMPJS and 'class="row between cmp-head"' in CMPJS and "!sec.matches(SEC_FOLD)&&(" in GLASS and 'class="stack eng-where"' in ENGJS
       and "r.flags.reliable&&r.cost>0?`+${fmtN(r.cost)} ${U}`" in CLASHJS)
-check("人行道照常时行人只占一行；第 1 步人行道选项写短（Works side closed / Both sides closed）",
+check("with the footpath open, pedestrians take a single line; the step 1 footpath options are short (Works side closed / Both sides closed)",
       "L('Footpath open · no detour','人行道照常 · 不用绕')" in ENGJS and "L('Works side closed','施工侧封')" in ENGJS and "Works-side footpath closed" not in ENGJS)
 
-# 09-30 @unicornnnnnny：第 2 步 4×4，点一个路口就飞过去放大；⌖ 回到 16 个路口
-check("第 2 步 4×4：点路口（不是拖动，双击仍是缩放）飞到这个路口放大，悬停有圈和路口名，⌖（gridFly）回到全部 16 个",
+# 30 Sep, @unicornnnnnny: step 2 4×4, clicking a junction flies to it and zooms in; ⌖ returns to all 16 junctions
+check("step 2 4×4: clicking a junction (not a drag; double-click still zooms) flies to it and zooms in, hover shows a ring and the junction name, ⌖ (gridFly) returns to all 16",
       "function gridPick(" in APP and "function gridFocus(j){" in APP and "gridBindMap();" in APP and "function gridFly(d){S.gridJ=null;" in APP
       and "L('click to zoom','点击放大')" in APP and "SCATS ${fo.id}" in APP and "cv.addEventListener('dblclick',()=>clearTimeout(pending));" in APP)
 
-# 09-30 round 2（@unicornnnnnny）：三行选项、预算和通行条件、再点缩小、删大段小字、横向比较表
+# 30 Sep, round 2 (@unicornnnnnny): three option rows, budget and access conditions, click again to zoom out, long fine print removed, side-by-side comparison table
 CMP2 = (SRC / "js" / "8-compare.js").read_text(encoding="utf-8")
-check("施工信息：车道 / 时段 / 人行道是三行带标签的选项（.opt-row），不再挤在一起",
+check("works info: lanes / time window / footpath are three labelled option rows (.opt-row), no longer crammed together",
       ENGJS.count('<div class="opt-row"><span class="opt-k">') == 3 and ".opt-row{display:grid;" in CSS)
-check("约束检查：预算上限（AUD）+ 必须满足的通行条件（行人通道 / 公交 / 应急车道），逐条对照方案和引擎结果打勾打叉",
+check("constraint check: budget cap (AUD) + required access conditions (pedestrian route / public transport / emergency lane), each ticked or crossed against the plan and the engine result",
       'id="budgetIn"' in APP and all(f'data-keep="${{key}}"' in APP or k in APP for k in ["foot", "transit", "emerg"]) and "budget:3500,keep:{foot:true,transit:true,emerg:true}" in ENGJS
       and "k.emerg?row(!EP.all" in APP and "blocked_routes" in APP)
-check("路口放大后再点同一个路口就缩回 16 个路口",
+check("clicking the same junction again after zooming in returns to the 16 junctions",
       "if(S.gridJ===j.id&&V.s>=2.5)gridFly(.8);else gridFocus(j);" in APP and "L('click again to zoom out','再点一次缩小')" in APP)
-check("大段小字（.eng-assume 假设说明、单位说明、仿真说明）简洁模式里不显示；「依据假设」页签照样逐条列出假设值（信任度、每班乘客、天气）",
+check("long fine print (.eng-assume assumptions note, unit note, simulation note) is hidden in compact mode; the \"Assumptions\" tab still lists each assumed value (trust, riders per trip, weather)",
       ".panel.compact .eng-assume{display:none}" in CSS and "L('Trust in signs','对标志的信任度')" in ENGJS and "L('Riders per trip','每班乘客')" in ENGJS
       and 'class="list eng-evd"' in ENGJS)
-check("比较方案：横向对比表（方案横排、指标竖排，点哪一列就高亮哪一列、没选时亮推荐列，「最省」像「最少」一样写在方案名下，超预算标红），面板在这一步向左展开",
+check("Compare: side-by-side table (plans across, metrics down; clicking a column highlights it, with no selection the recommended column is lit; \"Cheapest\" is written under the plan name like \"Fewest\"; over-budget in red); the panel expands to the left on this step",
       'class="cmp-table"' in CMP2 and "L('Recommended','综合推荐')" in CMP2 and "L('over budget','超预算')" in CMP2 and "cmp-sel" in CMP2 and ".panel.compact .cmp-table thead .cmp-what{display:none}" in CSS and "el.querySelectorAll('[data-cmpcol]')" in CMP2 and "<i class=\"cmp-best\">${L('Cheapest','最省')}</i>" in CMP2
       and "setWide(S.ui===4);" in APP and "function setWide(on){" in APP and ".app.ui-wide .panel #cmp4{order:-1}" in CSS)
 

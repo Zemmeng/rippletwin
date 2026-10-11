@@ -3,7 +3,7 @@
 Local by default; in the cloud the same file runs in a Cloudflare Container behind Worker hackathon-sumo.
 Two networks: POST {} (or network:'synthetic') = the 2×2 demo of build_demo.py, unchanged;
 POST {network:'real', seed?, p_original?, p_ai?, scenarios?} = the real CBD network of build_real.py (contract v2);
-POST {network:'real', seed?, options:[{id:'A'…'E', p}], frames?:false} = baseline + one scenario opt-<id> per plan option (T49)."""
+POST {network:'real', seed?, options:[{id:'A'…'E', p}], frames?:false} = baseline + one scenario opt-<id> per plan option."""
 import argparse
 import importlib
 import importlib.util
@@ -31,10 +31,10 @@ import build_demo as model
 PREFIX = '/sumo/v1'
 MAX_BODY = 16384
 RUN_ID = r'[0-9a-f]{32}'
-# 输出文件白名单：合成 2×2 的四种情景 + 实网（contract v2）的 original / ai + 方案模式（T49）的 opt-A … opt-E；别的路径一律 404，读不到 raw/ 和 job.json
+# Output file whitelist: the four synthetic 2×2 scenarios + original / ai of the real network (contract v2) + opt-A … opt-E of options mode; any other path is a 404, so raw/ and job.json are never readable
 OUTPUT_FILE = r'(index\.json|(?:baseline|closure|guided|footpath|original|ai|opt-[A-E])/(?:manifest|frames-\d{3})\.json)'
 NETWORKS = ('synthetic', 'real')
-# docs/contract.md §错误格式: the Worker passes container errors through, so they carry the same short codes.
+# docs/reference/interfaces.md, error format: the Worker passes container errors through, so they carry the same short codes.
 CODES = {400: 'bad_request', 401: 'bad_key', 403: 'bad_origin', 404: 'not_found', 409: 'not_ready',
          413: 'too_big', 415: 'bad_type', 429: 'sumo_busy', 500: 'sumo_error'}
 
@@ -54,7 +54,7 @@ def read_json(path):
 
 
 class FileJson(dict):
-    """输出文件原样发字节（.raw）：manifest 里的 chunk sha256 是按文件字节算的，重新序列化一遍浏览器就核对不上；dict 本身给测试和 frame_at 读。"""
+    """Output files are sent as their original bytes (.raw): the chunk sha256 values in the manifest are computed over the file bytes, so re-serialising would break the browser's check; the dict itself is for tests and frame_at."""
 
 
 @functools.lru_cache(maxsize=8)
@@ -67,9 +67,9 @@ def read_file(path):
 
 def frame_at(output, scenario, time):
     if scenario not in model.SCENARIOS or not math.isfinite(time) or time < 0:
-        raise ApiError(400, '情景不存在，或 t 不是非负数')
+        raise ApiError(400, 'Unknown scenario, or t is not a non-negative number')
     path = output / scenario / 'manifest.json'
-    if not path.exists(): raise ApiError(404, '这次运行没有这个情景')
+    if not path.exists(): raise ApiError(404, 'This run has no such scenario')
     meta = read_json(path)
     frame = {'t': time, 'a': [], 'q': [], 'signals': {}, 'counts': {}}
     if time < meta['duration_s'] and meta['chunks']:
@@ -89,7 +89,7 @@ def frame_at(output, scenario, time):
 
 
 def load_real():
-    # 懒加载：只有第一次收到 network:'real' 才 import build_real（它要 apps/roads 的数据；缺了只影响实网，不影响 2×2）
+    # Lazy: build_real is imported only on the first network:'real' request (it needs the apps/roads data; if that is missing only the real network is affected, not the 2×2)
     return importlib.import_module('build_real')
 
 
@@ -98,7 +98,7 @@ class Jobs:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.engine, self.runner, self.limit, self.keep = engine, runner or model.build, limit, max(int(keep), 1)
-        self._real = real  # 测试注入的假 build_real（要有 validate_real / build）；None = 用到时再 import
+        self._real = real  # fake build_real injected by tests (must have validate_real / build); None = import on first use
         self.lock = threading.RLock()
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='sumo')
         self.active = 0
@@ -118,36 +118,36 @@ class Jobs:
             temp.replace(folder / 'job.json')
 
     def get(self, run_id):
-        if not re.fullmatch(RUN_ID, run_id): raise ApiError(404, '没有这次运行')
+        if not re.fullmatch(RUN_ID, run_id): raise ApiError(404, 'No such run')
         file = self.root / run_id / 'job.json'
         with self.lock:
-            if not file.exists(): raise ApiError(404, '没有这次运行（可能已被清理，或服务重启过）')
+            if not file.exists(): raise ApiError(404, 'No such run (it may have been pruned, or the service restarted)')
             return json.loads(file.read_text())
 
     def real(self):
         if self._real is None:
             try: self._real = load_real()
-            except Exception as e: raise ApiError(500, '这台服务没装实网模型（build_real.py 或 apps/roads 数据缺失）：' + str(e)[-300:]) from e
+            except Exception as e: raise ApiError(500, 'This service has no real-network model (build_real.py or the apps/roads data is missing): ' + str(e)[-300:]) from e
         return self._real
 
     def networks(self):
-        # 只报真能跑的：镜像里没有 build_real.py 就只有 synthetic（页面据此直接回预跑结果，不白等 90 s）
+        # Report only what can actually run: without build_real.py in the image there is only synthetic (so the page falls back straight away instead of waiting 90 s for nothing)
         real = self._real is not None or importlib.util.find_spec('build_real') is not None
         return list(NETWORKS) if real else ['synthetic']
 
     def configure(self, payload):
-        """合成网络的 config 和以前一模一样（不加 network 字段）；实网的 config = {'network':'real', **validate_real(其余字段)}。"""
+        """The synthetic config is exactly as before (no network field); the real-network config = {'network':'real', **validate_real(remaining fields)}."""
         network = payload.get('network', 'synthetic') if isinstance(payload, dict) else 'synthetic'
-        if network not in NETWORKS: raise ValueError('network 只能是 synthetic 或 real')
+        if network not in NETWORKS: raise ValueError('network must be synthetic or real')
         rest = {k: v for k, v in payload.items() if k != 'network'} if isinstance(payload, dict) and 'network' in payload else payload
         if network == 'synthetic': return model.validate_config(rest)
         return {'network': 'real', **self.real().validate_real(rest)}
 
     def create(self, payload):
         try: config = self.configure(payload)
-        except (ValueError, TypeError) as e: raise ApiError(400, '参数不合规范：' + str(e), 'bad_config') from e
+        except (ValueError, TypeError) as e: raise ApiError(400, 'Invalid parameters: ' + str(e), 'bad_config') from e
         with self.lock:
-            if self.active >= self.limit: raise ApiError(429, '排队已满，等正在跑的任务完成再试', 'sumo_busy')
+            if self.active >= self.limit: raise ApiError(429, 'Queue full; retry when an active run completes', 'sumo_busy')
             self.active += 1
             job = {'version': 1, 'id': uuid.uuid4().hex, 'status': 'queued', 'created_at': now(), 'config': config}
             self.update(job)
@@ -191,7 +191,7 @@ class Jobs:
 
     def output(self, run_id, job=None):
         job = job or self.get(run_id)
-        if job['status'] != 'complete': raise ApiError(409, '这次运行还没完成，先查状态')
+        if job['status'] != 'complete': raise ApiError(409, 'Run is not complete; query its status first')
         return self.root / run_id / 'output'
 
     def route(self, method, target, payload=None):
@@ -201,24 +201,24 @@ class Jobs:
             return 200, {'version': 1, 'engine': self.engine, 'status': 'ready', 'active_jobs': self.active, 'networks': self.networks()}
         if path == PREFIX + '/runs' and method == 'POST': return 202, self.create(payload)
         match = re.fullmatch(PREFIX + '/runs/(' + RUN_ID + r')(?:/(.*))?', path)
-        if method != 'GET' or not match: raise ApiError(404, '没有这个接口')
+        if method != 'GET' or not match: raise ApiError(404, 'No such endpoint')
         run_id, resource = match.groups()
         job = self.get(run_id)
         if not resource: return 200, job
         output = self.output(run_id, job)
         if resource == 'frame':
-            # 单帧接口只认 2×2 的 manifest 格式；实网请读 manifest.json + frames-NNN.json 分块（contract v2）
-            if job['config'].get('network') == 'real': raise ApiError(404, '实网运行没有 frame 接口，请读 <情景>/manifest.json 和 frames-NNN.json')
+            # The single-frame endpoint understands only the 2×2 manifest format; for the real network read manifest.json + the frames-NNN.json chunks (contract v2)
+            if job['config'].get('network') == 'real': raise ApiError(404, 'Real-network runs have no frame endpoint; read <scenario>/manifest.json and frames-NNN.json')
             query = parse_qs(parsed.query)
             if set(query) != {'scenario', 't'} or any(len(v) != 1 for v in query.values()):
-                raise ApiError(400, '只接受 scenario 和 t 两个查询参数，各一个')
+                raise ApiError(400, 'Only the query parameters scenario and t are accepted, once each')
             try: time = float(query['t'][0])
-            except ValueError as e: raise ApiError(400, 't 必须是非负数') from e
+            except ValueError as e: raise ApiError(400, 't must be a non-negative number') from e
             return 200, frame_at(output, query['scenario'][0], time)
         if not re.fullmatch(OUTPUT_FILE, resource):
-            raise ApiError(404, '没有这个输出文件')
+            raise ApiError(404, 'No such output file')
         file = output / resource
-        if not file.exists(): raise ApiError(404, '没有这个输出文件')
+        if not file.exists(): raise ApiError(404, 'No such output file')
         return 200, read_file(file)
 
     def close(self, wait=True):
@@ -247,27 +247,27 @@ class Handler(BaseHTTPRequestHandler):
     def handle_request(self):
         try:
             origin = self.headers.get('Origin')
-            if origin and origin not in self.server.origins: raise ApiError(403, '这个来源不在允许名单里')
+            if origin and origin not in self.server.origins: raise ApiError(403, 'Origin not allowed')
             if self.command == 'OPTIONS': return self.reply(200, {'ok': True})
             key = getattr(self.server, 'api_key', '')
             # Bytes compare: a non-ASCII header must not crash hmac.compare_digest.
             if key and urlsplit(self.path).path != PREFIX + '/health' and \
                     not hmac.compare_digest(self.headers.get('X-Sumo-Key', '').encode(), key.encode()):
-                raise ApiError(401, '缺少或错误的 X-Sumo-Key')
+                raise ApiError(401, 'Missing or wrong X-Sumo-Key')
             payload = None
             if self.command == 'POST':
-                if self.headers.get_content_type() != 'application/json': raise ApiError(415, '请求体要用 application/json')
+                if self.headers.get_content_type() != 'application/json': raise ApiError(415, 'Use application/json')
                 try: size = int(self.headers.get('Content-Length', '0'))
-                except ValueError as e: raise ApiError(400, 'Content-Length 不合法') from e
-                if size <= 0 or size > MAX_BODY: raise ApiError(413, f'请求体要在 1–{MAX_BODY} 字节之间')
+                except ValueError as e: raise ApiError(400, 'Invalid Content-Length') from e
+                if size <= 0 or size > MAX_BODY: raise ApiError(413, f'JSON body must be between 1 and {MAX_BODY} bytes')
                 try: payload = json.loads(self.rfile.read(size))
-                except (ValueError, UnicodeError) as e: raise ApiError(400, '请求体不是合法 JSON', 'bad_json') from e
+                except (ValueError, UnicodeError) as e: raise ApiError(400, 'Request body is not valid JSON', 'bad_json') from e
                 self.rate_limit()
             try: status, value = self.server.jobs.route('GET' if self.command == 'HEAD' else self.command, self.path, payload)
             except ApiError: raise
             except Exception as e:  # e.g. a run pruned mid-read: answer instead of dropping the connection
                 self.log_error('%s %s failed: %r', self.command, self.path, e)
-                raise ApiError(500, '读取结果时出错，稍后再试') from e
+                raise ApiError(500, 'Error while reading the result; try again later') from e
             self.reply(status, value)
         except ApiError as e:
             self.reply(e.status, {'ok': False, 'error': e.code, 'msg': e.message})
@@ -284,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
                 for stale in [k for k, v in posts.items() if not v or now_s - v[-1] > 60]: del posts[stale]
             hits = posts.setdefault(ip, collections.deque())
             while hits and now_s - hits[0] > 60: hits.popleft()
-            if len(hits) >= per_min: raise ApiError(429, '这个地址一分钟内新建的运行太多，稍后再试', 'sumo_rate')
+            if len(hits) >= per_min: raise ApiError(429, 'Too many new runs from this address; wait a minute', 'sumo_rate')
             hits.append(now_s)
 
     do_GET = do_POST = do_OPTIONS = do_HEAD = handle_request

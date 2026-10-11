@@ -1,5 +1,5 @@
-// 部署配置：wrangler.jsonc / package.json / 锁文件 / .dev.vars.example 的关键项（T19：api Worker 要能被 deploy.sh 部署、被 site 绑定）
-// 用法：node tests/config.test.mjs；不需要 npm i
+// Deployment config: key items in wrangler.jsonc / package.json / the lockfile / .dev.vars.example (the api Worker must be deployable by deploy.sh and bindable by site)
+// Usage: node tests/config.test.mjs; no npm install needed
 import { readFileSync } from "node:fs";
 import { ok, eq, sec, done } from "./mini.mjs";
 import { parseJsonc } from "../tools/jsonc.mjs";
@@ -9,60 +9,60 @@ const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), "utf8");
 
 await sec("wrangler.jsonc", () => {
   const w = parseJsonc(read("wrangler.jsonc"));
-  eq([w.name, w.main], ["hackathon-api", "src/worker.js"], "Worker 名 hackathon-api（site 的服务绑定认这个名字）");
-  eq([w.assets?.directory, w.assets?.binding], ["public", "ASSETS"], "静态资源 public/，绑定 ASSETS");
-  ok(["0", "1"].includes(w.vars?.MOCK), `vars.MOCK 是字符串 "0" 或 "1"（现在 ${JSON.stringify(w.vars?.MOCK)}；worker 只认 "0" 为关）`);
-  ok(/^https:\/\//.test(w.vars?.LLM_BASE_URL || ""), `LLM_BASE_URL 是 https：${w.vars?.LLM_BASE_URL}`);
+  eq([w.name, w.main], ["hackathon-api", "src/worker.js"], "Worker name hackathon-api (the site service binding uses this name)");
+  eq([w.assets?.directory, w.assets?.binding], ["public", "ASSETS"], "static assets in public/, binding ASSETS");
+  ok(["0", "1"].includes(w.vars?.MOCK), `vars.MOCK is the string "0" or "1" (currently ${JSON.stringify(w.vars?.MOCK)}; the Worker treats only "0" as off)`);
+  ok(/^https:\/\//.test(w.vars?.LLM_BASE_URL || ""), `LLM_BASE_URL is https: ${w.vars?.LLM_BASE_URL}`);
   ok(typeof w.vars?.LLM_MODEL === "string" && w.vars.LLM_MODEL.length > 0, `LLM_MODEL = ${w.vars?.LLM_MODEL}`);
   const secretish = Object.keys(w.vars || {}).filter((k) => /KEY|SECRET|TOKEN|PASSWORD/i.test(k));
-  eq(secretish, [], "反向：vars 里没有 key / secret / token（key 只用 wrangler secret put）");
-  ok(!("services" in w), "api 自己不绑别的 Worker（只有 site 绑它）");
-  eq(w.workers_dev, false, "不开 hackathon-api.*.workers.dev：公开入口只有 site（服务绑定不需要它）");
+  eq(secretish, [], "negative: no key / secret / token in vars (the key goes only through wrangler secret put)");
+  ok(!("services" in w), "api binds no other Worker (only site binds it)");
+  eq(w.workers_dev, false, "no hackathon-api.*.workers.dev: site is the only public entry point (the service binding does not need it)");
   for (const k of ["LLM_MAX_CALLS_PER_MIN", "LLM_MAX_CALLS_PER_DAY"]) {
-    ok(/^[0-9]+$/.test(w.vars?.[k] ?? ""), `vars.${k} 是整数字符串（现在 ${JSON.stringify(w.vars?.[k])}）`);
+    ok(/^[0-9]+$/.test(w.vars?.[k] ?? ""), `vars.${k} is an integer string (currently ${JSON.stringify(w.vars?.[k])})`);
   }
 });
 
-await sec("Durable Object BUDGET：大模型每日上限的全局计数", () => {
+await sec("Durable Object BUDGET: the global counter for the daily LLM cap", () => {
   const w = parseJsonc(read("wrangler.jsonc"));
   const b = (w.durable_objects?.bindings || []).find((x) => x.name === "BUDGET");
-  eq(b?.class_name, "LlmBudget", "绑定 BUDGET → 类 LlmBudget（src/llm.js 认 env.BUDGET）");
+  eq(b?.class_name, "LlmBudget", "binding BUDGET → class LlmBudget (src/llm.js uses env.BUDGET)");
   const sqlite = (w.migrations || []).flatMap((m) => m.new_sqlite_classes || []);
-  ok(sqlite.includes("LlmBudget"), "migrations 用 new_sqlite_classes（免费版只能用 SQLite 后端的 DO）");
-  ok(!(w.migrations || []).some((m) => (m.new_classes || []).includes("LlmBudget")), "反向：不是 new_classes（KV 后端免费版部署不上）");
-  eq(typeof entry.LlmBudget, "function", "入口 src/worker.js 导出了 LlmBudget（workerd 按名字找类）");
+  ok(sqlite.includes("LlmBudget"), "migrations use new_sqlite_classes (the free plan only allows SQLite-backed DOs)");
+  ok(!(w.migrations || []).some((m) => (m.new_classes || []).includes("LlmBudget")), "negative: not new_classes (KV-backed DOs cannot be deployed on the free plan)");
+  eq(typeof entry.LlmBudget, "function", "the entry src/worker.js exports LlmBudget (workerd looks classes up by name)");
 });
 
-await sec("Durable Object REGISTER：施工登记表", () => {
+await sec("Durable Object REGISTER: the worksite register", () => {
   const w = parseJsonc(read("wrangler.jsonc"));
   const b = (w.durable_objects?.bindings || []).find((x) => x.name === "REGISTER");
-  eq(b?.class_name, "WorksiteRegister", "绑定 REGISTER → 类 WorksiteRegister（src/register.js 认 env.REGISTER）");
-  eq((w.migrations || []).map((m) => m.tag), ["v1", "v2"], "migrations 只往后加：v1 → v2");
-  eq(w.migrations[0], { tag: "v1", new_sqlite_classes: ["LlmBudget"] }, "反向：已部署的 v1 一个字没改（改了 deploy 会报 migration 错）");
-  eq(w.migrations[1], { tag: "v2", new_sqlite_classes: ["WorksiteRegister"] }, "v2 用 new_sqlite_classes 加 WorksiteRegister");
-  eq(typeof entry.WorksiteRegister, "function", "入口 src/worker.js 导出了 WorksiteRegister");
+  eq(b?.class_name, "WorksiteRegister", "binding REGISTER → class WorksiteRegister (src/register.js uses env.REGISTER)");
+  eq((w.migrations || []).map((m) => m.tag), ["v1", "v2"], "migrations are append-only: v1 → v2");
+  eq(w.migrations[0], { tag: "v1", new_sqlite_classes: ["LlmBudget"] }, "negative: the deployed v1 is unchanged (changing it makes deploy fail with a migration error)");
+  eq(w.migrations[1], { tag: "v2", new_sqlite_classes: ["WorksiteRegister"] }, "v2 adds WorksiteRegister with new_sqlite_classes");
+  eq(typeof entry.WorksiteRegister, "function", "the entry src/worker.js exports WorksiteRegister");
 });
 
-await sec("tests/workerd.test.mjs 自给自足：不吃 wrangler.jsonc 的 MOCK、不吃本机 .dev.vars 的 key", () => {
+await sec("tests/workerd.test.mjs is hermetic: ignores MOCK in wrangler.jsonc and any key in a local .dev.vars", () => {
   const t = read("tests/workerd.test.mjs");
-  ok(/const OFF = \{ MOCK: "1", LLM_API_KEY: "" \}/.test(t), "默认那个 Worker 用 vars 强制 MOCK=1、key 为空（lead 改 MOCK=0 后门禁照样绿，也不会花钱）");
-  ok(/\bvars,\s*\n\s*persist: false/.test(t), "unstable_dev 带 vars 覆盖、persist:false（DO 计数不落盘）");
-  ok(/LLM_BASE_URL: `http:\/\/127\.0\.0\.1:/.test(t), "打开大模型的那个 Worker 只连本进程的假服务商");
+  ok(/const OFF = \{ MOCK: "1", LLM_API_KEY: "" \}/.test(t), "the default Worker forces MOCK=1 and an empty key via vars (the check stays green and spends nothing even with MOCK=0 in wrangler.jsonc)");
+  ok(/\bvars,\s*\n\s*persist: false/.test(t), "unstable_dev with a vars override and persist:false (DO counters are not saved to disk)");
+  ok(/LLM_BASE_URL: `http:\/\/127\.0\.0\.1:/.test(t), "the Worker with the LLM on talks only to the in-process fake provider");
 });
 
-await sec("package.json + 锁文件：deploy.sh 能部署", () => {
+await sec("package.json + lockfile: deployable by deploy.sh", () => {
   const pkg = JSON.parse(read("package.json"));
-  eq(pkg.scripts?.deploy, "wrangler deploy", "有 deploy 脚本（deploy.sh 跑 npm run deploy）");
+  eq(pkg.scripts?.deploy, "wrangler deploy", "has a deploy script (deploy.sh runs npm run deploy)");
   const lock = JSON.parse(read("package-lock.json"));
-  ok(/^4\./.test(lock.packages?.["node_modules/wrangler"]?.version || ""), `锁文件里有 wrangler 4.x（deploy.sh 用 npm ci 按锁装）：${lock.packages?.["node_modules/wrangler"]?.version}`);
-  eq(lock.packages?.[""]?.devDependencies, pkg.devDependencies, "锁文件和 package.json 的依赖一致（不然 npm ci 直接失败）");
+  ok(/^4\./.test(lock.packages?.["node_modules/wrangler"]?.version || ""), `the lockfile has wrangler 4.x (deploy.sh installs from it with npm ci): ${lock.packages?.["node_modules/wrangler"]?.version}`);
+  eq(lock.packages?.[""]?.devDependencies, pkg.devDependencies, "lockfile and package.json dependencies match (otherwise npm ci fails)");
 });
 
-await sec(".dev.vars.example：只有变量名和假值", () => {
+await sec(".dev.vars.example: variable names and placeholder values only", () => {
   const ex = read(".dev.vars.example");
-  for (const k of ["MOCK", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]) ok(new RegExp(`^${k}=`, "m").test(ex), `列了 ${k}`);
-  eq(ex.match(/^LLM_API_KEY=(.*)$/m)?.[1], "", "反向：LLM_API_KEY 的值是空的");
-  eq(ex.match(/^MOCK=(.*)$/m)?.[1], "1", "示例默认 MOCK=1（复制过去不花钱）");
+  for (const k of ["MOCK", "LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]) ok(new RegExp(`^${k}=`, "m").test(ex), `lists ${k}`);
+  eq(ex.match(/^LLM_API_KEY=(.*)$/m)?.[1], "", "negative: the LLM_API_KEY value is empty");
+  eq(ex.match(/^MOCK=(.*)$/m)?.[1], "1", "the example defaults to MOCK=1 (copying it spends nothing)");
 });
 
 done();

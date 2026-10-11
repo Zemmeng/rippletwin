@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""用途：校验 public/cbd/ 下的 network.json、flows.json、signals.json（规则见 PRD.md 第 7 节）。
-文件还没生成时只做骨架检查；文件一出现，对应的校验自动生效。
-用法：python3 tests/test_roads.py（test.sh 会自动跑）；最后一行固定「N passed, M failed」
+"""Purpose: validate network.json, flows.json, signals.json, equipment.json, transit.json, walk.json and peds.json under public/cbd/ (rules: PRD.md section 7, PRD-2.md section 6).
+Before the files exist only the skeleton is checked; once a file appears, its checks run automatically.
+Usage: python3 tests/test_roads.py (test.sh runs it); the last line is always "N passed, M failed"
 """
 import collections, json, math, os, sys
 
@@ -22,14 +22,14 @@ def ok(cond, msg):
 def load(name):
     p = os.path.join(CBD, name)
     if not os.path.exists(p):
-        print('·  %s 还没生成，跳过它的校验' % name)
+        print('·  %s not generated yet, skipping its checks' % name)
         return None, p
     with open(p, encoding='utf-8') as f:
         return json.load(f), p
 
 
 def largest_scc_share(node_ids, links):
-    """最大强连通分量占全部节点的比例（Kosaraju，迭代写法，避免递归太深）。"""
+    """Share of all nodes in the largest strongly connected component (Kosaraju, iterative to avoid deep recursion)."""
     fwd, rev = {n: [] for n in node_ids}, {n: [] for n in node_ids}
     for l in links:
         if l['from'] in fwd and l['to'] in fwd:
@@ -60,31 +60,31 @@ def largest_scc_share(node_ids, links):
     return best / max(1, len(node_ids))
 
 
-# ---- 骨架 ----
-ok(os.path.exists(os.path.join(MOD, 'PRD.md')) and os.path.exists(os.path.join(MOD, 'README.md')), 'PRD.md 和 README.md 都在')
+# ---- skeleton ----
+ok(os.path.exists(os.path.join(MOD, 'PRD.md')) and os.path.exists(os.path.join(MOD, 'README.md')), 'PRD.md and README.md both exist')
 tools = [f for f in os.listdir(os.path.join(MOD, 'tools')) if f.endswith('.py')] if os.path.isdir(os.path.join(MOD, 'tools')) else []
 bad = []
 for t in tools:
     src = os.path.join(MOD, 'tools', t)
     try:
-        compile(open(src, encoding='utf-8').read(), src, 'exec')  # 只检查语法，不写 .pyc
+        compile(open(src, encoding='utf-8').read(), src, 'exec')  # syntax check only, no .pyc written
     except SyntaxError as e:
-        bad.append('%s 第 %s 行: %s' % (t, e.lineno, e.msg))
-ok(not bad, 'tools/ 下 %d 个脚本语法都对%s' % (len(tools), ('：' + '；'.join(bad)) if bad else ''))
+        bad.append('%s line %s: %s' % (t, e.lineno, e.msg))
+ok(not bad, 'all %d scripts under tools/ have valid syntax%s' % (len(tools), (': ' + '; '.join(bad)) if bad else ''))
 
 # ---- network.json ----
 net, p = load('network.json')
 link_ids = set()
 if net is not None:
-    ok(os.path.getsize(p) < 2 * 1024 * 1024, 'network.json 小于 2 MB（实际 %d KB）' % (os.path.getsize(p) // 1024))
+    ok(os.path.getsize(p) < 2 * 1024 * 1024, 'network.json is under 2 MB (actual %d KB)' % (os.path.getsize(p) // 1024))
     nodes, links = net.get('nodes', []), net.get('links', [])
     nid = [n.get('id') for n in nodes]; lid = [l.get('id') for l in links]
     link_ids = set(lid)
-    ok(isinstance(net.get('version'), int), 'version 是整数')
-    ok(len(nid) == len(set(nid)) and len(lid) == len(set(lid)) and nodes and links, '节点 %d 个、路段 %d 条，id 各自唯一' % (len(nid), len(lid)))
+    ok(isinstance(net.get('version'), int), 'version is an integer')
+    ok(len(nid) == len(set(nid)) and len(lid) == len(set(lid)) and nodes and links, '%d nodes, %d links, ids unique within each' % (len(nid), len(lid)))
     ns = set(nid)
     dangling = [l['id'] for l in links if l.get('from') not in ns or l.get('to') not in ns]
-    ok(not dangling, '每条路段的 from / to 都是存在的节点%s' % ('（坏的：%s）' % dangling[:5] if dangling else ''))
+    ok(not dangling, 'every link\'s from / to is an existing node%s' % (' (bad: %s)' % dangling[:5] if dangling else ''))
     badv = []
     for l in links:
         try:
@@ -93,120 +93,120 @@ if net is not None:
                 badv.append(l['id'])
         except (KeyError, TypeError, ZeroDivisionError):
             badv.append(l.get('id'))
-    ok(not badv, '路段的长度、车道、限速、通行能力、自由流时间都合理%s' % ('（有问题：%d 条，如 %s）' % (len(badv), badv[:5]) if badv else ''))
+    ok(not badv, 'link length, lanes, speed limit, capacity and free-flow time are all plausible%s' % (' (problems: %d links, e.g. %s)' % (len(badv), badv[:5]) if badv else ''))
     s, w, n, e = net.get('bbox', [0, 0, 0, 0]); m = 300 / 111320.0; mlon = m / max(0.1, math.cos(math.radians((s + n) / 2)))
     outside = [x['id'] for x in nodes if not (s - m <= x['lat'] <= n + m and w - mlon <= x['lon'] <= e + mlon)]
-    ok(not outside, '所有节点都在 bbox 内（外扩 300 米）%s' % ('（出界 %d 个）' % len(outside) if outside else ''))
+    ok(not outside, 'all nodes are inside the bbox (with a 300 m margin)%s' % (' (%d outside)' % len(outside) if outside else ''))
     share = largest_scc_share(nid, links)
-    ok(share >= 0.9, '路网连通：最大强连通分量占 %.0f%% 的节点（要求 ≥ 90%%）' % (share * 100))
+    ok(share >= 0.9, 'network connectivity: the largest strongly connected component holds %.0f%% of nodes (required ≥ 90%%)' % (share * 100))
 
 # ---- flows.json ----
 flows, p = load('flows.json')
 if flows is not None:
-    ok(os.path.getsize(p) < 2 * 1024 * 1024, 'flows.json 小于 2 MB（实际 %d KB）' % (os.path.getsize(p) // 1024))
+    ok(os.path.getsize(p) < 2 * 1024 * 1024, 'flows.json is under 2 MB (actual %d KB)' % (os.path.getsize(p) // 1024))
     days = flows.get('days', {})
     badf = []
     for d in ('wd', 'we'):
         for k, arr in days.get(d, {}).items():
             if not (isinstance(arr, list) and len(arr) == 24 and all(isinstance(x, (int, float)) and x >= 0 for x in arr)):
                 badf.append('%s/%s' % (d, k))
-    ok(not badf, '每组都是 24 个非负数%s' % ('（有问题：%s）' % badf[:5] if badf else ''))
+    ok(not badf, 'every profile is 24 non-negative numbers%s' % (' (problems: %s)' % badf[:5] if badf else ''))
     if link_ids:
         miss = [k for k in link_ids if k not in days.get('wd', {}) or k not in days.get('we', {})]
-        ok(not miss, '路网里每条路段都有工作日和周末车流%s' % ('（缺 %d 条）' % len(miss) if miss else ''))
+        ok(not miss, 'every network link has weekday and weekend flows%s' % (' (%d missing)' % len(miss) if miss else ''))
         names = {l['id']: l.get('name') or '' for l in net['links']}
         lat = [days['wd'][k][17] for k in days.get('wd', {}) if 'la trobe' in str(names.get(k, '')).lower()]
-        ok(any(100 <= v <= 2000 for v in lat), '常识：La Trobe 至少一条路段工作日 17 点在 100–2000 辆 / 小时（找到 %d 条）' % len(lat))
-        # 校准：按路口估的每车道流量（site_split）不能和按车道实测的（detector_map）差出 2 倍
+        ok(any(100 <= v <= 2000 for v in lat), 'sanity: at least one La Trobe link carries 100–2000 veh/h at 17:00 on weekdays (%d links found)' % len(lat))
+        # Calibration: per-lane flow estimated per junction (site_split) must be within 2x of per-lane measurements (detector_map)
         meth = flows.get('method', {}); lanes = {l['id']: l['lanes'] for l in net['links']}
         per_lane = lambda m: sorted(days['wd'][k][17] / lanes[k] for k, v in meth.items() if v == m and k in lanes)
         dm, ss = per_lane('detector_map'), per_lane('site_split')
         if dm and ss:
             a, b = dm[len(dm) // 2], ss[len(ss) // 2]
-            ok(0.5 <= b / max(a, 1) <= 2, '校准：site_split 每车道 17 点中位数 %d，detector_map %d，相差在 2 倍内' % (b, a))
+            ok(0.5 <= b / max(a, 1) <= 2, 'calibration: site_split median per lane at 17:00 is %d, detector_map %d, within 2x' % (b, a))
         cap = {l['id']: l['cap_vph'] for l in net['links']}
         over = [k for k in days.get('wd', {}) if k in cap and max(days['wd'][k]) > 1.2 * cap[k]]
-        ok(len(over) <= 0.05 * max(1, len(cap)), '工作日任一小时车流超过通行能力 1.2 倍的路段不超过 5%%（%d 条）' % len(over))
+        ok(len(over) <= 0.05 * max(1, len(cap)), 'no more than 5%% of links exceed 1.2x capacity in any weekday hour (%d links)' % len(over))
     cov = flows.get('coverage', {})
-    ok(cov.get('links') == cov.get('measured', -1) + cov.get('estimated', -1), 'coverage：links = measured + estimated')
+    ok(cov.get('links') == cov.get('measured', -1) + cov.get('estimated', -1), 'coverage: links = measured + estimated')
 
 # ---- signals.json ----
 sig, p = load('signals.json')
 if sig is not None:
     sites = sig.get('sites', [])
     ids = [x.get('site') for x in sites]
-    ok(len(ids) == len(set(ids)), '信号灯站点号唯一（%d 个）' % len(ids))
+    ok(len(ids) == len(set(ids)), 'signal site numbers are unique (%d sites)' % len(ids))
     if net is not None:
         ns = {n['id'] for n in net['nodes']}
         badn = [x['site'] for x in sites if x.get('node') is not None and x['node'] not in ns]
-        ok(not badn, '匹配到的节点都存在%s' % ('（坏的：%s）' % badn[:5] if badn else ''))
+        ok(not badn, 'every matched node exists%s' % (' (bad: %s)' % badn[:5] if badn else ''))
 
-# ---- equipment.json（PRD-2 §6.4）----
+# ---- equipment.json (PRD-2 section 6.4) ----
 eq, p = load('equipment.json')
 if eq is not None:
-    ok(isinstance(eq.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'equipment.json：version 是整数、小于 2 MB')
+    ok(isinstance(eq.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'equipment.json: version is an integer, under 2 MB')
     items = eq.get('items', [])
     ids = [x.get('id') for x in items]
-    ok(items and len(ids) == len(set(ids)), '设备 %d 种，id 唯一' % len(ids))
+    ok(items and len(ids) == len(set(ids)), '%d equipment types, ids unique' % len(ids))
     CAT = {'barrier', 'sign', 'vms', 'arrow_board', 'ped_signal'}
     EFF = {'close', 'route_vehicles', 'route_peds', 'warn', 'message', 'control_crossing'}
     bad = [x.get('id') for x in items if x.get('category') not in CAT or x.get('effect') not in EFF]
-    ok(not bad, 'category 和 effect 都在约定取值里%s' % ('（坏的：%s）' % bad if bad else ''))
+    ok(not bad, 'category and effect take only the agreed values%s' % (' (bad: %s)' % bad if bad else ''))
     bad = [x['id'] for x in items if x.get('category') == 'barrier' and not (x.get('unit_len_m') or 0) > 0]
     bad += [x['id'] for x in items if x.get('category') == 'vms' and not ((x.get('lines') or 0) > 0 and (x.get('chars_per_line') or 0) > 0)]
-    ok(not bad, '护栏都有 unit_len_m > 0，VMS 都有 lines 和 chars_per_line%s' % ('（坏的：%s）' % bad if bad else ''))
+    ok(not bad, 'every barrier has unit_len_m > 0 and every VMS has lines and chars_per_line%s' % (' (bad: %s)' % bad if bad else ''))
     bad = [x['id'] for x in items if not (isinstance(x.get('qty'), (int, float)) and x['qty'] >= 0)
            or not set(x.get('assumed', [])) <= set(x)]
-    ok(not bad, '每项 qty ≥ 0，assumed 里列的字段都存在%s' % ('（坏的：%s）' % bad if bad else ''))
-    # VMS 每行字数必须和 T5 的 readSigns() / /api/read 一致（每行 10 字，超了回 400）；官网同页 FAQ 写 12–13，以文案指南的 10 为准
+    ok(not bad, 'every item has qty ≥ 0 and every field listed in assumed exists%s' % (' (bad: %s)' % bad if bad else ''))
+    # VMS characters per line must match readSigns() / /api/read in apps/api (10 per line, longer gets a 400); the RPM Hire FAQ says 12–13 but its message guide says 10, which is used
     vms = {x['id']: x.get('chars_per_line') for x in items if x.get('category') == 'vms'}
-    ok(vms and all(v == 10 for v in vms.values()), 'VMS 每行 10 个字符，和 T5 读屏接口一致（%s）' % vms)
+    ok(vms and all(v == 10 for v in vms.values()), 'VMS has 10 characters per line, matching the sign-reading API (%s)' % vms)
     have = {x.get('category') for x in items}
     ok({'barrier', 'sign', 'vms', 'arrow_board', 'ped_signal'} <= have and sum(x.get('category') == 'sign' for x in items) >= 5,
-       '最少清单：护栏、≥ 5 种静态标志、VMS、箭头板、行人临时信号灯都有')
+       'minimum list: barriers, ≥ 5 static signs, VMS, arrow board and portable pedestrian signals are all present')
 
-# ---- transit.json（PRD-2 §6）----
+# ---- transit.json (PRD-2 section 6) ----
 tr, p = load('transit.json')
 if tr is not None:
-    ok(isinstance(tr.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'transit.json：version 是整数、小于 2 MB（%d KB）' % (os.path.getsize(p) // 1024))
+    ok(isinstance(tr.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'transit.json: version is an integer, under 2 MB (%d KB)' % (os.path.getsize(p) // 1024))
     routes, stops = tr.get('routes', []), tr.get('stops', [])
     rids, sids = {r['id'] for r in routes}, {x['id'] for x in stops}
-    ok(len(rids) == len(routes) and len(sids) == len(stops) and routes and stops, '线路 %d 条、站点 %d 个，id 各自唯一' % (len(routes), len(stops)))
+    ok(len(rids) == len(routes) and len(sids) == len(stops) and routes and stops, '%d routes, %d stops, ids unique within each' % (len(routes), len(stops)))
     if net is not None:
         lk = {l['id']: l for l in net['links']}
         bad = [x for r in routes for d in r['dirs'] for x in d['links'] if x not in lk]
         bad += [x['road_link'] for x in stops if x.get('road_link') is not None and x['road_link'] not in lk]
-        ok(not bad, '线路用到的路段、站点挂的 road_link 都在 network.json 里%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+        ok(not bad, 'every link used by a route and every stop road_link is in network.json%s' % (' (bad: %s)' % bad[:5] if bad else ''))
         tram_links = {x for r in routes if r['mode'] == 'tram' for d in r['dirs'] for x in d['links']}
         share = sum(lk[x]['tram'] for x in tram_links if x in lk) / max(1, len(tram_links))
-        ok(share >= 0.8, '电车线路用到的路段里 %.0f%% 在 network.json 标了 tram（要求 ≥ 80%%）' % (share * 100))
+        ok(share >= 0.8, '%.0f%% of links used by tram routes are tagged tram in network.json (required ≥ 80%%)' % (share * 100))
         on_lt = {r['id'] for r in routes if r['mode'] == 'tram' for d in r['dirs'] for x in d['links'] if 'la trobe' in str(lk.get(x, {}).get('name') or '').lower()}
-        ok(on_lt, '常识：La Trobe St 上至少挂着一条电车线路（%s）' % sorted(on_lt))
+        ok(on_lt, 'sanity: at least one tram route runs on La Trobe St (%s)' % sorted(on_lt))
     bad = [x for r in routes for d in r['dirs'] for x in d['stops'] if x not in sids]
     bad += [r_ for x in stops for r_ in x.get('routes', []) if r_ not in rids]
-    ok(not bad, '线路的站点、站点的线路互相都存在%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+    ok(not bad, 'route stops and stop routes reference each other consistently%s' % (' (bad: %s)' % bad[:5] if bad else ''))
     bad = ['%s/%s/%s' % (r['id'], d['dir'], k) for r in routes for d in r['dirs'] for k in ('wd', 'we')
            if not (len(d['trips'].get(k, [])) == 24 and all(isinstance(v, (int, float)) and v >= 0 for v in d['trips'][k]))]
-    ok(not bad, '每个方向的班次都是 24 个非负数%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+    ok(not bad, 'trips for every direction are 24 non-negative numbers%s' % (' (bad: %s)' % bad[:5] if bad else ''))
 
-# ---- walk.json + peds.json（PRD-2 §6）----
+# ---- walk.json + peds.json (PRD-2 section 6) ----
 wk, p = load('walk.json')
 wl_ids = set()
 if wk is not None:
-    ok(isinstance(wk.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'walk.json：version 是整数、小于 2 MB（%d KB）' % (os.path.getsize(p) // 1024))
+    ok(isinstance(wk.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'walk.json: version is an integer, under 2 MB (%d KB)' % (os.path.getsize(p) // 1024))
     wn, wls = wk.get('nodes', []), wk.get('links', [])
     wnid = [x['id'] for x in wn]; wl_ids = {x['id'] for x in wls}
-    ok(wn and wls and len(wnid) == len(set(wnid)) and len(wl_ids) == len(wls), '行人节点 %d、路段 %d，id 各自唯一' % (len(wnid), len(wls)))
+    ok(wn and wls and len(wnid) == len(set(wnid)) and len(wl_ids) == len(wls), '%d walking nodes, %d links, ids unique within each' % (len(wnid), len(wls)))
     ns = set(wnid)
     bad = [x['id'] for x in wls if x['a'] not in ns or x['b'] not in ns]
     if net is not None:
         lk = {l['id'] for l in net['links']}
         bad += [x['road_link'] for x in wls if x.get('road_link') is not None and x['road_link'] not in lk]
-    ok(not bad, '行人路段的端点、挂的 road_link 都存在%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+    ok(not bad, 'every walking link\'s endpoints and road_link exist%s' % (' (bad: %s)' % bad[:5] if bad else ''))
     KIND = {'sidewalk', 'crossing', 'path', 'mall', 'other'}; CROSS = {'signal', 'zebra', 'uncontrolled', None}
     bad = [x['id'] for x in wls if x.get('kind') not in KIND or x.get('crossing') not in CROSS or x.get('side') not in ('left', 'right', None)]
-    ok(not bad, 'kind / crossing / side 都在约定取值里%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
-    # 无向图最大连通块（并查集）
+    ok(not bad, 'kind / crossing / side take only the agreed values%s' % (' (bad: %s)' % bad[:5] if bad else ''))
+    # largest connected component of the undirected graph (union-find)
     par = {x: x for x in ns}
 
     def find(x):
@@ -217,23 +217,23 @@ if wk is not None:
         par[find(x['a'])] = find(x['b'])
     comp = collections.Counter(find(x) for x in ns) if ns else collections.Counter()
     share = max(comp.values()) / len(ns) if ns else 0
-    ok(share >= 0.9, '行人路网连通：最大连通块占 %.0f%% 的节点（要求 ≥ 90%%）' % (share * 100))
+    ok(share >= 0.9, 'walking network connectivity: the largest connected component holds %.0f%% of nodes (required ≥ 90%%)' % (share * 100))
 
 pd_, p = load('peds.json')
 if pd_ is not None:
-    ok(isinstance(pd_.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'peds.json：version 是整数、小于 2 MB（%d KB）' % (os.path.getsize(p) // 1024))
+    ok(isinstance(pd_.get('version'), int) and os.path.getsize(p) < 2 * 1024 * 1024, 'peds.json: version is an integer, under 2 MB (%d KB)' % (os.path.getsize(p) // 1024))
     days = pd_.get('days', {})
     bad = ['%s/%s' % (d, k) for d in ('wd', 'we') for k, arr in days.get(d, {}).items()
            if not (isinstance(arr, list) and len(arr) == 24 and all(isinstance(v, (int, float)) and v >= 0 for v in arr))]
-    ok(not bad, '行人流量每组都是 24 个非负数%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+    ok(not bad, 'every pedestrian profile is 24 non-negative numbers%s' % (' (bad: %s)' % bad[:5] if bad else ''))
     if wl_ids:
         bad = [k for d in ('wd', 'we') for k in days.get(d, {}) if k not in wl_ids]
         bad += [x['walk_link'] for x in pd_.get('sensors', []) if x.get('walk_link') is not None and x['walk_link'] not in wl_ids]
-        ok(not bad, '行人流量和传感器挂的 walk_link 都在 walk.json 里%s' % ('（坏的：%s）' % bad[:5] if bad else ''))
+        ok(not bad, 'every pedestrian flow key and sensor walk_link is in walk.json%s' % (' (bad: %s)' % bad[:5] if bad else ''))
     cov = pd_.get('coverage', {})
-    ok(cov.get('links') == cov.get('measured', -1) + cov.get('estimated', -1), 'peds coverage：links = measured + estimated')
+    ok(cov.get('links') == cov.get('measured', -1) + cov.get('estimated', -1), 'peds coverage: links = measured + estimated')
     peaks = [max(days['wd'][x['walk_link']]) for x in pd_.get('sensors', []) if x.get('walk_link') in days.get('wd', {})]
-    ok(peaks and 500 <= max(peaks) <= 10000, '常识：传感器工作日最忙那小时的最大值在 500–10000 人 / 小时（%s）' % (max(peaks) if peaks else '无'))
+    ok(peaks and 500 <= max(peaks) <= 10000, 'sanity: the busiest weekday sensor hour is between 500 and 10,000 ped/h (%s)' % (max(peaks) if peaks else 'none'))
 
 print('%d passed, %d failed' % (P, F))
 sys.exit(1 if F else 0)

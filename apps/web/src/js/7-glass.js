@@ -1,6 +1,6 @@
 'use strict';
 /* ============================================================
-   T14 liquid glass (docs/arch/T14-liquid-glass-PRD.md) — appearance only, no numbers change.
+   T14 liquid glass (docs/hackathon/specs/T14-liquid-glass-PRD.md) — appearance only, no numbers change.
    · Floating layout (desktop): the map fills the window; top bar, layer rail, analysis panel and timeline float over it.
      .app carries --safe-l/r/t/b = how much of the map the glass covers; the view, scale bar, graticule labels and the alert
      keep inside what is left (insets()).
@@ -61,7 +61,7 @@ function applyGlass(){
 
 /* ---------- compact analysis panel ---------- */
 const SEC_KEEP='textarea,input,select,.metrics,.eng-opts,#engOut,#eng4,#aiBox,.eng-checklist,#cmp4';
-const SEC_FOLD='.eng-where'; // 6-step UI: nearby works and compare have their own tab / step now // brief mode opens these folded (09-30, tutor: fewer words) — the header says the gist, a tap opens them // #aiBox：AI 路人面板在简洁模式下也默认展开（演示要一眼看到）
+const SEC_FOLD='.eng-where'; // 6-step UI: nearby works and compare have their own tab / step now // brief mode opens these folded (09-30, tutor: fewer words) — the header says the gist, a tap opens them // #aiBox: the AI road-users panel also starts open in brief mode (the demo needs it visible at a glance)
 function compactPanel(){
   const P=document.getElementById('panel');if(!P)return;
   if(GL.obs)GL.obs.disconnect();

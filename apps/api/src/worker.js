@@ -1,6 +1,6 @@
-// Worker 薄路由：入口校验 + 分发；读屏规则在 public/js/rules.js（浏览器和这里共用），大模型在 src/llm.js
-// GET /api/health 自检 · POST /api/read 读懂屏上的字 · POST /api/explain 方案解读 · /api/worksites 施工登记表（src/register.js）· 其余交给静态资源 public/
-// 默认（MOCK 不是 "0" 或没有 LLM_API_KEY）只用规则、不花钱；打开大模型见 README「怎么接大模型」（T19）
+// Thin Worker router: input validation and dispatch. The keyword rules live in public/js/rules.js (shared with the browser); the LLM layer is in src/llm.js.
+// GET /api/health status · POST /api/read sign reading · POST /api/explain plan explanation · /api/worksites worksite register (src/register.js) · everything else goes to the static assets in public/
+// By default (MOCK is not "0", or there is no LLM_API_KEY) only the rules run and nothing is spent. To enable the LLM, see the README section "Status and re-enabling the LLM".
 import { normalizeRequest, SignError } from "../public/js/signs.js";
 import { ruleReading } from "../public/js/rules.js";
 import { llmConfig, llmStatus, serverReading, serverExplain } from "./llm.js";
@@ -8,16 +8,16 @@ import { handleWorksites } from "./register.js";
 import { normalizeExplainRequest, ruleExplain, ExplainError } from "../public/js/explain.js";
 import { readLimited, json, fail } from "./http.js";
 
-// Durable Object 类必须从入口模块导出（wrangler.jsonc 的 durable_objects / migrations 认这个名字）
+// Durable Object classes must be exported from the entry module (wrangler.jsonc durable_objects / migrations refer to them by name)
 export { LlmBudget } from "./budget.js";
 export { WorksiteRegister } from "./register.js";
 export { readLimited };
 
-// 部署时可用 --var VERSION:$(git rev-parse --short HEAD) 覆盖
+// Can be overridden at deploy time with --var VERSION:$(git rev-parse --short HEAD)
 const VERSION = "0.3.0";
-const MAX_BODY = 8 * 1024; // 合法请求最多几百字节，8KB 足够
+const MAX_BODY = 8 * 1024; // a valid request is a few hundred bytes; 8 KB is plenty
 
-// 只有明确写 MOCK=0 才算关掉 MOCK：变量没配时默认不花钱
+// MOCK is off only when it is explicitly "0": an unset variable means no spending
 export const isMock = (env) => env?.MOCK !== "0";
 
 export default {
@@ -26,20 +26,20 @@ export default {
     const path = url.pathname;
 
     if (path === "/api/health") {
-      // llm：{ mode, model, key: 有没有（不给值）, cache: kv / cache-api / memory（按主机名）, prompt_v, explain_v, provider, budget, per_day, per_min }
-      // register：施工登记表的 Durable Object 绑上没有（没绑 = 只有预置的演示施工，只读）
+      // llm: { mode, model, key: present or not (never the value), cache: kv / cache-api / memory (by hostname), prompt_v, explain_v, provider, budget, per_day, per_min }
+      // register: whether the worksite register Durable Object is bound (unbound = only the read-only seed worksites)
       return json({ ok: true, v: env.VERSION || VERSION, mock: isMock(env), llm: llmStatus(env, url.hostname), register: hasRegister(env) });
     }
 
     if (path === "/api/read") {
-      if (request.method !== "POST") return fail(405, "method", "只接受 POST");
+      if (request.method !== "POST") return fail(405, "method", "POST only");
       const text = await readLimited(request, MAX_BODY);
-      if (text === null) return fail(413, "too_large", `请求体超过 ${MAX_BODY} 字节`);
+      if (text === null) return fail(413, "too_large", `request body exceeds ${MAX_BODY} bytes`);
       let body;
       try {
         body = JSON.parse(text);
       } catch {
-        return fail(400, "bad_json", "请求体不是合法 JSON");
+        return fail(400, "bad_json", "request body is not valid JSON");
       }
       let req;
       try {
@@ -51,16 +51,16 @@ export default {
       return json({ ok: true, reading: await read(req, env, url.origin) });
     }
 
-    // AI 解读（提案 #48 第 ⑥ 步）：开了大模型（同 /api/read 的条件）问 1 次，回来的字过 sanitizeExplain()；否则 / 出错回规则版（D-0929-2307）
+    // Plan explanation: with the LLM enabled (same conditions as /api/read) ask once and pass the text through sanitizeExplain(); otherwise, or on error, use the rule-based version (D-0929-2307)
     if (path === "/api/explain") {
-      if (request.method !== "POST") return fail(405, "method", "只接受 POST");
+      if (request.method !== "POST") return fail(405, "method", "POST only");
       const text = await readLimited(request, MAX_BODY);
-      if (text === null) return fail(413, "too_large", `请求体超过 ${MAX_BODY} 字节`);
+      if (text === null) return fail(413, "too_large", `request body exceeds ${MAX_BODY} bytes`);
       let body;
       try {
         body = JSON.parse(text);
       } catch {
-        return fail(400, "bad_json", "请求体不是合法 JSON");
+        return fail(400, "bad_json", "request body is not valid JSON");
       }
       let req;
       try {
@@ -77,33 +77,33 @@ export default {
       if (r) return r;
     }
 
-    // 未知 /api/* 明确回 404 JSON：不交给 ASSETS，免得前端把一页 HTML 当成接口响应
-    if (path.startsWith("/api/")) return fail(404, "not_found", "没有这个接口");
+    // Unknown /api/* paths get an explicit JSON 404 instead of going to ASSETS, so the front end never mistakes an HTML page for an API response
+    if (path.startsWith("/api/")) return fail(404, "not_found", "no such endpoint");
 
-    return env.ASSETS ? env.ASSETS.fetch(request) : fail(404, "not_found", "没有静态资源");
+    return env.ASSETS ? env.ASSETS.fetch(request) : fail(404, "not_found", "no static assets");
   },
 };
 
 const hasRegister = (env) => Boolean(env?.REGISTER && typeof env.REGISTER.idFromName === "function");
 
-// req 已规范化。MOCK 或没 key → 规则（和 T19 以前一模一样）；
-// 否则 内存 → KV / Cache API → 大模型（问 3 次合成）→ 任何一步失败回规则。origin：Cache API 的键用同源的假网址
+// req is already normalised. MOCK or no key → rules (no note);
+// otherwise memory → KV / Cache API → LLM (3 samples combined) → rules if any step fails. origin: the Cache API key uses a fake same-origin URL
 export async function read(req, env = {}, origin) {
   if (llmConfig(env).mode !== "llm") return ruleReading(req);
   try {
     return await serverReading(req, env, { origin });
   } catch {
-    return { ...ruleReading(req), note: "llm_error" }; // 不透传报错内容
+    return { ...ruleReading(req), note: "llm_error" }; // never pass the error text through
   }
 }
 
-// req 已规范化（normalizeExplainRequest）。MOCK 或没 key → 规则版（和以前一模一样，没有 note）；
-// 否则 内存 → KV / Cache API → 大模型（1 次）→ 清洗；任何一步失败回规则版 + note
+// req is already normalised (normalizeExplainRequest). MOCK or no key → rule-based version (no note);
+// otherwise memory → KV / Cache API → LLM (1 call) → sanitise; if any step fails, rule-based version + note
 export async function explain(req, env = {}, origin) {
   if (llmConfig(env).mode !== "llm") return ruleExplain(req);
   try {
     return await serverExplain(req, env, { origin });
   } catch {
-    return { ...ruleExplain(req), note: "llm_error" }; // 不透传报错内容
+    return { ...ruleExplain(req), note: "llm_error" }; // never pass the error text through
   }
 }

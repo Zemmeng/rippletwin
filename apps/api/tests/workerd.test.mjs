@@ -1,8 +1,8 @@
-// 冒烟：用 wrangler 的 unstable_dev 在真的 Workers 运行时（workerd）里起 Worker，按 wrangler.jsonc 的配置跑
-// 查 /api/health、/api/read、400、静态资源（reader.js、answers/demo.json）、Durable Object 每日计数。node 直接调 fetch() 测不到的：配置、绑定、打包
-// 用法：cd apps/api && npm i 后 node tests/workerd.test.mjs；没装 wrangler 就跳过（CI 和没 npm i 的队友不受影响）
-// 🔒 自给自足（hermetic）：变量全用 vars 显式覆盖，不管 wrangler.jsonc 的 MOCK 是 0 还是 1、本机 .dev.vars 里放没放真 key，
-//    结果都一样，也绝不会连到真的服务商（第二个 Worker 的大模型地址是本进程里的假服务器）。config.test.mjs 查这几项没被删
+// Smoke test: starts the Worker in the real Workers runtime (workerd) with wrangler's unstable_dev, using the wrangler.jsonc config
+// Checks /api/health, /api/read, 400, static assets (reader.js, answers/demo.json) and the Durable Object daily counter: what calling fetch() directly in Node cannot cover (config, bindings, bundling)
+// Usage: cd apps/api && npm i, then node tests/workerd.test.mjs; skipped when wrangler is not installed (CI and anyone without npm i are unaffected)
+// 🔒 Hermetic: every variable is overridden explicitly via vars, so whether MOCK in wrangler.jsonc is 0 or 1 and whether a local .dev.vars holds a real key,
+//    the result is the same, and no real provider is ever contacted (the second Worker's LLM URL is a fake server in this process). config.test.mjs checks these lines stay
 import { createServer } from "node:http";
 import { ok, eq, sec, done } from "./mini.mjs";
 
@@ -11,10 +11,10 @@ let unstable_dev;
 try {
   ({ unstable_dev } = await import("wrangler"));
 } catch {
-  console.log("⏭ 跳过：没装 wrangler（cd apps/api && npm i 以后再跑）");
+  console.log("⏭ skipped: wrangler not installed (run cd apps/api && npm i, then try again)");
 }
 
-// vars 覆盖 wrangler.jsonc 和 .dev.vars（实测）；persist:false = DO 计数只在内存，每次从 0 开始
+// vars override wrangler.jsonc and .dev.vars (verified); persist:false = DO counters live only in memory and start from 0 each time
 const OFF = { MOCK: "1", LLM_API_KEY: "" };
 const start = (vars) =>
   unstable_dev("src/worker.js", {
@@ -40,38 +40,38 @@ if (unstable_dev) {
   const worker = await start(OFF);
   const post = (body) => postTo(worker, body);
   try {
-    await sec("GET /api/health（测试强制 MOCK=1、没 key：不看 wrangler.jsonc / .dev.vars 写的什么）", async () => {
+    await sec("GET /api/health (the test forces MOCK=1 and no key, whatever wrangler.jsonc / .dev.vars say)", async () => {
       const r = await worker.fetch("/api/health");
       const b = await r.json();
       eq([r.status, b.ok, b.mock], [200, true, true], "200 · ok · mock");
-      eq([b.llm?.mode, b.llm?.key], ["rules", false], "反向：本机 .dev.vars 就算放了 key，这里也是 key:false、mode rules（不会花钱）");
-      eq(b.llm?.budget, true, "wrangler.jsonc 的 BUDGET（Durable Object）绑上了");
+      eq([b.llm?.mode, b.llm?.key], ["rules", false], "negative: even with a key in a local .dev.vars, this is key:false, mode rules (no spending)");
+      eq(b.llm?.budget, true, "the BUDGET Durable Object from wrangler.jsonc is bound");
     });
 
     await sec("POST /api/read", async () => {
       const r = await post(REQ);
       const b = await r.json();
-      eq([r.status, b.ok, b.reading.src], [200, true, "rule"], "200 · 规则读数");
+      eq([r.status, b.ok, b.reading.src], [200, true, "rule"], "200 · rule reading");
       eq([b.reading.advice, b.reading.saving_min], [{ "Russell St": "use" }, 8], "advice · saving_min");
       const bad = await post({ ...REQ, signs: [{ kind: "vms", frames: [["A", "B", "C", "D", "E"]], read_s: 6 }] });
-      eq([bad.status, (await bad.json()).error], [400, "too_many_lines"], "5 行 → 400");
+      eq([bad.status, (await bad.json()).error], [400, "too_many_lines"], "5 lines → 400");
       const nope = await worker.fetch("/api/nope");
-      eq([nope.status, (await nope.json()).error], [404, "not_found"], "未知接口 → 404 JSON");
+      eq([nope.status, (await nope.json()).error], [404, "not_found"], "unknown endpoint → 404 JSON");
       const big = await worker.fetch("/api/read", { method: "POST", body: "x".repeat(9000) });
       eq(big.status, 413, "> 8KB → 413");
     });
 
-    await sec("静态资源：浏览器能拿到 reader.js 和答案文件", async () => {
+    await sec("static assets: the browser can fetch reader.js and the answers file", async () => {
       const js = await worker.fetch("/js/reader.js");
-      ok(js.status === 200 && /javascript/.test(js.headers.get("content-type") || ""), "reader.js 200 且是 JS");
-      ok((await js.text()).includes("export async function readSigns"), "reader.js 内容对");
+      ok(js.status === 200 && /javascript/.test(js.headers.get("content-type") || ""), "reader.js 200 and JavaScript");
+      ok((await js.text()).includes("export async function readSigns"), "reader.js content is correct");
       const ans = await worker.fetch("/answers/demo.json");
       eq([ans.status, typeof (await ans.json()).answers], [200, "object"], "answers/demo.json 200");
     });
 
-    await sec("施工登记表：workerd 里真的 Durable Object（persist:false，不落盘）", async () => {
+    await sec("worksite register: a real Durable Object in workerd (persist:false, not saved to disk)", async () => {
       const h = await (await worker.fetch("/api/health")).json();
-      eq(h.register, true, "wrangler.jsonc 的 REGISTER 绑上了");
+      eq(h.register, true, "the REGISTER binding from wrangler.jsonc is bound");
       const ws = {
         title: "workerd smoke",
         links: ["l595594354_9756035316"],
@@ -83,32 +83,32 @@ if (unstable_dev) {
       eq([c.status, cb.worksite?.seed], [201, false], "POST → 201");
       const lt = await (await worker.fetch("/api/worksites")).text();
       const lb = JSON.parse(lt);
-      eq([lb.register, lb.n], ["do", 4], "列表 = 3 条预置 + 1 条新登记");
-      ok(!lt.includes(cb.edit_token), "反向：列表里没有 edit_token");
+      eq([lb.register, lb.n], ["do", 4], "list = 3 seeds + 1 new entry");
+      ok(!lt.includes(cb.edit_token), "negative: no edit_token in the list");
       const patch = (token) =>
         worker.fetch(`/api/worksites/${cb.worksite.id}`, { method: "PATCH", headers: { "content-type": "application/json", "x-edit-token": token }, body: JSON.stringify({ status: "assessed" }) });
-      eq((await patch("0".repeat(32))).status, 403, "token 不对 → 403");
+      eq((await patch("0".repeat(32))).status, 403, "wrong token → 403");
       const p = await patch(cb.edit_token);
-      eq([p.status, (await p.json()).worksite?.status], [200, "assessed"], "带对 token → 200");
+      eq([p.status, (await p.json()).worksite?.status], [200, "assessed"], "correct token → 200");
       const js = await worker.fetch("/js/worksites.js");
-      ok(js.status === 200 && (await js.text()).includes("export async function listWorksites"), "浏览器端 worksites.js 能拿到");
+      ok(js.status === 200 && (await js.text()).includes("export async function listWorksites"), "the browser-side worksites.js can be fetched");
     });
 
-    await sec("AI 解读 POST /api/explain（规则版）", async () => {
+    await sec("plan explanation POST /api/explain (rule-based version)", async () => {
       const opt = (id, label, delay) => ({ id, label, metrics: { delay_veh_min: delay, queue_m: delay / 10 } });
-      const r = await worker.fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lang: "zh", options: [opt("a", "只写前方施工", 10000), opt("b", "加一帧 USE RUSSELL ST", 5000)] }) });
+      const r = await worker.fetch("/api/explain", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lang: "zh", options: [opt("a", "Warning only", 10000), opt("b", "Add a USE RUSSELL ST frame", 5000)] }) });
       const b = await r.json();
-      eq([r.status, b.explain?.src, b.explain?.lean?.option], [200, "rule", "b"], "200 · 规则版 · 倾向延误少的那套");
+      eq([r.status, b.explain?.src, b.explain?.lean?.option], [200, "rule", "b"], "200 · rule-based version · leans towards the plan with less delay");
       const js = await worker.fetch("/js/explain.js");
-      ok(js.status === 200 && (await js.text()).includes("export async function explainOptions"), "浏览器端 explain.js 能拿到");
+      ok(js.status === 200 && (await js.text()).includes("export async function explainOptions"), "the browser-side explain.js can be fetched");
       const pk = await worker.fetch("/js/pack.js");
-      ok(pk.status === 200 && (await pk.text()).includes("export function buildPack"), "浏览器端 pack.js（执行包）能拿到");
+      ok(pk.status === 200 && (await pk.text()).includes("export function buildPack"), "the browser-side pack.js (execution pack) can be fetched");
     });
   } finally {
     await worker.stop();
   }
 
-  // 第二个 Worker：打开大模型，但地址指向本进程里的假服务器（假 key），每天只许 3 次 → 看 Durable Object 在 workerd 里真的封顶
+  // Second Worker: LLM on, but pointed at a fake server in this process (fake key), 3 calls per day → checks the Durable Object really caps calls in workerd
   const FAKE = ["fake", "workerd", "key", "91c2"].join("-");
   const hits = [];
   const server = createServer((req, res) => {
@@ -131,21 +131,21 @@ if (unstable_dev) {
     LLM_MAX_CALLS_PER_MIN: "60",
   });
   try {
-    await sec("workerd 里的 Durable Object 每日封顶（假服务商，一次真调用都没有）", async () => {
+    await sec("Durable Object daily cap in workerd (fake provider, no real calls)", async () => {
       const h = await (await llm.fetch("/api/health")).text();
       const hb = JSON.parse(h);
-      eq([hb.llm.mode, hb.llm.key, hb.llm.budget, hb.llm.per_day], ["llm", true, true, 3], "health：llm · key true · budget true · 每天 3 次");
-      ok(!h.includes(FAKE), "反向：health 里没有 key 的值");
+      eq([hb.llm.mode, hb.llm.key, hb.llm.budget, hb.llm.per_day], ["llm", true, true, 3], "health: llm · key true · budget true · 3 per day");
+      ok(!h.includes(FAKE), "negative: health does not contain the key value");
       const a = await (await postTo(llm, REQ)).text();
       const b = await (await postTo(llm, REQ)).text();
       const other = { ...REQ, signs: [{ kind: "vms", frames: [["AVOID", "RUSSELL ST"]], read_s: 9 }] };
       const c = await (await postTo(llm, other)).text();
       const [ra, rb, rc] = [a, b, c].map((t) => JSON.parse(t).reading);
-      eq([ra.src, rb.src, rc.src, rc.note], ["llm", "kv", "rule", "llm_daily_cap"], "第 1 份问大模型 · 同一句走缓存 · 新的一句超了上限回规则");
-      eq(hits.length, 3, "假服务商只收到 3 次调用");
-      ok(hits.every((x) => x.url === "/chat/completions" && x.auth === `Bearer ${FAKE}`), "POST /chat/completions，带 Bearer");
-      eq(hits[0].body.thinking, { type: "disabled" }, "deepseek-* 带 thinking disabled");
-      ok(![a, b, c].some((t) => t.includes(FAKE)), "反向：读数响应里没有 key 的值");
+      eq([ra.src, rb.src, rc.src, rc.note], ["llm", "kv", "rule", "llm_daily_cap"], "1st reading asks the LLM · same message comes from the cache · a new message is over the cap and falls back to the rules");
+      eq(hits.length, 3, "the fake provider receives only 3 calls");
+      ok(hits.every((x) => x.url === "/chat/completions" && x.auth === `Bearer ${FAKE}`), "POST /chat/completions with Bearer");
+      eq(hits[0].body.thinking, { type: "disabled" }, "deepseek-* gets thinking disabled");
+      ok(![a, b, c].some((t) => t.includes(FAKE)), "negative: reading responses do not contain the key value");
     });
   } finally {
     await llm.stop();

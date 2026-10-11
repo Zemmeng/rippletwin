@@ -1,54 +1,56 @@
-# T3 路网数据 PRD
+# T3 road network data PRD
 
-> 负责人：@louisxie316-dotcom · 模块：`apps/roads/` · 分支：`louisxie316-dotcom/roads/T3-network`
-> 写于 2026-09-29 13:10（lead）。有不清楚的先问 lead，别猜；改了本文件就在末尾「变更记录」加一行。
+*Original hackathon PRD (phase 1), written on 29 Sep 2026 during the FEIT Hackathon Festival. Translated from the original Chinese; superseded details are kept as they were, with later outcomes noted in brackets. For the module as built, see [README.md](README.md).*
 
-## 1. 一句话
+> Owner: @louisxie316-dotcom · Module: `apps/roads/` · Branch: `louisxie316-dotcom/roads/T3-network`
+> Written 2026-09-29 13:10 by the lead (@Zemmeng). If anything is unclear, ask the lead rather than guessing; if you change this file, add a row to the change log at the end.
 
-把墨尔本 CBD 的**真实路网**和**真实车流**整理成三个 JSON 文件，让路网引擎（T4）直接读进来，算「封掉一段路以后，车往哪里绕、堵多久」；网页面板（T2）也用同一份路网在地图上画路段。
+## 1. In one sentence
 
-## 2. 在整个系统里的位置
+Turn the Melbourne CBD's **real road network** and **real traffic flows** into three JSON files that the road network engine (T4) can read directly, to work out "after closing a stretch of road, where does traffic detour and how long are the delays". The web panel (T2) uses the same network to draw links on the map.
 
-整体流程见 `docs/2-plan.md`，图见 `docs/arch/`（先看「系统流程」那一页）。T3 是**第 4 步「算出影响」的输入**：
+## 2. Where it sits in the system
+
+The overall flow is in `docs/2-plan.md` (now [docs/hackathon/plan.md](../../docs/hackathon/plan.md)), with diagrams in `docs/arch/` (start with the "system flow" page; those diagrams have since been removed from the tree). T3 is the **input to step 4, "work out the impact"**:
 
 ```
-T3 roads（本任务）──静态 JSON──▶ T4 engine（算绕路和延误，在浏览器里跑）
-                    └──────────▶ T2 web（地图上画路段、让用户选施工路段）
+T3 roads (this task) ──static JSON──▶ T4 engine (computes detours and delays, runs in the browser)
+                     └─────────────▶ T2 web (draws links on the map, lets the user pick the works link)
 ```
 
-T3 的产物是**提前做好、随网页一起发布的静态文件**，线上不调用任何接口，也不需要任何 key。
+T3's outputs are **static files prepared in advance and published with the web page**. Nothing calls an API in production and no key is needed.
 
-## 3. 交付物
+## 3. Deliverables
 
-| 文件 | 内容 | 谁用 |
+| File | Contents | Used by |
 |---|---|---|
-| `public/cbd/network.json` | 路网：路口（节点）和路段（有方向），每段的长度、车道、限速、通行能力 | T4、T2 |
-| `public/cbd/flows.json` | 每条路段每小时的基础车流（工作日 / 周末各 24 个数） | T4 |
-| `public/cbd/signals.json` | 区域内的 SCATS 信号灯路口，以及匹配到的节点 | T2（地图标注）、核对来源 |
-| `tools/*.py` | 从原始数据生成上面三个文件的脚本，一条命令能重跑 | 以后换街区 / 更新数据 |
-| `tests/test_roads.py` | 校验三个文件（已经按第 7 节写好，文件一出现就会自动校验） | `test.sh`、CI |
-| `README.md` | 怎么重跑、数据来源、字段说明、坑 | 所有人 |
+| `public/cbd/network.json` | Road network: junctions (nodes) and directed links, with each link's length, lanes, speed limit and capacity | T4, T2 |
+| `public/cbd/flows.json` | Base hourly traffic flow per link (24 numbers each for weekdays and weekends) | T4 |
+| `public/cbd/signals.json` | SCATS signalised junctions in the area and the nodes they match | T2 (map labels), source checking |
+| `tools/*.py` | Scripts that generate the three files above from raw data, re-runnable with one command | Changing district / refreshing data later |
+| `tests/test_roads.py` | Checks for the three files (already written to section 7; they run automatically once the files exist) | `test.sh`, CI |
+| `README.md` | How to re-run, data sources, field descriptions, gotchas | Everyone |
 
-线上和本地的访问路径都是 `/roads/public/cbd/<文件>`（lead 的部署把每个模块的 `public/` 原样挂到 `/<模块>/public/`）。
+Both locally and in production the files are at `/roads/public/cbd/<file>` (the lead's deployment mounts each module's `public/` unchanged at `/<module>/public/`).
 
-## 4. 范围
+## 4. Scope
 
-**区域**：CBD 棋盘路网。默认范围（南, 西, 北, 东）= `-37.8235, 144.9480, -37.8060, 144.9760`，写成脚本参数 `--bbox`，**不要写死**：演示街区还没最终定，换街区只该是重跑一遍。
+**Area**: the CBD grid. Default bounds (south, west, north, east) = `-37.8235, 144.9480, -37.8060, 144.9760`, passed as a script argument `--bbox`; **do not hard-code it**. The demo district is not final yet, and changing district should only mean re-running.
 
-**做**：
-- 机动车能走的路网（OSM `network_type="drive"`），每个方向一条路段
-- 每条路段的车道数、限速、通行能力、自由流时间；有电车轨道、有自行车道的打标记
-- 真实车流：DataVic SCATS 信号灯数据，2026-08-01 至 09-27，按工作日 / 周末分小时平均
-- 信号灯路口和路网节点的对应
+**In scope**:
+- The drivable network (OSM `network_type="drive"`), one link per direction
+- Lanes, speed limit, capacity and free-flow time for each link; flags for tram tracks and bike lanes
+- Real traffic flows: DataVic SCATS signal data, 2026-08-01 to 09-27, averaged by hour for weekdays / weekends
+- Matching signalised junctions to network nodes
 
-**不做**（别的任务或以后再说）：
-- 路径规划、车流分配、延误计算（T4）
-- 行人路网、公交线路（后面单独开任务）
-- 界面（T2）
+**Out of scope** (other tasks, or later):
+- Route choice, traffic assignment, delay calculation (T4)
+- Walking network, public transport routes (a separate task later) *[Later: phase 2, [PRD-2.md](PRD-2.md), delivered `walk.json`, `peds.json` and `transit.json`, and later tasks added buildings, equipment, vector basemap and weather files: 11 files in total.]*
+- The interface (T2)
 
-## 5. 文件格式（契约 v1，已写进 `docs/contract.md`「路网数据文件」一节）
+## 5. File formats (contract v1, already in the "road data files" section of `docs/contract.md`, now [docs/reference/interfaces.md](../../docs/reference/interfaces.md))
 
-加字段可以随时加；**改名、删字段、改单位要先找 lead**，并把 `version` 加 1。
+Fields can be added at any time; **renaming or removing a field, or changing a unit, must go through the lead first**, and `version` goes up by 1.
 
 ### 5.1 `network.json`
 
@@ -77,17 +79,17 @@ T3 的产物是**提前做好、随网页一起发布的静态文件**，线上�
 }
 ```
 
-| 字段 | 规则 |
+| Field | Rule |
 |---|---|
-| `nodes[].id` / `links[].id` | 字符串，唯一，**重跑时尽量稳定**（用 OSM id 派生，别用行号），T2 会拿它存用户选的施工路段 |
-| `nodes[].signal` | 匹配到的 SCATS 站点号（字符串）；没有就 `null` |
-| `links[]` | **有方向**：双向路拆成两条，`from → to` 就是车流方向 |
-| `lanes` | 这个方向的车道数，≥ 1。OSM 双向路的 `lanes` 是总数：有 `lanes:forward` / `lanes:backward` 就用；没有就总数除以 2 向上取整；都没有按道路等级默认（primary / secondary 2，其余 1） |
-| `speed_kmh` | OSM `maxspeed`；没有按 40（CBD 常见限速），写进 `assumptions` |
-| `cap_vph` | 这个方向每小时最多通过多少辆车 = `lanes × 1800 ×`（终点是信号灯路口 ? 0.5 : 0.9）；两个系数写进 `assumptions` |
-| `t0_s` | 自由流时间 = `len_m / (speed_kmh / 3.6)` |
-| `tram` / `bike_lane` | 布尔。自行车道看 OSM `cycleway*` 标签；电车看同一条街上有没有 `railway=tram`（P1，做不完先全填 `false` 并在 README 里写明） |
-| `geometry` | 从 `from` 到 `to` 的折线，`[纬度, 经度]`，保留 5 位小数就够 |
+| `nodes[].id` / `links[].id` | String, unique, **as stable as possible across re-runs** (derive from OSM ids, not row numbers); T2 uses them to store the works link the user picked |
+| `nodes[].signal` | The matched SCATS site number (string); `null` if none |
+| `links[]` | **Directed**: a two-way road becomes two links, and `from → to` is the direction of traffic |
+| `lanes` | Lanes in this direction, ≥ 1. On two-way roads OSM `lanes` is the total: use `lanes:forward` / `lanes:backward` if present; otherwise half the total rounded up; if neither, a road-class default (primary / secondary 2, others 1) |
+| `speed_kmh` | OSM `maxspeed`; if missing, 40 (a common CBD limit), recorded in `assumptions` |
+| `cap_vph` | Maximum vehicles per hour in this direction = `lanes × 1800 ×` (end node is a signalised junction ? 0.5 : 0.9); both factors recorded in `assumptions` |
+| `t0_s` | Free-flow time = `len_m / (speed_kmh / 3.6)` |
+| `tram` / `bike_lane` | Booleans. Bike lanes from OSM `cycleway*` tags; trams from whether the same street has `railway=tram` (P1: if there is no time, fill `false` everywhere and say so in the README) |
+| `geometry` | Polyline from `from` to `to`, `[latitude, longitude]`, 5 decimal places is enough |
 
 ### 5.2 `flows.json`
 
@@ -95,18 +97,18 @@ T3 的产物是**提前做好、随网页一起发布的静态文件**，线上�
 {
   "version": 1,
   "unit": "veh/h",
-  "period": "2026-08-01..2026-09-27（去掉 08-31 缺数和 09-25 公众假期）",
+  "period": "2026-08-01..2026-09-27 (excluding 08-31, missing data, and the 09-25 public holiday)",
   "days": {
-    "wd": { "l1": [120, 80, "…共 24 个"] },
-    "we": { "l1": [150, 110, "…共 24 个"] }
+    "wd": { "l1": [120, 80, "…24 in total"] },
+    "we": { "l1": [150, 110, "…24 in total"] }
   },
   "method": { "l1": "site_split" },
   "coverage": { "links": 820, "measured": 310, "estimated": 510 }
 }
 ```
 
-- 每条 `network.json` 里的路段都要有 `wd`、`we` 两组，各 24 个非负数（下标 = 小时，0 = 00:00–01:00）
-- `method` 标每条路段的数是怎么来的：`detector_map`（按配置表对到车道，最准）/ `site_split`（按路口总量分摊）/ `street_interp`（同一条街上下游插值）/ `class_default`（按道路等级的默认值，最不准）
+- Every link in `network.json` must have both `wd` and `we`, each 24 non-negative numbers (index = hour, 0 = 00:00–01:00)
+- `method` records how each link's numbers were produced: `detector_map` (mapped to lanes via the configuration sheet, most accurate) / `site_split` (junction total split across approaches) / `street_interp` (interpolated from upstream and downstream on the same street) / `class_default` (road-class default, least accurate)
 
 ### 5.3 `signals.json`
 
@@ -114,67 +116,67 @@ T3 的产物是**提前做好、随网页一起发布的静态文件**，线上�
 { "version": 1, "sites": [ { "site": "2921", "name": "SWANSTON/LATROBE", "type": "INT", "lat": -37.8096, "lon": 144.9638, "node": "n1", "dist_m": 6.2 } ] }
 ```
 
-`node` 是匹配到的最近路网节点（30 米内），匹配不到填 `null`。
+`node` is the nearest network node (within 30 m); `null` if there is no match.
 
-## 6. 数据来源和怎么拿
+## 6. Data sources and how to get them
 
-| 数据 | 入口 | 许可证 | 怎么拿 |
+| Data | Entry point | Licence | How to get it |
 |---|---|---|---|
-| 路网 | OpenStreetMap，用 Python 包 OSMnx | ODbL，页面要写「© OpenStreetMap contributors」 | `uv pip install osmnx` 或 `pip install osmnx` |
-| 信号灯车流 | https://discover.data.vic.gov.au/dataset/traffic-signal-volume-data | CC BY 4.0 | 每月一个全州 zip（约 120–135 MB），8 月和 9 月两个；下到 `apps/roads/raw/`（已 gitignore） |
-| 信号灯站点表 | https://discover.data.vic.gov.au/dataset/victorian-traffic-signals | CC BY 4.0 | 一个 CSV（约 300 KB），列 `SITE_NO, SITE_NAME, TYPE, MUNICIPALITY, LATITUDE, LONGITUDE` |
-| 检测器配置表 | https://discover.data.vic.gov.au/dataset/traffic-signal-configuration-data-sheets | CC BY 4.0 | 按站点号段打包，一个包约 2 GB；**只按需抽单个路口**，用 `tools/fetch_scats.py --sheet <站点号>` |
+| Road network | OpenStreetMap, via the Python package OSMnx | ODbL; pages must show "© OpenStreetMap contributors" | `uv pip install osmnx` or `pip install osmnx` |
+| Signal traffic volumes | https://discover.data.vic.gov.au/dataset/traffic-signal-volume-data | CC BY 4.0 | One statewide zip per month (about 120–135 MB), two for August and September; download into `apps/roads/raw/` (gitignored) |
+| Signal site list | https://discover.data.vic.gov.au/dataset/victorian-traffic-signals | CC BY 4.0 | One CSV (about 300 KB), columns `SITE_NO, SITE_NAME, TYPE, MUNICIPALITY, LATITUDE, LONGITUDE` |
+| Detector configuration sheets | https://discover.data.vic.gov.au/dataset/traffic-signal-configuration-data-sheets | CC BY 4.0 | Packed by site-number range, about 2 GB per bundle; **extract single junctions only as needed** with `tools/fetch_scats.py --sheet <site>` |
 
-**已经踩过的坑**（`apps/sim/README.md`「外部 API」一节有全文）：
-- SCATS CSV：一行 = 一个站点的一个检测器一天；`V00`–`V95` 是 96 个 15 分钟时段；**负数 = 故障或缺失，当空值**；每个站点最多 24 个检测器
-- 检测器号不带方向和车道，要对照配置表第 2 页的平面图；有的检测器是自行车、电车、行人按钮（Swanston/La Trobe 2921 的对应关系已经在 `apps/sim/tools/build_demand.py` 的 `DET` 里）
-- 8 月的包缺 08-31；09-25 是公众假期；City of Melbourne 的站点 `MUNICIPALITY = MBN`
-- 服务器支持 HTTP Range：`tools/fetch_scats.py --day 2026-09-22` 能远程只抽一天（约 4.6 MB），先用它看格式，再决定要不要下全量
-- lead 本机已经有 8–9 月 CBD 131 个站点的抽取结果（40 MB CSV），需要可以找 lead 用网盘拿，省掉下载
-- **别把目录叫 `data/`**：仓库 `.gitignore` 忽略所有 `data/`
-- OSMnx 2.x 的 `graph_from_bbox` 参数顺序和 1.x 不一样：先打一条最小请求确认，别照网上旧例子猜
+**Gotchas already hit** (full text in the "external APIs" section of `apps/sim/README.md` at the time):
+- SCATS CSV: one row = one detector at one site for one day; `V00`–`V95` are 96 fifteen-minute slots; **negative = fault or missing, treat as empty**; at most 24 detectors per site
+- Detector numbers carry no direction or lane; check them against the plan on page 2 of the configuration sheet. Some detectors are bikes, trams or pedestrian push-buttons (the mapping for Swanston/La Trobe 2921 is already in `DET` in `apps/sim/tools/build_demand.py`)
+- The August bundle is missing 08-31; 09-25 is a public holiday; City of Melbourne sites have `MUNICIPALITY = MBN`
+- The server supports HTTP Range: `tools/fetch_scats.py --day 2026-09-22` extracts a single day remotely (about 4.6 MB); use it to look at the format before deciding whether to download everything
+- The lead already has an extract of the 131 CBD sites for August–September on their machine (40 MB CSV) and can share it through a cloud drive to save the download *[Note: an internal arrangement during the event; the raw extracts are not in the repository.]*
+- **Do not name a directory `data/`**: the repository `.gitignore` ignores every `data/`
+- The parameter order of `graph_from_bbox` in OSMnx 2.x differs from 1.x: confirm with a minimal request first rather than copying old examples from the web
 
-## 7. 验收标准（`tests/test_roads.py` 已经写好，文件出现就自动校验）
+## 7. Acceptance criteria (`tests/test_roads.py` is already written and runs automatically once the files appear)
 
-跑 `bash apps/roads/test.sh`，最后一行 `N passed, 0 failed` 才算过：
+Run `bash apps/roads/test.sh`; it passes only when the last line is `N passed, 0 failed`:
 
-1. `network.json`：`version` 是整数；节点 id、路段 id 各自唯一；每条路段的 `from` / `to` 都是存在的节点
-2. 每条路段 `len_m > 0`、`lanes ≥ 1`、`5 ≤ speed_kmh ≤ 110`、`cap_vph > 0`、`t0_s` 和 `len_m / 速度` 相差不超过 5%
-3. 所有节点都在 `bbox` 内（允许外扩 300 米，边界路段会伸出去一点）
-4. 路网连通：最大的「互相能开到」的节点群（强连通分量）至少占全部节点的 90%，否则 T4 绕路会找不到路
-5. `flows.json`：每条路段都有 `wd`、`we` 各 24 个非负数；`coverage` 三个数对得上
-6. 常识检查：名字含 La Trobe 的路段里，至少有一条工作日 17 点的车流在 100–2000 辆 / 小时之间（sim 里 Swanston 路口东行实测约 450）
-7. `signals.json`：站点号唯一；`node` 要么是 `null`，要么是存在的节点
-8. 三个文件各自小于 2 MB（网页要在手机上加载）
+1. `network.json`: `version` is an integer; node ids and link ids are each unique; every link's `from` / `to` is an existing node
+2. Every link has `len_m > 0`, `lanes ≥ 1`, `5 ≤ speed_kmh ≤ 110`, `cap_vph > 0`, and `t0_s` within 5% of `len_m / speed`
+3. Every node lies inside the `bbox` (with a 300 m margin, since edge links stick out a little)
+4. The network is connected: the largest group of mutually reachable nodes (strongly connected component) holds at least 90% of all nodes, otherwise T4's detours will fail to find a path
+5. `flows.json`: every link has 24 non-negative numbers each for `wd` and `we`; the three `coverage` numbers add up
+6. Sanity check: among links whose name contains La Trobe, at least one has a weekday 17:00 flow of 100–2,000 vehicles per hour (in the sim, the Swanston junction eastbound measures about 450)
+7. `signals.json`: site numbers are unique; `node` is either `null` or an existing node
+8. Each of the three files is under 2 MB (the page has to load on a phone)
 
-## 8. 步骤和时间盒
+## 8. Steps and time boxes
 
-| 时间 | 做什么 | 交出什么 |
+| Time | What to do | What to hand over |
 |---|---|---|
-| 13:30–14:15 | 装 OSMnx，拉 CBD 路网，存 `raw/` | 能在 Python 里画出路网 |
-| 14:15–15:30 | 写 `tools/build_network.py`：车道、限速、通行能力、自由流时间 → `network.json` | 测试 1–4 通过 |
-| **17:00 集成点** | **先开 draft PR 交最小版 `network.json`**（没有车流也行），T4 马上能换成真路网 | draft PR |
-| 17:00–19:00 | `tools/build_flows.py`：SCATS 站点匹配节点 → `signals.json`；按路口总量分摊到进口路段（`site_split`）→ `flows.json` | 测试 5–7 通过 |
-| 19:00–20:30 | 没有检测器的路段：同一条街插值，还没有就按道路等级默认；README 写清每种方法 | `coverage` 数字 |
-| **21:00 集成点** | PR 转正式，`check.sh --quick` 全绿，找 lead 合 | 合进 main |
-| 加分（有时间再做） | 几个关键路口按配置表对到车道（`detector_map`）；电车轨道标记 | `method` 里 `detector_map` 的数量 |
+| 13:30–14:15 | Install OSMnx, download the CBD network, save it to `raw/` | The network can be plotted in Python |
+| 14:15–15:30 | Write `tools/build_network.py`: lanes, speed limit, capacity, free-flow time → `network.json` | Tests 1–4 pass |
+| **17:00 integration point** | **Open a draft PR with a minimal `network.json` first** (no flows is fine), so T4 can switch to the real network straight away | Draft PR |
+| 17:00–19:00 | `tools/build_flows.py`: match SCATS sites to nodes → `signals.json`; split junction totals across approach links (`site_split`) → `flows.json` | Tests 5–7 pass |
+| 19:00–20:30 | Links without detectors: interpolate along the same street, otherwise use the road-class default; document each method in the README | `coverage` numbers |
+| **21:00 integration point** | Mark the PR ready, `check.sh --quick` all green, ask the lead to merge | Merged into main |
+| Bonus (if there is time) | Map a few key junctions to lanes via their configuration sheets (`detector_map`); tram track flags | Number of `detector_map` entries in `method` |
 
-## 9. 规矩提醒
+## 9. Ground rules
 
-- 只改 `apps/roads/`，外加 `docs/3-tasks.md` 自己那节；要改别处写进交接单第 2 节
-- 原始数据放 `apps/roads/raw/`（已 gitignore），**不提交大文件**；`public/cbd/` 里只放生成的三个 JSON
-- 每做完一步跑 `bash scripts/check.sh --quick`；开 PR 前贴汇总行
-- 这个任务不需要任何 key，也不花钱
-- 睡前或换人前写交接单（`handoff/README.md`）
+- Change only `apps/roads/`, plus your own section of `docs/3-tasks.md` (now [docs/hackathon/task-board.md](../../docs/hackathon/task-board.md)); anything elsewhere goes in section 2 of the handoff note
+- Raw data goes in `apps/roads/raw/` (gitignored); **do not commit large files**; `public/cbd/` holds only the three generated JSON files
+- Run `bash scripts/check.sh --quick` after each step; paste the summary line before opening a PR
+- This task needs no key and costs nothing
+- Write a handoff note before sleeping or handing over (`handoff/README.md`, now [docs/hackathon/handoff/README.md](../../docs/hackathon/handoff/README.md))
 
-## 10. 待定
+## 10. Open questions
 
-- 演示街区可能从 CBD 改成别处：`--bbox` 参数化就够，不用现在考虑
-- 行人路网、公交电车线路：后面单独开任务
-- 通行能力的两个系数（1800、0.5）是常用经验值，T4 跑出来明显不对再一起调
+- The demo district may move from the CBD to somewhere else: parameterising `--bbox` is enough, no need to plan for it now
+- Walking network, tram and bus routes: a separate task later
+- The two capacity factors (1800, 0.5) are common rules of thumb; adjust them together if T4's results look clearly wrong
 
-## 变更记录
+## Change log
 
-| 时间 | 谁 | 改了什么 |
+| Time | Who | What changed |
 |---|---|---|
-| 09-29 13:10 | lead | 初版 |
+| 09-29 13:10 | Lead (@Zemmeng) | First version |

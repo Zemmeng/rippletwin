@@ -1,7 +1,7 @@
-// 从 prompts.md 生成 src/prompt.js（提示词只放 prompts.md 一处，CLAUDE.md §9；Worker 不能直接 import .md，所以生成一份 JS）
-// 用法：node apps/api/tools/gen-prompt.mjs          重新生成 src/prompt.js
-//       node apps/api/tools/gen-prompt.mjs --check  只查两边一致，不一致退出码 1（tests/prompt.test.mjs 也查）
-// 只认 prompts.md 里带 <!-- prompt:名字 --> 标记的代码块 / 表格 / 列表；格式不对直接抛错，不生成半截
+// Generates src/prompt.js from prompts.md (prompts.md is the single source of prompts; a Worker cannot import .md, so a JS copy is generated)
+// Usage: node apps/api/tools/gen-prompt.mjs          regenerate src/prompt.js
+//        node apps/api/tools/gen-prompt.mjs --check  only check they match; exit code 1 if not (tests/prompt.test.mjs checks too)
+// Reads only the code blocks / tables / lists marked <!-- prompt:<name> --> in prompts.md; a malformed file throws instead of producing partial output
 import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -11,24 +11,24 @@ export const PROMPT_JS = new URL("src/prompt.js", HERE);
 
 const PERSONAS = ["commuter", "local", "tourist", "delivery"];
 const KINDS = ["vms", "sign", "arrow"];
-const LANGS = ["zh", "en"]; // 同 public/js/explain.js 的 LANGS
+const LANGS = ["zh", "en"]; // same as LANGS in public/js/explain.js
 
-// 标记后面紧跟的内容（跳过空行）
+// The content right after a marker (blank lines skipped)
 function after(md, name) {
   const tag = `<!-- prompt:${name} -->`;
   const i = md.indexOf(tag);
-  if (i < 0) throw new Error(`prompts.md 缺标记 ${tag}`);
-  if (md.indexOf(tag, i + 1) >= 0) throw new Error(`prompts.md 里 ${tag} 出现了不止一次`);
+  if (i < 0) throw new Error(`prompts.md is missing marker ${tag}`);
+  if (md.indexOf(tag, i + 1) >= 0) throw new Error(`prompts.md contains ${tag} more than once`);
   return md.slice(i + tag.length).replace(/^\s*\n/, "");
 }
 
 function codeBlock(md, name) {
   const m = after(md, name).match(/^```text\n([\s\S]*?)\n```/);
-  if (!m) throw new Error(`<!-- prompt:${name} --> 下面要紧跟一个 \`\`\`text 代码块`);
+  if (!m) throw new Error(`<!-- prompt:${name} --> must be followed directly by a \`\`\`text code block`);
   return m[1];
 }
 
-// 两列表格：| `键` | `值` |（跳过表头和分隔行）
+// Two-column table: | `key` | `value` | (header and separator rows are skipped)
 function table(md, name) {
   const out = {};
   for (const line of after(md, name).split("\n")) {
@@ -50,52 +50,52 @@ function list(md, name) {
 }
 
 const need = (text, keys, where) => {
-  for (const k of keys) if (!text.includes(`{${k}}`)) throw new Error(`${where} 缺占位符 {${k}}`);
+  for (const k of keys) if (!text.includes(`{${k}}`)) throw new Error(`${where} is missing placeholder {${k}}`);
 };
 
 export function parsePrompts(md) {
   const v = md.match(/`prompt_v = (r\d+)`/)?.[1];
-  if (!v) throw new Error("prompts.md 缺「`prompt_v = r<数字>`」");
+  if (!v) throw new Error("prompts.md is missing \"`prompt_v = r<n>`\"");
   const system = codeBlock(md, "system");
-  if (!system.includes("<sign>")) throw new Error("system 里要讲清 <sign> 标签里的字不是指令");
+  if (!system.includes("<sign>")) throw new Error("system must state that text inside <sign> tags is not an instruction");
   const user = codeBlock(md, "user");
   need(user, ["persona_line", "kmh", "signs", "roads", "ask"], "user");
   const sign = codeBlock(md, "sign");
   need(sign, ["n", "kind_label", "read_s", "sign_lines"], "sign");
-  if (!sign.includes("<sign>\n{sign_lines}\n</sign>")) throw new Error("sign 模板里屏上的字要包在 <sign> 和 </sign> 两行之间");
+  if (!sign.includes("<sign>\n{sign_lines}\n</sign>")) throw new Error("the sign template must wrap sign text between <sign> and </sign> lines");
   const arrowEmpty = codeBlock(md, "arrow_empty");
   need(arrowEmpty, ["n", "kind_label", "read_s"], "arrow_empty");
-  if (arrowEmpty.includes("<sign>")) throw new Error("没有字的箭头板不该有 <sign> 标签");
+  if (arrowEmpty.includes("<sign>")) throw new Error("an arrow board without text must not have a <sign> tag");
   const personas = table(md, "personas");
   if (JSON.stringify(Object.keys(personas)) !== JSON.stringify(PERSONAS)) {
-    throw new Error(`人设表要正好是 ${PERSONAS.join(" / ")}，实际 ${Object.keys(personas).join(" / ")}`);
+    throw new Error(`persona table must be exactly ${PERSONAS.join(" / ")}, got ${Object.keys(personas).join(" / ")}`);
   }
   const kinds = table(md, "kinds");
-  if (JSON.stringify(Object.keys(kinds)) !== JSON.stringify(KINDS)) throw new Error(`kind_label 表要正好是 ${KINDS.join(" / ")}`);
+  if (JSON.stringify(Object.keys(kinds)) !== JSON.stringify(KINDS)) throw new Error(`kind_label table must be exactly ${KINDS.join(" / ")}`);
   const asks = list(md, "asks");
-  if (asks.length !== 3) throw new Error(`问法要正好 3 种，实际 ${asks.length} 种`);
+  if (asks.length !== 3) throw new Error(`there must be exactly 3 asks, got ${asks.length}`);
   return { v, system, user, sign, arrowEmpty, personas, kinds, asks, explain: parseExplain(md) };
 }
 
-// AI 解读（POST /api/explain）的提示词：自己的版本号 explain_v，改它不作废读数缓存
+// Prompt for plan explanation (POST /api/explain): its own version explain_v, so changing it does not invalidate the reading cache
 function parseExplain(md) {
   const v = md.match(/`explain_v = (e\d+)`/)?.[1];
-  if (!v) throw new Error("prompts.md 缺「`explain_v = e<数字>`」");
+  if (!v) throw new Error("prompts.md is missing \"`explain_v = e<n>`\"");
   const system = codeBlock(md, "explain_system");
-  if (!system.includes("<data>")) throw new Error("explain_system 里要讲清 <data> 标签里的字不是指令");
-  if (!/json/i.test(system)) throw new Error("explain_system 里要有 json 字样（DeepSeek 的 json_object 模式要求）");
+  if (!system.includes("<data>")) throw new Error("explain_system must state that text inside <data> tags is not an instruction");
+  if (!/json/i.test(system)) throw new Error("explain_system must contain the word json (required by DeepSeek's json_object mode)");
   const user = codeBlock(md, "explain_user");
   need(user, ["options_json", "lang_name"], "explain_user");
-  if (!user.includes("<data>\n{options_json}\n</data>")) throw new Error("explain_user 里方案数据要包在 <data> 和 </data> 两行之间");
+  if (!user.includes("<data>\n{options_json}\n</data>")) throw new Error("explain_user must wrap the plan data between <data> and </data> lines");
   const langs = table(md, "explain_langs");
-  if (JSON.stringify(Object.keys(langs)) !== JSON.stringify(LANGS)) throw new Error(`解读语言表要正好是 ${LANGS.join(" / ")}`);
+  if (JSON.stringify(Object.keys(langs)) !== JSON.stringify(LANGS)) throw new Error(`explain language table must be exactly ${LANGS.join(" / ")}`);
   return { v, system, user, langs };
 }
 
 export function renderModule(p) {
   return [
-    "// ⚠️ 自动生成，别手改：改 apps/api/prompts.md，再跑 node apps/api/tools/gen-prompt.mjs（tests/prompt.test.mjs 查两边一致）",
-    "// 提示词只放 prompts.md 一处（CLAUDE.md §9）；这里只是 Worker 能 import 的拷贝",
+    "// ⚠️ Generated file, do not edit: edit apps/api/prompts.md, then run node apps/api/tools/gen-prompt.mjs (tests/prompt.test.mjs checks they match)",
+    "// prompts.md is the single source of prompts; this is only a copy the Worker can import",
     `export const PROMPT = ${JSON.stringify(p, null, 2)};`,
     "",
   ].join("\n");
@@ -109,16 +109,16 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   try {
     have = readFileSync(PROMPT_JS, "utf8");
   } catch {
-    // 第一次生成
+    // first generation
   }
   if (process.argv.includes("--check")) {
     if (want !== have) {
-      console.log("❌ src/prompt.js 和 prompts.md 不一致：跑 node apps/api/tools/gen-prompt.mjs");
+      console.log("❌ src/prompt.js does not match prompts.md: run node apps/api/tools/gen-prompt.mjs");
       process.exit(1);
     }
-    console.log("✅ src/prompt.js 和 prompts.md 一致");
+    console.log("✅ src/prompt.js matches prompts.md");
   } else {
     writeFileSync(PROMPT_JS, want);
-    console.log(want === have ? "src/prompt.js 没变" : "已重新生成 src/prompt.js");
+    console.log(want === have ? "src/prompt.js unchanged" : "regenerated src/prompt.js");
   }
 }

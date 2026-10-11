@@ -1,13 +1,16 @@
-# check.yml —— CI 跑同一份 scripts/check.sh
+# check.yml -- CI runs the same scripts/check.sh as the local hooks
 #
-# 用途：绕过本地 hook（--no-verify）的人、不用 AI 的人也逃不掉同一套检查。
-#       PR 和 main 上跑的都是全量检查：[1] 扫全部已跟踪文件，[5] 跑 apps/* 的全部 test.sh；
-#       只有 [3] 分支与越界按「相对 origin/main 的改动」判定（--base origin/main 本来就是默认值，写出来只为看得清）。
-#       失败时把「======== 汇总」节写进 job summary（PR 的 Checks 页一眼能看到）。
-# 触发：pull_request（opened / synchronize / reopened / labeled）；push 到 main。
-# 放行越界：lead 给 PR 打 cross-module 标签 → 本 job 设 ALLOW_CROSS=1 重跑。
-# 🔒 不用任何 secret；权限只有 contents: read。job 名固定叫 check，分支保护按这个名字要求必过。
-# 本地复现：bash scripts/check.sh --base origin/main
+# Purpose: anyone who skips the local hooks (--no-verify) still goes through the same checks.
+#       PRs and main both get the full check: [1] scans every tracked file and [5] runs every apps/*/test.sh;
+#       only [3] Branch & module boundary is judged on the changes against origin/main (--base origin/main is
+#       already the default and is spelled out only for clarity).
+#       A second step runs check.sh --selftest, which proves in throwaway repos that each gate still turns red
+#       when it should.
+#       On failure the "======== Summary" block is written to the job summary (visible on the PR's Checks tab).
+# Triggers: pull_request (opened / synchronize / reopened / labeled); push to main.
+# Intentional cross-module change: add the cross-module label to the PR → this job reruns with ALLOW_CROSS=1.
+# 🔒 Uses no secrets; the only permission is contents: read. The job is named check.
+# Reproduce locally: bash scripts/check.sh --base origin/main && bash scripts/check.sh --selftest
 
 name: check
 
@@ -20,7 +23,7 @@ on:
 permissions:
   contents: read
 
-# 同一分支只保留最新一次（新 push 会取消还在跑的旧的）
+# Keep only the latest run per branch (a new push cancels the run still in progress)
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -31,13 +34,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      # PR 上 HEAD 是 detached 的合并提交，check.sh [3] 靠它知道分支名；push 到 main 时是 main
+      # On a PR, HEAD is a detached merge commit, so check.sh [3] learns the branch name from here; on push it is main
       BRANCH: ${{ github.head_ref || github.ref_name }}
       ALLOW_CROSS: ${{ contains(github.event.pull_request.labels.*.name, 'cross-module') && '1' || '' }}
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # check [3] 要算 merge-base，需要完整历史和 origin/main
+          fetch-depth: 0 # check [3] computes a merge-base, which needs the full history and origin/main
 
       - uses: actions/setup-node@v5
         with:
@@ -45,25 +48,43 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.9" # 与 macOS 自带 python3 对齐，防止写出 3.10+ 语法
+          python-version: "3.9" # matches macOS's bundled python3, so no 3.10+ syntax slips in
 
-      - name: bash scripts/check.sh --base origin/main
+      - name: Run the full check (bash scripts/check.sh --base origin/main)
+        id: check
         run: bash scripts/check.sh --base origin/main
 
-      - name: 汇总写进 job summary
+      - name: Self-test the gates (bash scripts/check.sh --selftest)
+        id: selftest
+        if: ${{ !cancelled() }}
+        run: bash scripts/check.sh --selftest
+
+      - name: Write the summary to the job summary
         if: failure()
+        env:
+          CHECK_OUTCOME: ${{ steps.check.outcome }}
+          SELFTEST_OUTCOME: ${{ steps.selftest.outcome }}
         run: |
           {
-            echo "## ❌ check.sh 没过"
-            echo
-            if [ -f logs/last-check.txt ] && grep -q '^======== 汇总' logs/last-check.txt; then
-              echo '```'
-              sed -n '/^======== 汇总/,$p' logs/last-check.txt
-              echo '```'
-            else
-              echo "logs/last-check.txt 里没有汇总节（check.sh 可能中途崩了），看上一步的日志。"
+            if [ "$CHECK_OUTCOME" = failure ]; then
+              echo "## ❌ check.sh failed"
+              echo
+              if [ -f logs/last-check.txt ] && grep -q '^======== Summary' logs/last-check.txt; then
+                echo '```'
+                sed -n '/^======== Summary/,$p' logs/last-check.txt
+                echo '```'
+              else
+                echo "logs/last-check.txt has no summary block (check.sh may have crashed); see the step log above."
+              fi
+              echo
+              echo "Reproduce locally: \`bash scripts/check.sh --base origin/main\`"
+              echo "If the cross-module change is intentional, add the \`cross-module\` label to the PR and the check reruns."
+              echo
             fi
-            echo
-            echo "本地复现：\`bash scripts/check.sh --base origin/main\`"
-            echo "越界是有意的：请 lead 给 PR 打 \`cross-module\` 标签后会自动重跑。"
+            if [ "$SELFTEST_OUTCOME" = failure ]; then
+              echo "## ❌ check.sh --selftest failed"
+              echo
+              echo "At least one gate no longer turns red (or green) when it should; see the step log above."
+              echo "Reproduce locally: \`bash scripts/check.sh --selftest\`"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"

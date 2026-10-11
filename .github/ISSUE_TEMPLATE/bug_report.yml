@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in the demo, a module or the scripts does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. RippleTwin is a hackathon project maintained on a best-effort basis.
+        Do not report security vulnerabilities here; see [SECURITY.md](https://github.com/Zemmeng/rippletwin/blob/main/SECURITY.md).
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Live demo (web UI)
+        - engine
+        - api
+        - sumo
+        - roads
+        - params
+        - sim
+        - site
+        - Scripts / CI / hooks
+        - Docs
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands or UI steps (workbench step 00-05), starting from a fresh clone or the live demo URL.
+      placeholder: |
+        1. Open https://hackathon-site.zemmmeng.workers.dev/web/public/
+        2. Go to 01 Configure and ...
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Logs or output
+      description: Error messages, test output or the `======== Summary` block from `bash scripts/check.sh`. Remove any keys or tokens.
+      render: text
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, browser, Node and Python versions, or the commit you ran.
+      placeholder: macOS 15, Chrome 141, Node 22, Python 3.12, commit abc1234

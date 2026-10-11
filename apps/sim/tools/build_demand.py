@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""用途：从原始开放数据算出路口每小时的流量画像，写成 public/demand/demand_2921.json。
+"""Purpose: compute the junction's hourly demand profile from raw open data and write public/demand/demand_2921.json.
 
-用法：
+Usage:
   python3 apps/sim/tools/build_demand.py --scats <cbd_volume.csv> --ped <cbd_pedestrian_hourly.csv> \
       --sensors <sensor_locations.csv> [--out apps/sim/public/demand/demand_2921.json]
 
-输入（都不进仓库，下载和裁剪方法见 apps/sim/README.md「外部 API」节）：
-  --scats    DataVic Traffic Signal Volume Data 的 CSV（可以是已裁到 CBD 的子集），列 NB_SCATS_SITE, QT_INTERVAL_COUNT, NB_DETECTOR, V00..V95
-  --ped      City of Melbourne Pedestrian Counting System 每小时计数 CSV，列 location_id, sensing_date, hourday, direction_1, direction_2
-  --sensors  传感器位置 CSV，用来记下每个传感器 direction_1 / direction_2 的含义
-输出：{scats: {键: {wd: [24 个小时均值], we: [...]}}, ped: {键: {wd: [[方向1, 方向2] × 24], we: ...}}, ped_dirs: {...}}
-  wd = 周一到周五，we = 周六周日；负数（检测器故障）当缺失，不参与平均。
-退出码：0 成功；1 输入里一行 2921 的数据都没有
+Inputs (none are committed; see "Data sources" in apps/sim/README.md for how to download and trim them):
+  --scats    DataVic Traffic Signal Volume Data CSV (a subset trimmed to the CBD is fine), columns NB_SCATS_SITE, QT_INTERVAL_COUNT, NB_DETECTOR, V00..V95
+  --ped      City of Melbourne Pedestrian Counting System hourly counts CSV, columns location_id, sensing_date, hourday, direction_1, direction_2
+  --sensors  sensor locations CSV, used to record what direction_1 / direction_2 mean for each sensor
+Output: {scats: {key: {wd: [24 hourly means], we: [...]}}, ped: {key: {wd: [[direction 1, direction 2] × 24], we: ...}}, ped_dirs: {...}}
+  wd = Monday to Friday, we = Saturday and Sunday; negative values (detector faults) count as missing and are left out of the means.
+Exit code: 0 success; 1 the input has no rows for site 2921
 """
 import argparse, csv, datetime, json, sys
 
 SITE = '2921'  # Swanston St / La Trobe St
-HOLIDAYS = {'2026-09-25'}  # 维州 AFL Grand Final 前的周五公众假期
-DET = {  # 检测器号 → 流向（依据站点 2921 配置表第 2 页平面图、第 4 页检测器功能表）
+HOLIDAYS = {'2026-09-25'}  # Victorian public holiday on the Friday before the AFL Grand Final
+DET = {  # detector number → stream (from the site 2921 configuration sheet: detector plan on page 2, detector function table on page 4)
     'car_eb': 7, 'car_wb': 5, 'car_sb_left': 3,
     'bike_nb_swanston': 1, 'bike_wb_latrobe': 4,
     'tram_sb_swanston': 11, 'tram_nb_swanston': 13, 'tram_wb_latrobe': 22,
@@ -51,7 +51,7 @@ def main():
                 c = acc[inv[int(r[2])]][kind(r[1])][h]
                 c[0] += sum(q); c[1] += 1
     if not rows:
-        print('❌ %s 里没有站点 %s 的数据' % (a.scats, SITE)); sys.exit(1)
+        print('❌ %s has no data for site %s' % (a.scats, SITE)); sys.exit(1)
     out = {'scats': {k: {d: [round(s / n, 1) if n else None for s, n in acc[k][d]] for d in ('wd', 'we')} for k in acc}}
 
     pacc = {v: {d: [[0, 0, 0] for _ in range(24)] for d in ('wd', 'we')} for v in PED.values()}
@@ -64,7 +64,7 @@ def main():
     sensors = {s['location_id']: s for s in csv.DictReader(open(a.sensors, encoding='utf-8-sig'))}
     out['ped_dirs'] = {PED[k]: [sensors[k]['direction_1'], sensors[k]['direction_2'], sensors[k]['sensor_description']] for k in PED}
     json.dump(out, open(a.out, 'w'))
-    print('✅ 写出 %s（SCATS %d 行）' % (a.out, rows))
+    print('✅ wrote %s (%d SCATS rows)' % (a.out, rows))
 
 
 if __name__ == '__main__':

@@ -1,20 +1,20 @@
-// routes.js —— 第 ① 步：找出受影响的车，和能绕的路（平时各要多久）。纯函数。
-// 做法：施工路段按行车方向连成一段（approach）；沿同一条街往上游走约 UP_M 米当起点、往下游走约 DOWN_M 米当终点
-// （真路网的路段按 OSM 节点切得很碎，一段常常只有十几米，所以按距离走，不按段数），
-// 起点 → 终点穿过施工的那条就是「原路」（stay）。绕行路线 = 在施工前的每个路口拐出去，再走最短路到终点；
-// 按拐进去的那条街起名（「Russell St」= 在 Russell St 拐），同名只留最快的，最多 MAX_ALTS 条。
-// 受影响的车 = 施工第一段路段上这个小时的车流（veh/h）。
+// routes.js — step 1: find the affected vehicles and the roads they could take instead (with their usual travel times). Pure functions.
+// Method: chain the works links in driving direction into one approach; walk about UP_M metres upstream along the same street for the origin and about DOWN_M downstream for the destination
+// (real links are split at every OSM node and are often only 10–20 m long, so walk by distance, not by link count).
+// The origin → destination path through the works is the stay route. Detours = turn off at each junction before the works, then take the shortest path to the destination;
+// each is named after the street it turns into ("Russell St" = turn into Russell St); only the fastest per name is kept, at most MAX_ALTS.
+// Affected vehicles = this hour's flow on the first works link (veh/h).
 
 import { bearing, headingDot, shortestPath, pathTime } from './net.js';
 import { dayType } from './worksite.js';
 
-export const UP_M = 400; // 上游多远开始算（屏一般摆在这个范围里）
+export const UP_M = 400; // how far upstream to start (signs are usually within this range)
 export const DOWN_M = 300;
-const MAX_WALK = 80; // 按段数的保险：走不完就停
+const MAX_WALK = 80; // safety cap by link count: stop if the walk does not finish
 export const MAX_ALTS = 3;
-export const MAX_RATIO = 3; // 比原路平时慢 3 倍以上的绕行不算
-// 绕行不走的路（OSM highway）：CBD 小巷（Heffernan Lane 这类 living_street，步行优先、T3 给的通行能力偏高）等。
-// 原路本来就经过的照算；只是不会被当成绕行路线，屏也就不会点名一条巷子
+export const MAX_RATIO = 3; // detours more than 3× slower than the usual stay route are dropped
+// Roads detours never use (OSM highway): CBD laneways (living_street such as Heffernan Lane, pedestrian-priority, with capacities set too high in the network data) and similar.
+// They still count if the stay route uses them; they are just never offered as detours, so a sign never names a laneway
 export const NO_DETOUR = new Set(['living_street', 'pedestrian', 'service', 'track', 'footway', 'cycleway', 'path']);
 const noDetourCache = new WeakMap();
 function noDetourLinks(net) {
@@ -22,7 +22,7 @@ function noDetourLinks(net) {
   return noDetourCache.get(net);
 }
 
-// 同一条街：路名相同（没路名的只和没路名的接），朝向几乎不变
+// same street: same name (unnamed links only chain with unnamed ones) and nearly the same heading
 const same = (a, b) => (a.name ?? null) === (b.name ?? null);
 function sameStreetNext(net, link) {
   const c = (net.out.get(link.to) || []).filter(l => same(l, link) && l.to !== link.from && headingDot(net, link, l) > 0.7);
@@ -33,14 +33,14 @@ function sameStreetPrev(net, link) {
   return c.sort((a, b) => headingDot(net, b, link) - headingDot(net, a, link))[0] || null;
 }
 
-// 施工路段 → 若干段 approach（同一方向连着的施工路段算一段；双向施工就是两段）
+// works links → approaches (consecutive works links in one direction form one approach; works in both directions give two)
 export function approaches(net, ws) {
   const set = new Set((ws.links || []).filter(id => net.links.has(id)));
   const out = [];
   for (const id of set) {
     const entry = net.links.get(id);
     const p = sameStreetPrev(net, entry);
-    if (p && set.has(p.id)) continue; // 不是这一段的第一个路段
+    if (p && set.has(p.id)) continue; // not the first link of this approach
     const chain = [entry];
     for (let n = sameStreetNext(net, entry); n && set.has(n.id) && !chain.includes(n); n = sameStreetNext(net, n)) chain.push(n);
     const up = [];
@@ -61,7 +61,7 @@ function crossName(net, node, street) {
 
 const truckOk = (net, ids) => ids.every(id => net.links.get(id).truck !== false);
 
-// factors = capFactors(生效中的全部施工)：全封的路段谁都不能走
+// factors = capFactors(all active worksites): fully closed links are off limits to everyone
 export function affected(net, flows, ws, when, factors = new Map()) {
   const dt = dayType(when);
   const closedAll = new Set([...factors].filter(([, x]) => x.f === 0).map(([id]) => id));
@@ -72,7 +72,7 @@ export function affected(net, flows, ws, when, factors = new Map()) {
     const dest = (down[down.length - 1] || chain[chain.length - 1]).to;
     const street = entry.name || 'Unnamed road';
     const banned = new Set([...closedAll, ...(ws.links || []), ...noDetourLinks(net)]);
-    const prefixNodes = [origin, ...up.map(l => l.to)]; // 施工前可以拐出去的路口，最后一个 = 施工起点
+    const prefixNodes = [origin, ...up.map(l => l.to)]; // junctions before the works where a vehicle can turn off; the last one = the works start
     const prefixSet = new Set(prefixNodes);
     const stayT = pathTime(net, stayLinks);
     const best = new Map();
@@ -80,14 +80,14 @@ export function affected(net, flows, ws, when, factors = new Map()) {
       const diverge_m = up.slice(k).reduce((s, l) => s + l.len_m, 0);
       for (const l of net.out.get(u) || []) {
         if (l.id === stayLinks[k] || banned.has(l.id)) continue;
-        if (k > 0 && l.to === prefixNodes[k - 1]) continue; // 掉头
+        if (k > 0 && l.to === prefixNodes[k - 1]) continue; // U-turn
         if (prefixSet.has(l.to)) continue;
         const rest = shortestPath(net, l.to, dest, { banned, bannedNodes: prefixSet });
         if (!rest) continue;
         const links = [...stayLinks.slice(0, k), l.id, ...rest.links];
         const t = pathTime(net, links);
         if (t > MAX_RATIO * stayT) continue;
-        // 按拐进去的那条街起名；拐进去的是没路名的小路，就用沿路第一条有名字、又不是本街的路
+        // name after the street turned into; if that is unnamed, use the first named road along the way that is not this street
         const named = [l.id, ...rest.links].map(id => net.links.get(id).name).find(n => n && n !== street);
         const name = named || `${street || 'Unnamed road'} (${bearing(net, l)})`;
         const prev = best.get(name);

@@ -1,15 +1,15 @@
-// 预计算演示读数 → public/answers/demo.json（浏览器的 readSigns() 先查这个文件：断网也能演、演示时不花钱不等待）
-// 请求来源：fixtures/demo-signs.json（8 句 × 4 类人）+ 引擎两个演示方案（backend.js 的 lonsdale / latrobe：run、前后对比、规划顾问）实际会发的请求
-// 调大模型走的是 Worker 同一条路（src/llm.js 的 llmReading：问 3 次、合成、sanitize）
+// Precompute demo readings → public/answers/demo.json (the browser's readSigns() checks this file first: the demo works offline, costs nothing and never waits)
+// Requests: fixtures/demo-signs.json (8 messages × 4 personas) + the requests the engine's two demo plans actually send (lonsdale / latrobe in backend.js: run, before/after compare, advisor)
+// LLM calls take the same path as the Worker (llmReading in src/llm.js: 3 samples, combine, sanitise)
 //
-// 用法（D-09：默认不花钱）：
-//   node apps/api/tools/precompute.mjs                 dry-run：只打印要问几条、调几次、大概多少钱
+// Usage (D-09: no spending by default):
+//   node apps/api/tools/precompute.mjs                 dry run: only prints how many requests, how many calls and the rough cost
 //   node --env-file=apps/api/.dev.vars apps/api/tools/precompute.mjs --run [--limit N]
-//                                                      真调用（key 从环境变量 LLM_API_KEY 读；DeepSeek 也认 DEEPSEEK_API_KEY）
-//   node apps/api/tools/precompute.mjs --check         只校验 demo.json（键对不对、读数合不合法、有没有像 key 的串）
-// 其他参数：--no-engine 只用演示文案；--force 同版本的也重问；--out <路径> 写到别处；--concurrency N 同时问几条（默认 4）
-// 地址和模型：环境变量 LLM_BASE_URL / LLM_MODEL > apps/api/wrangler.jsonc 的 vars > DeepSeek 默认
-// 🔒 不打印、不写入 key；报错只有短码
+//                                                      real calls (key from the LLM_API_KEY environment variable; DEEPSEEK_API_KEY also works for DeepSeek)
+//   node apps/api/tools/precompute.mjs --check         only validate demo.json (keys match, readings valid, no key-like strings)
+// Other options: --no-engine demo messages only; --force re-ask entries already at this version; --out <path> write elsewhere; --concurrency N parallel requests (default 4)
+// Base URL and model: LLM_BASE_URL / LLM_MODEL environment variables > vars in apps/api/wrangler.jsonc > DeepSeek defaults
+// 🔒 Never prints or writes the key; errors are short codes only
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,13 +24,13 @@ const APPS = new URL("../..", import.meta.url);
 export const ANSWERS = fileURLToPath(new URL("public/answers/demo.json", API));
 const FIXTURES = new URL("fixtures/demo-signs.json", API);
 
-// DeepSeek deepseek-flash 价目（每百万 token，人民币；docs/llm-apis/jinmingq-deepseek.md §1，09-29 实测卡）。空闲时段半价
-const PRICE = { deepseek: { in: 2, out: 8, offpeak: 0.5, src: "docs/llm-apis/jinmingq-deepseek.md" } };
-const OUT_TOKENS = 120; // 每次调用的输出 token 估计（prompts.md「花费估算」）
+// DeepSeek deepseek-flash prices (per million tokens, CNY; docs/hackathon/llm-apis/jinmingq-deepseek.md §1, tested 2026-09-29). Half price off-peak
+const PRICE = { deepseek: { in: 2, out: 8, offpeak: 0.5, src: "docs/hackathon/llm-apis/jinmingq-deepseek.md" } };
+const OUT_TOKENS = 120; // estimated output tokens per call (prompts.md, "Cost estimate")
 
-// ---------------------------------------------------------------- 收集请求
+// ---------------------------------------------------------------- collect requests
 
-// /<模块>/public/<路径> → apps/<模块>/public/<路径>：让 backend.js 在 node 里读到路网、车流、参数
+// /<module>/public/<path> → apps/<module>/public/<path>: lets backend.js read the network, flows and parameters in Node
 const fileFetch = async (u) => {
   const m = String(u).match(/^\/([a-z0-9_-]+)\/public\/([A-Za-z0-9_./-]+)$/);
   if (!m || m[2].includes("..")) return { ok: false, status: 404, json: async () => null };
@@ -47,7 +47,7 @@ async function engineRequests() {
   let from = "";
   const capture = async (req) => {
     out.push({ from, req });
-    return ruleReading(req); // 只是为了让引擎跑完；不调大模型
+    return ruleReading(req); // only so the engine can finish; no LLM call
   };
   const be = await B.connect({ fetch: fileFetch, readSigns: capture, checkSigns });
   for (const name of B.DEMO_NAMES) {
@@ -66,14 +66,14 @@ function fixtureRequests() {
   return fx.messages.flatMap((m) => fx.personas.map((persona) => ({ from: `fixture:${m.id}`, req: { persona, kmh: fx.kmh, signs: m.signs, roads: fx.roads } })));
 }
 
-// → [{ from, req（规范化后）, key }]，按规范串去重
+// → [{ from, req (normalised), key }], de-duplicated by canonical string
 export async function collectRequests({ engine = true, log = console.log } = {}) {
   const raw = fixtureRequests();
   if (engine) {
     try {
       raw.push(...(await engineRequests()));
     } catch (e) {
-      log(`⚠️ 引擎演示方案的请求没收集到（只用演示文案）：${e?.message || e}`);
+      log(`⚠️ Could not collect the engine demo requests (using the demo messages only): ${e?.message || e}`);
     }
   }
   const seen = new Map();
@@ -83,7 +83,7 @@ export async function collectRequests({ engine = true, log = console.log } = {})
       n = normalizeRequest(req);
     } catch (e) {
       if (e instanceof SignError) {
-        log(`⚠️ 跳过不合规范的请求（${from}）：${e.code}`);
+        log(`⚠️ Skipping an invalid request (${from}): ${e.code}`);
         continue;
       }
       throw e;
@@ -94,7 +94,7 @@ export async function collectRequests({ engine = true, log = console.log } = {})
   return [...seen.values()];
 }
 
-// ---------------------------------------------------------------- 配置
+// ---------------------------------------------------------------- config
 
 function workerVars() {
   try {
@@ -104,7 +104,7 @@ function workerVars() {
   }
 }
 
-// 预计算用的 env：强制 MOCK=0（这个工具本身就是 --run 才调用）；超时放宽到 20 秒（离线跑，不赶）
+// env for precompute: MOCK=0 is forced (the tool itself only calls with --run); the timeout is relaxed to 20 s (an offline run, no rush)
 function llmEnv(env) {
   const vars = workerVars();
   const base = env.LLM_BASE_URL || vars.LLM_BASE_URL;
@@ -117,37 +117,37 @@ function llmEnv(env) {
 function loadAnswers(path) {
   if (!existsSync(path)) return { note: "", prompt_v: PROMPT.v, answers: {} };
   const data = JSON.parse(readFileSync(path, "utf8"));
-  if (!data || typeof data !== "object" || !data.answers || typeof data.answers !== "object") throw new Error(`${path} 不是 { answers: {…} } 的格式`);
+  if (!data || typeof data !== "object" || !data.answers || typeof data.answers !== "object") throw new Error(`${path} is not in the { answers: {…} } format`);
   return data;
 }
 
 const fresh = (entry, cfg) => entry?.reading?.prompt_v === PROMPT.v && entry?.reading?.model === cfg.model;
 
-// ---------------------------------------------------------------- 三种模式
+// ---------------------------------------------------------------- three modes
 
 function dryRun(items, todo, cfg, log) {
   const inChars = todo.reduce((s, it) => s + [0, 1, 2].reduce((t, i) => t + buildMessages(it.req, i).reduce((u, m) => u + m.content.length, 0), 0), 0);
   const calls = todo.length * SAMPLES;
   const inTok = Math.ceil(inChars / 4);
   const outTok = calls * OUT_TOKENS;
-  log(`要问 ${todo.length} 条（共 ${items.length} 条，${items.length - todo.length} 条文件里已有同版本的）→ 调用 ${todo.length} × ${SAMPLES} = ${calls} 次`);
-  log(`token 估算：输入约 ${inTok.toLocaleString("en")}（按字符数 ÷ 4）· 输出约 ${outTok.toLocaleString("en")}（每次 ${OUT_TOKENS}）`);
+  log(`To ask: ${todo.length} requests (${items.length} in total, ${items.length - todo.length} already in the file at this version) → ${todo.length} × ${SAMPLES} = ${calls} calls`);
+  log(`Token estimate: about ${inTok.toLocaleString("en")} input (characters ÷ 4) · about ${outTok.toLocaleString("en")} output (${OUT_TOKENS} per call)`);
   const p = PRICE[cfg.provider];
   if (p) {
     const peak = (inTok * p.in + outTok * p.out) / 1e6;
-    log(`花费估算（${cfg.model} 价目，出处 ${p.src}）：高峰约 ¥${peak.toFixed(2)}，空闲时段约 ¥${(peak * p.offpeak).toFixed(2)}`);
+    log(`Cost estimate (${cfg.model} prices, source ${p.src}): about ¥${peak.toFixed(2)} at peak, about ¥${(peak * p.offpeak).toFixed(2)} off-peak`);
   } else {
-    log(`花费：按 ${cfg.model} 的价格表用上面的 token 数算（这里只有 DeepSeek 的价目）`);
+    log(`Cost: apply the ${cfg.model} price list to the token counts above (only DeepSeek prices are built in)`);
   }
-  log("这是 dry-run，没有调用、没花钱。真调用前先在群里报上面的次数和花费（D-09），然后：");
-  log("  node --env-file=apps/api/.dev.vars apps/api/tools/precompute.mjs --run --limit 2   # 先问 2 条试水");
-  log("  node --env-file=apps/api/.dev.vars apps/api/tools/precompute.mjs --run            # 再全量");
+  log("This is a dry run: no calls, nothing spent. Before a real run, report the call count and cost above to the team, then:");
+  log("  node --env-file=apps/api/.dev.vars apps/api/tools/precompute.mjs --run --limit 2   # try 2 requests first");
+  log("  node --env-file=apps/api/.dev.vars apps/api/tools/precompute.mjs --run            # then the full set");
   return 0;
 }
 
 async function run(items, todo, cfg, env, path, data, { fetch, log, concurrency, now }) {
   if (!env.LLM_API_KEY) {
-    log("❌ 没有 LLM_API_KEY（环境变量）。用 node --env-file=apps/api/.dev.vars … 或先 export；key 只放本机，不进仓库");
+    log("❌ No LLM_API_KEY (environment variable). Use node --env-file=apps/api/.dev.vars … or export it first; keep the key on your machine, never in the repo");
     return 1;
   }
   let ok = 0;
@@ -168,18 +168,18 @@ async function run(items, todo, cfg, env, path, data, { fetch, log, concurrency,
         ok++;
       } else {
         failed++;
-        log(`  ✗ ${it.from} · ${it.req.persona}：${o.valid}/${o.calls} 次有效（${[...new Set(o.errors)].join(", ")}）`);
+        log(`  ✗ ${it.from} · ${it.req.persona}: ${o.valid}/${o.calls} valid (${[...new Set(o.errors)].join(", ")})`);
       }
     });
-    save(); // 每批都落盘：中途被打断，花过的钱不白花
+    save(); // save after every batch: if interrupted, the money already spent is not wasted
     log(`  … ${Math.min(i + concurrency, todo.length)}/${todo.length}`);
   }
-  log(`${failed ? "⚠️" : "✅"} 写好 ${ok} 条，失败 ${failed} 条 → ${path}（失败的演示时走 /api/read 或规则）`);
-  log(`   调用约 ${todo.length * SAMPLES} 次：花了钱记进 docs/3-tasks.md 的额度台账（D-09）；再跑 --check 校验`);
+  log(`${failed ? "⚠️" : "✅"} wrote ${ok}, failed ${failed} → ${path} (failed ones use /api/read or the rules in the demo)`);
+  log(`   about ${todo.length * SAMPLES} calls: record what was spent, then run --check`);
   return failed ? 1 : 0;
 }
 
-// 键对不对、读数合不合法、有没有像 key 的串
+// Keys match, readings valid, no key-like strings
 export async function check(path, { log = console.log, env = {} } = {}) {
   let text;
   let data;
@@ -187,11 +187,11 @@ export async function check(path, { log = console.log, env = {} } = {}) {
     text = readFileSync(path, "utf8");
     data = JSON.parse(text);
   } catch (e) {
-    log(`❌ 读不了 ${path}：${e?.message || e}`);
+    log(`❌ cannot read ${path}: ${e?.message || e}`);
     return 1;
   }
   const bad = [];
-  if (!data || typeof data.answers !== "object" || !data.answers || Array.isArray(data.answers)) bad.push("顶层要有 answers 对象");
+  if (!data || typeof data.answers !== "object" || !data.answers || Array.isArray(data.answers)) bad.push("the top level must have an answers object");
   const entries = Object.entries(data?.answers || {});
   let stale = 0;
   for (const [k, e] of entries) {
@@ -199,19 +199,19 @@ export async function check(path, { log = console.log, env = {} } = {}) {
     try {
       n = normalizeRequest(e?.req);
     } catch (err) {
-      bad.push(`${k.slice(0, 12)}…：req 不合规范（${err?.code || err}）`);
+      bad.push(`${k.slice(0, 12)}…: invalid req (${err?.code || err})`);
       continue;
     }
-    if ((await sha256Hex(canonical(n))) !== k) bad.push(`${k.slice(0, 12)}…：键和 req 对不上（answerKey 变了？）`);
-    if (!sanitizeReading(e?.reading, n, "file")) bad.push(`${k.slice(0, 12)}…：读数过不了 sanitizeReading`);
+    if ((await sha256Hex(canonical(n))) !== k) bad.push(`${k.slice(0, 12)}…: key does not match req (did answerKey change?)`);
+    if (!sanitizeReading(e?.reading, n, "file")) bad.push(`${k.slice(0, 12)}…: reading fails sanitizeReading`);
     if (e?.reading?.prompt_v !== PROMPT.v) stale++;
   }
-  if (/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,}/.test(text)) bad.push("文件里有像 key 的串");
+  if (/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}|Bearer\s+[A-Za-z0-9._~+/=-]{16,}/.test(text)) bad.push("the file contains a key-like string");
   const key = env.LLM_API_KEY || env.DEEPSEEK_API_KEY;
-  if (key && text.includes(key)) bad.push("文件里有 key 的值");
+  if (key && text.includes(key)) bad.push("the file contains the key value");
   for (const b of bad) log(`  ✗ ${b}`);
-  if (stale) log(`⚠️ ${stale} 条是旧版提示词（不是 ${PROMPT.v}）问的：还能用，想更新就 --run --force`);
-  log(`${bad.length ? "❌" : "✅"} ${path}：${entries.length} 条读数，${bad.length} 个问题`);
+  if (stale) log(`⚠️ ${stale} readings come from an older prompt (not ${PROMPT.v}): still usable; to refresh, use --run --force`);
+  log(`${bad.length ? "❌" : "✅"} ${path}: ${entries.length} readings, ${bad.length} problems`);
   return bad.length ? 1 : 0;
 }
 
@@ -227,7 +227,7 @@ function args(argv) {
   return o;
 }
 
-// deps：{ fetch, env, log, now }（测试注入假 fetch 和假 env）
+// deps: { fetch, env, log, now } (tests inject a fake fetch and env)
 export async function main(argv = process.argv.slice(2), deps = {}) {
   const log = deps.log || console.log;
   const penv = deps.env || process.env;
@@ -238,15 +238,15 @@ export async function main(argv = process.argv.slice(2), deps = {}) {
   const env = llmEnv(penv);
   const cfg = llmConfig(env);
   if (!cfg.baseOk) {
-    log("❌ LLM_BASE_URL 不合法：要 https://…，不能带账号密码、查询串（原值不打印，免得里面夹着 key）");
+    log("❌ Invalid LLM_BASE_URL: it must be https://… with no credentials or query string (the value is not printed in case it contains a key)");
     return 1;
   }
   const items = await collectRequests({ engine: o.engine, log });
   const data = loadAnswers(path);
   const todo = items.filter((it) => o.force || !fresh(data.answers[it.key], cfg)).slice(0, o.limit);
-  log(`预计算演示读数 · prompt_v ${PROMPT.v} · ${cfg.model} @ ${new URL(cfg.baseUrl).host} · key ${env.LLM_API_KEY ? "有" : "没有"}`);
+  log(`Precompute demo readings · prompt_v ${PROMPT.v} · ${cfg.model} @ ${new URL(cfg.baseUrl).host} · key ${env.LLM_API_KEY ? "set" : "missing"}`);
   const n = (p) => items.filter((it) => it.from.startsWith(p)).length;
-  log(`请求 ${items.length} 条（去重后；演示文案 ${n("fixture:")} · 引擎演示方案 ${n("engine:")}）`);
+  log(`${items.length} requests after de-duplication (demo messages ${n("fixture:")} · engine demo plans ${n("engine:")})`);
   if (!o.run) return dryRun(items, todo, cfg, log);
   return run(items, todo, cfg, env, path, data, {
     fetch: deps.fetch || globalThis.fetch,

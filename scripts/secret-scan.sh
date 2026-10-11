@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
-# secret-scan.sh —— 秘密扫描（.githooks/pre-commit、scripts/check.sh [1]、/submit 共用这一份）
+# secret-scan.sh: secret scanner (shared by .githooks/pre-commit and scripts/check.sh [1])
 #
-# 用途：找出仓库里疑似 key / token / 私钥的地方。只报位置，绝不打印匹配到的值。
-# 用法：
-#   bash scripts/secret-scan.sh                  等于 --all
-#   bash scripts/secret-scan.sh --all            所有已跟踪文件 + 未跟踪但没被忽略的文件（读工作区）
-#   bash scripts/secret-scan.sh --staged         只扫暂存区里将要提交的内容（pre-commit 用）
-#   bash scripts/secret-scan.sh --history        全部 git 历史里「新增过」的行（仓库转 public 前必跑）
-#   bash scripts/secret-scan.sh --files <路径>…  只扫给定的工作区文件（check.sh --quick 用）
-# 输出：每处命中一行「文件:行号:模式名」；--history 是「提交号:文件:模式名」。说明文字走 stderr。
-# 退出码：0 = 没命中；1 = 有命中；2 = 用法错误 / 不在 git 仓库里 / 没有 python3
+# Purpose: find likely keys / tokens / private keys in the repo. Reports locations only; never prints the matched value.
+# Usage:
+#   bash scripts/secret-scan.sh                  same as --all
+#   bash scripts/secret-scan.sh --all            all tracked files plus untracked, non-ignored files (reads the working tree)
+#   bash scripts/secret-scan.sh --staged         only the staged content about to be committed (used by pre-commit)
+#   bash scripts/secret-scan.sh --history        every line ever added in git history (run this before making a repo public)
+#   bash scripts/secret-scan.sh --files <path>…  only the given working-tree files (used by check.sh --quick)
+# Output: one line per hit, "file:line:pattern"; --history prints "commit:file:pattern". Explanations go to stderr.
+# Exit codes: 0 = no hits; 1 = hits; 2 = usage error / not inside a git repo / no python3
 #
-# 覆盖的模式（改这里就改下面 PATTERNS）：AWS AKIA…、OpenAI 风格 sk-…、Anthropic sk-ant-…、
-#   GitHub gh[pous]_… / github_pat_…、Google AIza…、Slack xox[bpa]-…、PEM 私钥头、火山方舟 ark-…、
-#   Hugging Face hf_…、Groq gsk_…、xAI xai-…、Replicate r8_…、Perplexity pplx-…、NVIDIA nvapi-…、Fireworks fw_…、
-#   Together tgp_v1_…、智谱 <32 位十六进制>.<16 位>、JWT eyJ….eyJ….…、请求头里直接写值的 Bearer <≥20 位>（curl 示例最常见）、
-#   api key|secret key|access key|token|secret|password|passwd 或全大写的 …_KEY / …_SK 后面用 = : ：赋一个 ≥20 位的串，
-#   以及 password|passwd|secret 用引号赋一个 ≥12 位的串（${…}、process.env、env. 这类引用不算）。
-# 白名单按「命中的那一段」判断，不按整行（同一行有 <br/>、__CONFIG__ 也照样抓）：
-#   命中的值含 xxx / your_ / your-，或被 <…> 整个包住（如 <sk-your-key>），或整段是 __NAME__ 这种占位，
-#   或整段是全大写环境变量名（如 Bearer CLOUDFLARE_API_TOKEN）→ 放行；
-#   *.example 文件整个放行；本文件自身放行。
+# Patterns covered (to change them, edit PATTERNS below): AWS AKIA…, OpenAI-style sk-…, Anthropic sk-ant-…,
+#   GitHub gh[pous]_… / github_pat_…, Google AIza…, Slack xox[bpa]-…, PEM private key headers, Volcano Engine Ark ark-…,
+#   Hugging Face hf_…, Groq gsk_…, xAI xai-…, Replicate r8_…, Perplexity pplx-…, NVIDIA nvapi-…, Fireworks fw_…,
+#   Together tgp_v1_…, Zhipu <32 hex chars>.<16 chars>, JWT eyJ….eyJ….…, a literal value after Bearer in a request header
+#   (<≥20 chars>; common in curl examples), api key|secret key|access key|token|secret|password|passwd or an all-caps
+#   …_KEY / …_SK assigned a ≥20-char string with =, : or a full-width colon, and password|passwd|secret assigned a quoted
+#   ≥12-char string (references such as ${…}, process.env and env. do not count).
+# The whitelist is judged per matched span, not per line (a line that also contains <br/> or __CONFIG__ is still caught):
+#   a value that contains xxx / your_ / your-, is wrapped entirely in <…> (e.g. <sk-your-key>), is a __NAME__ placeholder,
+#   or is an all-caps environment variable name (e.g. Bearer CLOUDFLARE_API_TOKEN) is allowed;
+#   *.example files are skipped entirely, and so is this file.
 set -uo pipefail
 
 usage() { awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; }
@@ -32,15 +33,15 @@ case "${1:-}" in
   --history) MODE="history" ;;
   --files) MODE="files"; shift ;;
   -h|--help) usage; exit 0 ;;
-  *) echo "❌ 未知参数：$1（用 --help 看用法）" >&2; exit 2 ;;
+  *) echo "❌ Unknown argument: $1 (see --help)" >&2; exit 2 ;;
 esac
 [ "$MODE" = "files" ] || { [ $# -gt 0 ] && shift; }
-[ "$MODE" = "files" ] || [ $# -eq 0 ] || { echo "❌ 多余的参数：$*" >&2; exit 2; }
+[ "$MODE" = "files" ] || [ $# -eq 0 ] || { echo "❌ Unexpected extra arguments: $*" >&2; exit 2; }
 
-ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "❌ 不在 git 仓库里" >&2; exit 2; }
-command -v python3 >/dev/null 2>&1 || { echo "❌ 需要 python3（≥3.9）" >&2; exit 2; }
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || { echo "❌ Not inside a git repo" >&2; exit 2; }
+command -v python3 >/dev/null 2>&1 || { echo "❌ python3 (≥3.9) is required" >&2; exit 2; }
 
-# files 模式：把相对 cwd 的路径换成相对仓库根的路径
+# files mode: turn paths relative to the cwd into paths relative to the repo root
 PREFIX=$(git rev-parse --show-prefix 2>/dev/null)
 cd "$ROOT" || exit 2
 
@@ -50,9 +51,9 @@ import os, re, subprocess, sys
 
 mode, prefix, args = sys.argv[1], sys.argv[2], sys.argv[3:]
 SELF = 'scripts/secret-scan.sh'
-MAX_BYTES = 5 * 1024 * 1024  # 超过 5MB 的文件不扫（大文件由 check [6] 管）
+MAX_BYTES = 5 * 1024 * 1024  # files over 5MB are not scanned (check [6] handles large files)
 
-# (模式名, 正则, 值所在的分组号)。同一行命中多个模式时都会列出；sk-ant- 不会再被算成 sk-
+# (pattern name, regex, number of the group that holds the value). Every pattern that matches a line is listed; sk-ant- is not also counted as sk-
 PATTERNS = [
     ('aws_access_key', re.compile(r'(?<![0-9A-Z])AKIA[0-9A-Z]{16}(?![0-9A-Z])'), 0),
     ('anthropic_key', re.compile(r'(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{10,}'), 0),
@@ -67,33 +68,33 @@ PATTERNS = [
     ('groq_key', re.compile(r'(?<![A-Za-z0-9_])gsk_[A-Za-z0-9]{40,}'), 0),
     ('xai_key', re.compile(r'(?<![A-Za-z0-9_-])xai-[A-Za-z0-9]{40,}'), 0),
     ('replicate_token', re.compile(r'(?<![A-Za-z0-9_])r8_[A-Za-z0-9]{30,}'), 0),
-    # 请求头里直接写的值：Bearer $VAR / Bearer ${…} / Bearer <你的key> 都不算（字符集里没有 $ { <）
     ('perplexity_key', re.compile(r'(?<![A-Za-z0-9_-])pplx-[A-Za-z0-9]{40,}'), 0),
     ('nvidia_key', re.compile(r'(?<![A-Za-z0-9_-])nvapi-[A-Za-z0-9_-]{40,}'), 0),
     ('fireworks_key', re.compile(r'(?<![A-Za-z0-9_])fw_[A-Za-z0-9]{20,}'), 0),
     ('together_key', re.compile(r'(?<![A-Za-z0-9_])tgp_v1_[A-Za-z0-9_-]{30,}'), 0),
     ('zhipu_key', re.compile(r'(?<![A-Za-z0-9])[0-9a-f]{32}\.[A-Za-z0-9]{16}(?![A-Za-z0-9])'), 0),
     ('jwt', re.compile(r'(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'), 0),
+    # A literal value in a request header: Bearer $VAR / Bearer ${…} / Bearer <your-key> do not count (the character class has no $ { <)
     ('bearer_token', re.compile(r'(?i)(?<![A-Za-z0-9_])Bearer\s+([A-Za-z0-9._~+/=-]{20,})'), 1),
-    # 通用赋值：KEY=…、"token": "…"、password: '…'、API Key：…、QIANFAN_SK=…；后面紧跟 ( 的是函数调用，不算
-    # …_KEY / …_SK 只认大写（message_key: 这类小写字段名不算）
+    # Generic assignment: KEY=…, "token": "…", password: '…', API Key + full-width colon …, QIANFAN_SK=…; a value directly followed by ( is a function call and does not count
+    # …_KEY / …_SK match upper case only (lower-case field names such as message_key: do not count)
     ('generic_secret_assignment', re.compile(
         r'(?i)(?:api[_\s-]?key|secret(?:[_-]?(?:access[_-]?)?key)?|access[_-]?key|(?-i:[_-](?:KEY|SK))|token|password|passwd)'
         r'[\'"]?\s*[:=：]\s*[\'"]?'
         r'([A-Za-z0-9_\-]{20,})(?![A-Za-z0-9_\-]*\()'), 1),
-    # 密码类放宽：引号里任意 ≥12 个非空白非引号字符
+    # Looser rule for passwords: any ≥12 non-whitespace, non-quote characters inside quotes
     ('password_assignment', re.compile(
         r'(?i)(?:password|passwd|secret)[\'"]?\s*[:=]\s*([\'"])([^\s\'"]{12,})\1'), 2),
 ]
 
 PLACEHOLDER_IN_VALUE = re.compile(r'(?i)xxx|your[_-]')
-ENV_NAME = re.compile(r'^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$')  # 只写了变量名（CLOUDFLARE_API_TOKEN），不是值
+ENV_NAME = re.compile(r'^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$')  # only a variable name (CLOUDFLARE_API_TOKEN), not a value
 DUNDER = re.compile(r'^__[A-Z_]+__$')
 REFERENCE = re.compile(r'^\$\{|^\$[A-Z_]|process\.env|^env\.|os\.environ|import\.meta\.env')
 
 
 def enclosed_in_angle(line, start, end):
-    """命中片段被一对 <…> 整个包住，且 <…> 里没有空白 / = / 引号（<sk-your-key> 算；<img src="…key…"> 不算）。"""
+    """The matched span is wrapped entirely in one pair of <…> that contains no whitespace / = / quotes (<sk-your-key> counts; <img src="…key…"> does not)."""
     lt = line.rfind('<', 0, start)
     if lt < 0 or line.rfind('>', 0, start) > lt:
         return False
@@ -121,9 +122,9 @@ def hits_in_line(line):
         if any(not whitelisted_match(line, m, grp) for m in rx.finditer(line)):
             names.append(name)
     if 'generic_secret_assignment' in names and 'password_assignment' in names:
-        names.remove('password_assignment')  # 同一个值别报两遍
+        names.remove('password_assignment')  # do not report the same value twice
     if 'bearer_token' in names and len(names) > 1:
-        names.remove('bearer_token')  # Bearer sk-… 已经被具体模式报了
+        names.remove('bearer_token')  # Bearer sk-… is already reported by the specific pattern
     return names
 
 
@@ -208,15 +209,15 @@ PY
 
 scan "$@"; rc=$?
 if [ "$rc" -eq 0 ]; then
-  [ "$MODE" = "history" ] && echo "✅ secret-scan --history：全部历史零命中" >&2
+  [ "$MODE" = "history" ] && echo "✅ secret-scan --history: zero hits across the whole history" >&2
   exit 0
 fi
-[ "$rc" -ne 1 ] && { echo "❌ secret-scan 自己出错了（python 退出码 ${rc}）" >&2; exit 2; }
+[ "$rc" -ne 1 ] && { echo "❌ secret-scan itself failed (python exit code ${rc})" >&2; exit 2; }
 {
-  echo "🔑 secret-scan（--${MODE}）：上面每行是「位置:模式名」，只列位置，不打印值。"
-  echo "   修法：把值从文件里删掉，改成读环境变量（本地放 .env / .dev.vars，线上用 wrangler secret put）。"
-  [ "$MODE" = "staged" ] && echo "   暂存区的：改完重新 git add；秘密文件本身用 git rm --cached <文件>。"
-  echo "   误报：改成占位写法（<KEY>、your_…），或找 lead 调整本脚本白名单。"
-  echo "   🔒 key 进过历史（哪怕只 commit 没 push）就先轮换（人来做），再讨论清理历史。"
+  echo "🔑 secret-scan (--${MODE}): each line above is \"location:pattern\"; locations only, values are never printed."
+  echo "   Fix: delete the value from the file and read it from an environment variable instead (locally in .env / .dev.vars; in production via wrangler secret put)."
+  [ "$MODE" = "staged" ] && echo "   Staged content: git add again after fixing; untrack a secret file itself with git rm --cached <file>."
+  echo "   False positive: switch to a placeholder form (<KEY>, your_…) or adjust this script's whitelist."
+  echo "   🔒 If a key ever entered history (even committed but never pushed), rotate it first (a human does this), then discuss cleaning the history."
 } >&2
 exit 1

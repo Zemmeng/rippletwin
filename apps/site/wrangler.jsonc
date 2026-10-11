@@ -1,36 +1,39 @@
-// site —— 一个 Worker 挂全部模块：/<模块>/public/… 是各模块 public/ 的原样拷贝（build.mjs 拷到 out/），/api/sumo/* 交给 hackathon-sumo，其余 /api/* 交给 T5 的 api Worker
-// 部署只走 bash scripts/deploy.sh all（DEPLOYER，D-0929-1322）；它会跑 npm run deploy = node build.mjs && wrangler deploy
-// 密钥不放这里：大模型 key 由部署人在 T5 的 api Worker 上 npx wrangler secret put <NAME>。详见 README.md、docs/deploy-cloudflare.md
+// site: one Worker serves every module. /<module>/public/... is an unchanged copy of each module's public/ (build.mjs copies it to out/);
+// /api/sumo/* goes to hackathon-sumo and every other /api/* to the API Worker (hackathon-api)
+// Deploy only through bash scripts/deploy.sh all, which runs npm run deploy = node build.mjs && wrangler deploy
+// No secrets here: the LLM key is set on the API Worker with npx wrangler secret put <NAME>. See README.md and docs/architecture/deployment.md
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Worker 名 = workers.dev 链接前缀：https://hackathon-site.<账号子域>.workers.dev
-  // DEPLOYER 可以改名（先在 Cloudflare 后台 Workers & Pages 看一眼有没有重名）；改完告诉 lead 更新 DEMO_URL
+  // Worker name = workers.dev URL prefix: https://hackathon-site.<account subdomain>.workers.dev
+  // Renaming it changes the public URL; update DEMO_URL in hackathon.conf to match
   "name": "hackathon-site",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
 
-  // 比赛期间拿 demo 链接；赛后想关就改 false 再部署一次（D-10）
+  // Serves the demo URL; set to false and redeploy to take the public URL down (docs/decisions.md D-10)
   "workers_dev": true,
-  // 不给每次上传的版本单独开预览链接：少一批没人管、却能公开访问的入口
+  // No per-version preview URLs: fewer unmanaged, publicly reachable entry points
   "preview_urls": false,
-  // 线上 console.log / 报错在 Cloudflare 后台 Workers Logs 里查，或 npx wrangler tail
+  // Live console.log output and errors: Workers Logs in the Cloudflare dashboard, or npx wrangler tail
   "observability": { "enabled": true },
 
   "assets": {
-    // build.mjs 的产物（已 gitignore），不是源码；npm run dev / deploy 会先重新生成
+    // build.mjs output (gitignored), not source; npm run dev / deploy regenerate it first
     "directory": "out",
     "binding": "ASSETS",
-    // /api/* 先进 Worker（/api/sumo/* 转给 hackathon-sumo，其余转给 T5）；但 /api/public/* 是 apps/api/public/ 的静态文件（reader.js 等），照常走静态资源
+    // /api/* runs the Worker first (/api/sumo/* to hackathon-sumo, the rest to hackathon-api); /api/public/* are static files from
+    // apps/api/public/ (reader.js and so on) and stay with static assets. worker.js has the same exclusion: change both together
     "run_worker_first": ["/api/*", "!/api/public/*"]
   },
 
-  // ---- 接 T5 的 api Worker（D-0929-1436，T19 打开）----
-  // service = apps/api/wrangler.jsonc 的 "name"（改名两边一起改，tests/config.test.mjs 查）。
-  // hackathon.conf 的 DEPLOY_MODULES=api site：api 必须排在前面，绑定的目标 Worker 得先存在，否则部署报 Could not resolve service binding
-  // ---- 接现场 SUMO（T37）：/api/sumo、/api/sumo/* 交给 hackathon-sumo（apps/sumo，Cloudflare Container），worker.js 先判它再判 /api/* ----
-  // service = apps/sumo/wrangler.jsonc 的 "name"（tests/config.test.mjs 查）。hackathon-sumo 必须在 site 部署前就存在：
-  // lead 先在本机（要 Docker）cd apps/sumo && npx wrangler deploy，再部署 site；否则 site 部署报 Could not resolve service binding。
-  // hackathon.conf 的 DEPLOY_MODULES 故意还是「api site」、不加 sumo：sumo 的镜像要 Docker 构建，只由 lead 在装了 Docker 的机器上手动部署
+  // ---- API: service = "name" in apps/api/wrangler.jsonc (rename both together; tests/config.test.mjs checks it) ----
+  // hackathon.conf has DEPLOY_MODULES=api site: api must come first, because a binding's target Worker has to exist,
+  // otherwise the deploy fails with Could not resolve service binding
+  // ---- SUMO: /api/sumo and /api/sumo/* go to hackathon-sumo (apps/sumo, Cloudflare Container); worker.js checks it before /api/* ----
+  // service = "name" in apps/sumo/wrangler.jsonc (tests/config.test.mjs checks it). hackathon-sumo had to exist before site was deployed;
+  // it was deployed by hand from a machine with Docker (cd apps/sumo && npx wrangler deploy), so DEPLOY_MODULES deliberately leaves sumo out.
+  // ⚠️ Post-event: hackathon-sumo has been deleted. Remove the SUMO binding below before the next site deploy (worker.js then returns
+  // 503 sumo_off and the page keeps using the pre-computed results), and relax tests/config.test.mjs and apps/sumo/tests/config.test.mjs with it
   "services": [
     { "binding": "API", "service": "hackathon-api" },
     { "binding": "SUMO", "service": "hackathon-sumo" }

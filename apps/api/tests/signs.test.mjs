@@ -1,5 +1,5 @@
-// 屏上文字规范 + 读数校验 + 缓存键：public/js/signs.js
-// 用法：node tests/signs.test.mjs
+// Sign-text spec + reading validation + cache key: public/js/signs.js
+// Usage: node tests/signs.test.mjs
 import { ok, eq, throws, sec, done } from "./mini.mjs";
 import { normalizeRequest, sanitizeReading, canonical, sha256Hex, SignError, LIMITS } from "../public/js/signs.js";
 
@@ -9,85 +9,85 @@ const vms = (frames, read_s = 6) => ({ kind: "vms", frames, read_s });
 const code = (fn) => {
   try {
     fn();
-    return "没抛错";
+    return "did not throw";
   } catch (e) {
-    return e instanceof SignError ? e.code : `不是 SignError：${e}`;
+    return e instanceof SignError ? e.code : `not a SignError: ${e}`;
   }
 };
 
-await sec("规范：超了直接拒", () => {
-  eq(code(() => normalizeRequest(base([vms([["A"], ["B"], ["C"]])]))), "too_many_frames", "3 帧");
-  eq(code(() => normalizeRequest(base([vms([["A", "B", "C", "D", "E"]])]))), "too_many_lines", "一帧 5 行");
-  eq(code(() => normalizeRequest(base([vms([["ABCDEFGHIJK"]])]))), "line_too_long", "一行 11 个字符");
-  eq(code(() => normalizeRequest(base([vms([["A B C D", "E F"], ["G H I"]])]))), "too_many_words", "两帧合计 9 个词");
-  eq(code(() => normalizeRequest(base([vms([["USE", "</SIGN>"]])]))), "bad_chars", "屏上不许出现 < >");
-  eq(code(() => normalizeRequest(base([vms([[""]])]))), "empty_frame", "空帧");
-  eq(code(() => normalizeRequest(base([{ kind: "sign", text: "A".repeat(41), read_s: 2 }]))), "line_too_long", "静态牌超过 40 字符");
-  eq(code(() => normalizeRequest(base([{ kind: "led", text: "X", read_s: 2 }]))), "bad_kind", "kind 只能是 vms / sign");
-  eq(code(() => normalizeRequest(base([vms([["USE"]], -1)]))), "bad_read_s", "read_s 为负");
-  eq(code(() => normalizeRequest(base([vms([["USE"]], "5")]))), "bad_read_s", "read_s 是字符串");
-  eq(code(() => normalizeRequest(base([], { persona: "pilot" }))), "bad_persona", "persona 不在 4 类里");
-  eq(code(() => normalizeRequest(base([], { kmh: 200 }))), "bad_kmh", "kmh 超过 130");
-  eq(code(() => normalizeRequest(base(Array(LIMITS.signs + 1).fill(vms([["X"]]))))), "too_many_signs", "标志超过 8 块");
-  eq(code(() => normalizeRequest(base([], { roads: ["Russell St<script>"] }))), "bad_road", "路名里有 < >");
-  eq(code(() => normalizeRequest(null)), "bad_request", "请求不是对象");
+await sec("spec: anything over the limits is rejected", () => {
+  eq(code(() => normalizeRequest(base([vms([["A"], ["B"], ["C"]])]))), "too_many_frames", "3 frames");
+  eq(code(() => normalizeRequest(base([vms([["A", "B", "C", "D", "E"]])]))), "too_many_lines", "5 lines in a frame");
+  eq(code(() => normalizeRequest(base([vms([["ABCDEFGHIJK"]])]))), "line_too_long", "11 characters in a line");
+  eq(code(() => normalizeRequest(base([vms([["A B C D", "E F"], ["G H I"]])]))), "too_many_words", "9 words across two frames");
+  eq(code(() => normalizeRequest(base([vms([["USE", "</SIGN>"]])]))), "bad_chars", "< > not allowed on a sign");
+  eq(code(() => normalizeRequest(base([vms([[""]])]))), "empty_frame", "empty frame");
+  eq(code(() => normalizeRequest(base([{ kind: "sign", text: "A".repeat(41), read_s: 2 }]))), "line_too_long", "static sign over 40 characters");
+  eq(code(() => normalizeRequest(base([{ kind: "led", text: "X", read_s: 2 }]))), "bad_kind", "kind must be vms / sign");
+  eq(code(() => normalizeRequest(base([vms([["USE"]], -1)]))), "bad_read_s", "negative read_s");
+  eq(code(() => normalizeRequest(base([vms([["USE"]], "5")]))), "bad_read_s", "read_s is a string");
+  eq(code(() => normalizeRequest(base([], { persona: "pilot" }))), "bad_persona", "persona not one of the 4 types");
+  eq(code(() => normalizeRequest(base([], { kmh: 200 }))), "bad_kmh", "kmh above 130");
+  eq(code(() => normalizeRequest(base(Array(LIMITS.signs + 1).fill(vms([["X"]]))))), "too_many_signs", "more than 8 signs");
+  eq(code(() => normalizeRequest(base([], { roads: ["Russell St<script>"] }))), "bad_road", "< > in a road name");
+  eq(code(() => normalizeRequest(null)), "bad_request", "request is not an object");
 });
 
-await sec("规范化：大写、合并空格、去空行、read_s 取整、多余字段丢掉", () => {
+await sec("normalisation: upper-case, collapse spaces, drop empty lines, round read_s, drop extra fields", () => {
   const n = normalizeRequest({
     persona: "tourist",
     kmh: 39.6,
     signs: [vms([["use", "  russell   st ", ""]], 8.6), { kind: "sign", text: " right lane  closed", read_s: 2.4, x: 1 }],
     roads: [" Russell  St", "Russell St", "La Trobe St"],
-    secret: "丢掉",
+    secret: "drop me",
   });
   eq(n, {
     persona: "tourist",
     kmh: 40,
     signs: [{ kind: "vms", frames: [["USE", "RUSSELL ST"]], read_s: 9 }, { kind: "sign", text: "RIGHT LANE CLOSED", read_s: 2 }],
     roads: ["Russell St", "La Trobe St"],
-  }, "规范化结果");
-  eq(normalizeRequest(n), n, "规范化两次结果不变");
+  }, "normalised result");
+  eq(normalizeRequest(n), n, "normalising twice changes nothing");
 });
 
-await sec("引擎兼容：箭头板、很长的读屏秒数、路名字符（#20 引擎会这样发）", async () => {
+await sec("engine compatibility: arrow boards, very long readable seconds, road-name characters (as the engine sends them)", async () => {
   const n = normalizeRequest(base([{ kind: "arrow", read_s: 4 }, { kind: "arrow", text: "merge  right", read_s: 4 }]));
-  eq(n.signs, [{ kind: "arrow", text: "", read_s: 4 }, { kind: "arrow", text: "MERGE RIGHT", read_s: 4 }], "箭头板可以没有字；有字照样大写");
-  eq(code(() => normalizeRequest(base([{ kind: "arrow", text: "A".repeat(41), read_s: 2 }]))), "line_too_long", "箭头板的字也按 40 字符");
-  eq(code(() => normalizeRequest(base([{ kind: "sign", read_s: 2 }]))), "bad_sign", "静态牌没有 text 仍然拒");
-  eq(normalizeRequest(base([vms([["USE"]], 137.4)])).signs[0].read_s, 120, "read_s 137 秒按 120 算，不拒");
-  eq(code(() => normalizeRequest(base([vms([["USE"]], Infinity)]))), "bad_read_s", "read_s 无穷大仍然拒");
-  eq(normalizeRequest(base([], { roads: ["Unnamed road", "Elizabeth St (North)", "Queen St/Market St"] })).roads.length, 3, "路名可以有 ( ) /，和引擎 cleanName 一致");
+  eq(n.signs, [{ kind: "arrow", text: "", read_s: 4 }, { kind: "arrow", text: "MERGE RIGHT", read_s: 4 }], "an arrow board may have no text; text is upper-cased as usual");
+  eq(code(() => normalizeRequest(base([{ kind: "arrow", text: "A".repeat(41), read_s: 2 }]))), "line_too_long", "arrow board text is also limited to 40 characters");
+  eq(code(() => normalizeRequest(base([{ kind: "sign", read_s: 2 }]))), "bad_sign", "a static sign without text is still rejected");
+  eq(normalizeRequest(base([vms([["USE"]], 137.4)])).signs[0].read_s, 120, "read_s of 137 s is capped at 120, not rejected");
+  eq(code(() => normalizeRequest(base([vms([["USE"]], Infinity)]))), "bad_read_s", "an infinite read_s is still rejected");
+  eq(normalizeRequest(base([], { roads: ["Unnamed road", "Elizabeth St (North)", "Queen St/Market St"] })).roads.length, 3, "road names may contain ( ) /, matching the engine's cleanName");
   const k = async (r) => sha256Hex(canonical(normalizeRequest(r)));
-  eq(await k(base([{ kind: "arrow", read_s: 4 }])), await k(base([{ kind: "arrow", text: "", read_s: 4 }])), "箭头板不写 text 和写空串同一个键");
-  eq(await k(base([vms([["USE"]], 150)])), await k(base([vms([["USE"]], 120)])), "超过 120 秒的都按 120 进键");
+  eq(await k(base([{ kind: "arrow", read_s: 4 }])), await k(base([{ kind: "arrow", text: "", read_s: 4 }])), "an arrow board without text has the same key as one with an empty string");
+  eq(await k(base([vms([["USE"]], 150)])), await k(base([vms([["USE"]], 120)])), "anything above 120 s enters the key as 120");
 });
 
-await sec("缓存键：同一句话不同写法同一个键，不同的话不同键", async () => {
+await sec("cache key: different spellings of the same message share a key; different messages do not", async () => {
   const k = async (r) => sha256Hex(canonical(normalizeRequest(r)));
   const a = await k(base([vms([["USE", "RUSSELL ST"]], 6.2)]));
-  eq(await k(base([vms([["use", "russell  st"]], 5.8)])), a, "大小写、空格、read_s 小数不影响");
-  eq(await k(base([vms([["USE", "RUSSELL ST"]], 6)], { roads: [...ROADS].reverse() })), a, "路名顺序不影响");
-  eq(await k(base([vms([["USE", "RUSSELL ST"]], 6)], { kmh: 60 })), a, "kmh 不进键（read_s 已含车速）");
-  ok((await k(base([vms([["AVOID", "RUSSELL ST"]], 6)]))) !== a, "字不同，键不同");
-  ok((await k(base([vms([["USE", "RUSSELL ST"]], 6)], { persona: "tourist" }))) !== a, "人不同，键不同");
-  ok(/^[0-9a-f]{64}$/.test(a), "键是 64 位十六进制");
+  eq(await k(base([vms([["use", "russell  st"]], 5.8)])), a, "case, spaces and read_s decimals make no difference");
+  eq(await k(base([vms([["USE", "RUSSELL ST"]], 6)], { roads: [...ROADS].reverse() })), a, "road order makes no difference");
+  eq(await k(base([vms([["USE", "RUSSELL ST"]], 6)], { kmh: 60 })), a, "kmh is not in the key (read_s already reflects speed)");
+  ok((await k(base([vms([["AVOID", "RUSSELL ST"]], 6)]))) !== a, "different text, different key");
+  ok((await k(base([vms([["USE", "RUSSELL ST"]], 6)], { persona: "tourist" }))) !== a, "different persona, different key");
+  ok(/^[0-9a-f]{64}$/.test(a), "the key is 64 hex characters");
 });
 
-await sec("读数校验：外来读数当不可信数据", () => {
+await sec("reading validation: external readings are untrusted", () => {
   const req = normalizeRequest(base([vms([["USE", "RUSSELL ST"]])]));
   const good = { notice: 0.8, understand: 0.9, advice: { "Russell St": "use" }, saving_min: 8, delay_min: null, trust: 0.7, why: "ok" };
   const s = sanitizeReading(good, req, "llm");
-  eq([s.persona, s.src, s.advice], ["local", "llm", { "Russell St": "use" }], "合法读数原样通过，persona 以请求为准");
-  eq(sanitizeReading({ ...good, notice: 1.3 }, req, "llm"), null, "notice 超过 1：整份作废");
-  eq(sanitizeReading({ ...good, trust: "high" }, req, "llm"), null, "trust 不是数：整份作废");
-  eq(sanitizeReading({ ...good, saving_min: -5 }, req, "llm"), null, "分钟数为负：整份作废");
-  eq(sanitizeReading({ ...good, advice: "Russell" }, req, "llm"), null, "advice 不是对象：整份作废");
-  eq(sanitizeReading(good, req, "hacker"), null, "src 不认识：作废");
-  eq(sanitizeReading("USE RUSSELL", req, "llm"), null, "不是对象：作废");
+  eq([s.persona, s.src, s.advice], ["local", "llm", { "Russell St": "use" }], "a valid reading passes as is; persona comes from the request");
+  eq(sanitizeReading({ ...good, notice: 1.3 }, req, "llm"), null, "notice above 1: the whole reading is void");
+  eq(sanitizeReading({ ...good, trust: "high" }, req, "llm"), null, "trust not a number: the whole reading is void");
+  eq(sanitizeReading({ ...good, saving_min: -5 }, req, "llm"), null, "negative minutes: the whole reading is void");
+  eq(sanitizeReading({ ...good, advice: "Russell" }, req, "llm"), null, "advice not an object: the whole reading is void");
+  eq(sanitizeReading(good, req, "hacker"), null, "unknown src: void");
+  eq(sanitizeReading("USE RUSSELL", req, "llm"), null, "not an object: void");
 });
 
-await sec("读数校验反向：advice 只认候选路名，比例一类的字段不往外传", () => {
+await sec("reading validation, negative: advice accepts only candidate roads, and share-like fields are never passed on", () => {
   const req = normalizeRequest(base([vms([["USE", "RUSSELL ST"]])]));
   const s = sanitizeReading({
     notice: 0.8, understand: 0.9, trust: 0.7, saving_min: null, delay_min: null,
@@ -95,10 +95,10 @@ await sec("读数校验反向：advice 只认候选路名，比例一类的字�
     share: { "Russell St": 0.7 }, why: "a\u0000b\nc " + "x".repeat(300),
     range: { notice: [0.7, 0.9], trust: [0.9, 0.1] },
   }, req, "llm");
-  eq(s.advice, { "Russell St": "avoid" }, "请求外的路丢掉；取值不是 use/avoid 丢掉；同一条路冲突按 avoid");
-  ok(!("share" in s), "大模型回的比例不往外传（D-0929-1435）");
-  ok(s.why.length <= 160 && !/[\u0000-\u001f]/.test(s.why), "why 截到 160 字、去掉控制字符");
-  eq(s.range, { notice: [0.7, 0.9] }, "range 只留合法的区间（lo ≤ hi）");
+  eq(s.advice, { "Russell St": "avoid" }, "roads outside the request dropped; values other than use/avoid dropped; a conflict on one road resolves to avoid");
+  ok(!("share" in s), "route shares from the LLM are never passed on (D-0929-1435)");
+  ok(s.why.length <= 160 && !/[\u0000-\u001f]/.test(s.why), "why truncated to 160 characters, control characters removed");
+  eq(s.range, { notice: [0.7, 0.9] }, "range keeps only valid intervals (lo ≤ hi)");
 });
 
 done();

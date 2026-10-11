@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
-"""用途：真实天气回测（T31）——墨尔本 CBD 下雨的时候，车、自行车、行人实际少了多少，高峰通行能力掉了多少，
-和页面微观仿真编的 WXP 倍数（apps/web/src/js/4-sim.js:14-20）对照。需求见 docs/arch/T31-weather-backtest-PRD.md。
+"""Purpose: real-weather back-test. When it rains in the Melbourne CBD, how much do car, bike and pedestrian volumes actually drop, and how much
+does peak capacity fall? The results are compared with the WXP multipliers invented for the page's micro-simulation (apps/web/src/js/4-sim.js:14-20).
+Spec: docs/hackathon/specs/T31-weather-backtest-PRD.md.
 
-用法：python3 apps/roads/tools/backtest_weather.py [--area cbd]
-前置：public/<area>/weather_hourly.json（tools/fetch_weather.py）
-      raw/cbd_VSDATA_*.csv（tools/fetch_scats.py --range 2026-08-01..2026-09-27）
-      raw/peds.csv（行人计数，README 里的 curl）
-      raw/IDCJDW3033.202608.csv、raw/IDCJDW3033.202609.csv（BoM 逐日观测，**浏览器手动下**，不自动抓、不提交）
-输出：public/<area>/weather_backtest.json
-退出码：0 成功；1 缺输入文件
-依赖：只用 Python 标准库。
+Usage: python3 apps/roads/tools/backtest_weather.py [--area cbd]
+Prerequisites: public/<area>/weather_hourly.json (tools/fetch_weather.py)
+      raw/cbd_VSDATA_*.csv (tools/fetch_scats.py --range 2026-08-01..2026-09-27)
+      raw/peds.csv (pedestrian counts, the curl command in the README)
+      raw/IDCJDW3033.202608.csv, raw/IDCJDW3033.202609.csv (BoM daily observations, **downloaded by hand in a browser**, not scraped and not committed)
+Output: public/<area>/weather_backtest.json
+Exit code: 0 success; 1 input files missing
+Dependencies: Python standard library only.
 
-口径（写进输出的 classes / notes）：
-  - 时间对齐：Open-Meteo 时刻 T 的降水是 T 之前那一小时的 → 交通第 h 小时（h:00–h+1:00）对 T = h+1
-  - dry：本小时和前 2 小时模型降水都是 0，BoM 覆盖这一小时的 24 h 雨量 < 1 mm，且不是雾
-  - wet：模型降水 ≥ 0.1 mm/h；rain：≥ 1 mm/h。BoM 覆盖这一小时的 24 h 雨量 < 0.2 mm 的算模型误报，不进 wet / rain
-  - fog：能见度 < 1000 m 且没下雨（仅模型，没有实测能见度可核）
-  - BoM「Rainfall (mm)」是前一天 9 点到当天 9 点：第 h 小时在 9 点前用当天那行，9 点起用第二天那行
-  - 基线：每个检测器 / 计数器 × **星期几** × 小时，只用 dry 小时的中位数（≥ 3 个）
-    （最初按「工作日 / 周末」分，安慰剂检验偏低 4–11%：全天晴的日子里周日多，周日比周六低；周一也比周二到周四低约 6%）
-  - 效应：每天取 log((流量+1)/(基线+1)) 的基线加权中位数，再对天平均、取 exp；95% 区间按「天」重抽样（同一天的小时相关）
-  - n_days < 3 的格子 ratio / ci95 写 null
+Definitions (written to the output's classes / method):
+  - Time alignment: Open-Meteo precipitation at time T covers the hour before T, so traffic hour h (h:00-h+1:00) uses T = h+1
+  - dry: model precipitation 0 in this hour and the previous 2, BoM 24 h rainfall covering this hour < 1 mm, and not fog
+  - wet: model precipitation >= 0.1 mm/h; rain: >= 1 mm/h. If the BoM 24 h rainfall covering the hour is < 0.2 mm it is a model false alarm and excluded from wet / rain
+  - fog: visibility < 1000 m and no rain (model only; there is no measured visibility to check against)
+  - BoM "Rainfall (mm)" runs from 9 am the previous day to 9 am that day: hours before 9 am use that day's row, from 9 am the next day's row
+  - Baseline: per detector / counter x **day of week** x hour, the median of dry hours only (>= 3)
+    (splitting only by weekday / weekend at first put the placebo test 4-11% low: fully dry days included more Sundays, which are lower than Saturdays; Mondays are also about 6% lower than Tuesday to Thursday)
+  - Effect: per day, the baseline-weighted median of log((flow+1)/(baseline+1)), then the mean over days, exponentiated; 95% CI by resampling days (hours within a day are correlated)
+  - cells with n_days < 3 get ratio / ci95 = null
 """
 import argparse, collections, csv, datetime, glob, json, math, os, random, statistics, sys
 
@@ -32,17 +33,17 @@ EXCLUDED = {
     '2026-09-26': 'AFL Grand Final; ' + SCHOOL_HOL,
     '2026-09-27': SCHOOL_HOL,
 }
-CAR_2921 = {('2921', 3), ('2921', 5), ('2921', 7)}            # 配置表核对过（apps/sim/tools/build_demand.py 的 DET）
-BIKE_2921 = {('2921', 1), ('2921', 2), ('2921', 4), ('2921', 8)}  # 自行车检测器；6 号 8 周全 0（坏了）
-NOT_CAR_2921 = {1, 2, 4, 6, 8, 11, 13, 22} | set(range(24, 32))   # 2921 的自行车、电车、行人按钮
+CAR_2921 = {('2921', 3), ('2921', 5), ('2921', 7)}            # checked against the configuration sheet (DET in apps/sim/tools/build_demand.py)
+BIKE_2921 = {('2921', 1), ('2921', 2), ('2921', 4), ('2921', 8)}  # bike detectors; detector 6 reads 0 for all 8 weeks (broken)
+NOT_CAR_2921 = {1, 2, 4, 6, 8, 11, 13, 22} | set(range(24, 32))   # 2921 bike, tram and pedestrian-button detectors
 PED_SENSORS = ['Swa295_T', 'Lat224_T', 'Swa330_T', 'Lon364_T', 'Lon189_T']
-LANE_SHARE, MIN_DAILY = 0.5, 300          # 车道检测器：日流量 ≥ 路口最大检测器 50% 且 ≥ 300（同 build_flows.py）
-DAY_HOURS = list(range(7, 19))            # 白天 07:00–19:00
+LANE_SHARE, MIN_DAILY = 0.5, 300          # lane detector: daily count >= 50% of the junction's busiest detector and >= 300 (as in build_flows.py)
+DAY_HOURS = list(range(7, 19))            # daytime 07:00-19:00
 PEAK = {'am': [7, 8, 9], 'pm': [16, 17, 18]}
-MIN_BASE = {'car': 20, 'car_2921': 20, 'bike': 5, 'ped': 20}   # 基线太小的小时不算（每小时）
+MIN_BASE = {'car': 20, 'car_2921': 20, 'bike': 5, 'ped': 20}   # hours with a baseline below this are skipped (per hour)
 N_BOOT, SEED = 2000, 31
-N_PLACEBO = 25                 # 安慰剂再随机抽几次
-WXP = {  # apps/web/src/js/4-sim.js:14-20（只读，本任务不改页面）
+N_PLACEBO = 25                 # number of extra random placebo draws
+WXP = {  # apps/web/src/js/4-sim.js:14-20 (read only; this tool does not change the page)
     'storm': {'rate': .9, 'T': 1.4}, 'flood': {'rate': .75, 'T': 1.5}, 'fog': {'rate': .85, 'T': 1.7},
     'heat': {'rate': .8, 'T': 1.1}, 'wind': {'rate': .85, 'T': 1.25}}
 LIT = {
@@ -62,13 +63,13 @@ def kind(d):
     return 'we' if datetime.date.fromisoformat(d).weekday() >= 5 else 'wd'
 
 
-# ---------------------------------------------------------------- 天气
+# ---------------------------------------------------------------- weather
 def load_weather(p):
     w = json.load(open(p, encoding='utf-8'))
     h = w['hourly']
     idx = {t: i for i, t in enumerate(h['time'])}
 
-    def at(var, d, hh):  # 时刻 d hh:00 的值（hh 可以是 24 → 第二天 0 点，或负数 → 前一天）
+    def at(var, d, hh):  # value at d hh:00 (hh may be 24 -> midnight the next day, or negative -> the previous day)
         dd, hh2 = d, hh
         while hh2 >= 24:
             dd, hh2 = day_of(dd, 1), hh2 - 24
@@ -80,9 +81,9 @@ def load_weather(p):
 
 
 def load_bom(raw):
-    """raw/IDCJDW3033.*.csv → {日期: 雨量 mm}, {日期: 最大阵风 km/h}, {日期: 最高温 °C}。latin-1，日期不补零。"""
+    """raw/IDCJDW3033.*.csv -> {date: rainfall mm}, {date: maximum gust km/h}, {date: maximum temperature °C}. latin-1; dates are not zero-padded."""
     rain, gust, tmax = {}, {}, {}
-    # 只认标准文件名：浏览器重复下载会多出「IDCJDW3033.202608 (1).csv」这种副本
+    # Accept only the standard file names: repeated browser downloads create copies such as "IDCJDW3033.202608 (1).csv"
     for p in sorted(glob.glob(os.path.join(raw, 'IDCJDW3033.[0-9][0-9][0-9][0-9][0-9][0-9].csv'))):
         rows = list(csv.reader(open(p, encoding='latin-1')))
         hi = next((i for i, r in enumerate(rows) if any('Rainfall (mm)' in c for c in r)), None)
@@ -111,7 +112,7 @@ def load_bom(raw):
 
 
 def classify(at, bom, d, h):
-    """→ (类别集合, 本小时模型降水, BoM 覆盖这一小时的 24 h 雨量, 是否模型误报)"""
+    """-> (set of classes, model precipitation this hour, BoM 24 h rainfall covering this hour, whether it is a model false alarm)"""
     p0, p1, p2 = at('precipitation', d, h + 1), at('precipitation', d, h), at('precipitation', d, h - 1)
     v0, v1 = at('visibility', d, h), at('visibility', d, h + 1)
     b = bom.get(d if h < 9 else day_of(d, 1)) if bom else None
@@ -131,10 +132,10 @@ def classify(at, bom, d, h):
     return cls, p0, b, false_alarm
 
 
-# ---------------------------------------------------------------- 交通
+# ---------------------------------------------------------------- traffic
 def load_scats(raw):
-    """→ hourly[(站点, 检测器)][(日期, 小时)] = 车次；q15[(站点, 检测器)][(日期, 小时)] = 该小时最大 15 分钟 × 4；
-    日均[(站点, 检测器)]（工作日）"""
+    """-> hourly[(site, detector)][(date, hour)] = vehicles; q15[(site, detector)][(date, hour)] = the hour's busiest 15 minutes x 4;
+    daily mean[(site, detector)] (weekdays)"""
     hourly, q15 = collections.defaultdict(dict), collections.defaultdict(dict)
     daily = collections.defaultdict(list)
     for p in sorted(glob.glob(os.path.join(raw, 'cbd_VSDATA_*.csv'))):
@@ -148,7 +149,7 @@ def load_scats(raw):
                 daily[key].append(sum(x for x in v if x >= 0))
             for h in range(24):
                 q = v[4 * h:4 * h + 4]
-                if min(q) >= 0:  # 负数 = 故障或缺失，整小时丢掉
+                if min(q) >= 0:  # negative = fault or missing; drop the whole hour
                     hourly[key][(d, h)] = sum(q)
                     q15[key][(d, h)] = max(q) * 4
     return hourly, q15, {k: statistics.mean(x) for k, x in daily.items() if x}
@@ -175,13 +176,13 @@ def load_peds(p):
     return out
 
 
-# ---------------------------------------------------------------- 统计
+# ---------------------------------------------------------------- statistics
 def dow(d):
     return datetime.date.fromisoformat(d).weekday()
 
 
 def baseline(series, dry_hours, skip_days=()):
-    """每个传感器 × 星期几 × 小时：dry 小时的中位数（≥ 3 个才给）。"""
+    """Per sensor x day of week x hour: median of dry hours (only when there are >= 3)."""
     acc = collections.defaultdict(list)
     for sid, obs in series.items():
         for (d, h), v in obs.items():
@@ -200,7 +201,7 @@ def baseline_lists(series, dry_hours):
 
 
 class LeaveOneDayOut:
-    """像 dict 一样给基线，但算第 d 天时把 d 自己拿掉（安慰剂用：和真雨天一样，只有那一天不在基线里）。"""
+    """Serves baselines like a dict, but leaves day d out while day d is being evaluated (for the placebo: as with a real wet day, only that day is missing from the baseline)."""
 
     def __init__(self, lists):
         self.lists, self.day = lists, None
@@ -211,7 +212,7 @@ class LeaveOneDayOut:
 
 
 def wmedian(xs):
-    """[(权重, 值)] 的加权中位数"""
+    """Weighted median of [(weight, value)]"""
     xs = sorted(xs, key=lambda t: t[1])
     half, c = sum(w for w, _ in xs) / 2, 0.0
     for w, v in xs:
@@ -222,7 +223,7 @@ def wmedian(xs):
 
 
 def day_effects(series, base, hours, min_base):
-    """→ {日期: 当天的加权中位数 log 比}, 用到的小时, 用到的传感器"""
+    """-> {date: that day's weighted median log ratio}, hours used, sensors used"""
     per_day = collections.defaultdict(list)
     used_h, used_s = set(), set()
     for sid, obs in series.items():
@@ -239,7 +240,7 @@ def day_effects(series, base, hours, min_base):
 
 
 def effect(series, base, hours, min_base, rng):
-    """hours：要算的 (日期, 小时) 集合 → dict（ratio、ci95、n_days、n_hours、n_sensors、note）"""
+    """hours: the set of (date, hour) to evaluate -> dict (ratio, ci95, n_days, n_hours, n_sensors, note)"""
     per_day, used_h, used_s = day_effects(series, base, hours, min_base)
     days = sorted(per_day)
     out = {'n_days': len(days), 'n_hours': len(used_h), 'n_sensors': len(used_s), 'days': days}
@@ -269,7 +270,7 @@ def fmt(r):
     return '%.3f [%.3f, %.3f], %d days' % (r['ratio'], r['ci95'][0], r['ci95'][1], r['n_days'])
 
 
-# ---------------------------------------------------------------- 主流程
+# ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--area', default='cbd')
@@ -280,16 +281,16 @@ def main():
     need = [wp, os.path.join(a.raw, 'peds.csv')]
     miss = [p for p in need if not os.path.exists(p)] + ([] if glob.glob(os.path.join(a.raw, 'cbd_VSDATA_*.csv')) else ['raw/cbd_VSDATA_*.csv'])
     if miss:
-        print('❌ 缺 %s' % miss); sys.exit(1)
+        print('❌ missing %s' % miss); sys.exit(1)
     rng = random.Random(SEED)
     wx, at = load_weather(wp)
     bom, bom_gust, bom_tmax = load_bom(a.raw)
     if not bom:
-        print('⚠️  raw/ 里没有 BoM 的 IDCJDW3033.*.csv：只按模型分类，雨天没法核（手动下载见 PRD 2.2）')
+        print('⚠️  no BoM IDCJDW3033.*.csv in raw/: classifying by model only, wet days cannot be checked (manual download: see the README)')
     d0, d1 = wx['window']
     all_days = [day_of(d0, i) for i in range((datetime.date.fromisoformat(d1) - datetime.date.fromisoformat(d0)).days + 1)]
 
-    # 每小时分类
+    # classify every hour
     cls_hours = collections.defaultdict(set)
     false_alarms, info = [], {}
     for d in all_days:
@@ -315,7 +316,7 @@ def main():
     dry = cls_hours['dry']
     bases = {m: baseline(s, dry) for m, s in series.items()}
 
-    # 效应：类别 × 模式 × 时段
+    # effects: class x mode x period
     results = []
     for c in ('wet', 'rain', 'fog'):
         for period in ('day', 'peak'):
@@ -332,7 +333,7 @@ def main():
                 results.append(row)
     res = {(r['cls'], r['mode'], r['period']): r for r in results}
 
-    # 时间对齐核对：把降水往前 / 往后挪一小时，看自行车雨天效应哪种最强
+    # time alignment check: shift precipitation one hour earlier / later and see which gives the strongest wet-day bike effect
     align = {}
     for name, shift in (('T=h (same hour)', 0), ('T=h+1 (used)', 1), ('T=h+2', 2)):
         hrs = set()
@@ -347,7 +348,7 @@ def main():
         r = effect(series['bike'], bases['bike'], hrs, MIN_BASE['bike'], rng)
         align[name] = {'bike_wet_day_ratio': r['ratio'], 'ci95': r['ci95'], 'n_hours': r['n_hours']}
 
-    # 通行能力近似（对应 WXP.T）：高峰最大 15 分钟车道流量，雨天 vs 晴天；只当上限（车少了和开慢了混在一起）
+    # capacity proxy (matches WXP.T): busiest 15-minute lane flow in the peak, wet vs dry; an upper bound only (fewer cars and slower driving are mixed together)
     capacity = []
     for period, hrs in PEAK.items():
         wet_days, dry_days = [], []
@@ -360,7 +361,7 @@ def main():
                 dry_days.append(d)
         peak_max = lambda k, d: max((q15[k].get((d, h)) for h in hrs if (d, h) in q15[k]), default=None)
         dry_med, dry_med_dow = {}, {}
-        for k in sorted(lanes):  # 固定顺序：集合顺序随 PYTHONHASHSEED 变，并列时会选到不同的检测器
+        for k in sorted(lanes):  # fixed order: set order changes with PYTHONHASHSEED, which would pick different detectors on ties
             vals = [(d, peak_max(k, d)) for d in dry_days]
             vals = [(d, x) for d, x in vals if x is not None]
             if len(vals) >= 3:
@@ -391,9 +392,9 @@ def main():
             row['note'] = (row.get('note', '') + '; ' if row.get('note') else '') + 'upper bound: mixes fewer cars with slower driving'
             capacity.append(row)
 
-    # 个案
+    # case studies
     def case(date, hours, flag=None):
-        # 单日的点估计（effect 在 n_days < 3 时不给数，个案要看点估计）
+        # single-day point estimate (effect gives no number when n_days < 3, but a case study needs the point estimate)
         point = {}
         for m, s in series.items():
             de, _, _ = day_effects(s, bases[m], {(date, h) for h in hours}, MIN_BASE[m])
@@ -403,7 +404,7 @@ def main():
              'rain_mm_h': [info[(date, h)][0] for h in hours],
              'visibility_m': [at('visibility', date, h) for h in hours],
              'bom_daily_mm': b_day,
-             # BoM 一行 = 前一天 9 点到当天 9 点；两段都给，免得把「早上 9 点前下的大雨」看成个案时段的雨
+             # one BoM row = 9 am the previous day to 9 am that day; give both halves so heavy rain before 9 am is not mistaken for rain in the case window
              'bom_to_9am_mm': bom.get(date) if bom else None, 'bom_from_9am_mm': bom.get(day_of(date, 1)) if bom else None,
              **point}
         if flag:
@@ -416,7 +417,7 @@ def main():
     cases.append(case('2026-08-19', [7, 8, 9], 'model_false_alarm: model rain but BoM ~0 mm; not used as a wet day'))
     cases.append(case('2026-08-17', [7, 8], 'fog_model_only: no measured visibility to check'))
 
-    # 安慰剂：随机挑整天都没雨没雾的日子当「假雨天」，从基线里拿掉，再跑同一套算法
+    # placebo: pick fully dry, fog-free days at random as "fake wet days", leave them out of the baseline and run the same method
     bad_days = {d for c in ('wet', 'rain', 'fog') for (d, _) in cls_hours[c]} | {d for d in false_alarms}
     clean = [d for d in all_days if d not in EXCLUDED and d not in bad_days
              and all((d, h) in dry for h in DAY_HOURS)]
@@ -444,7 +445,7 @@ def main():
                'note': 'fully dry days picked at random (seed %d), each day left out of its own baseline (leave-one-day-out, like a real wet day), same method; '
                        'repeated: %d more random draws' % (SEED + 1, N_PLACEBO)}
 
-    # 和 WXP 对照：雷暴用 rain（≥ 1 mm/h）有样本就用 rain，否则用 wet
+    # compare with WXP: storm uses rain (>= 1 mm/h) if it has a sample, otherwise wet
     storm_cls = 'rain' if res[('rain', 'car', 'day')]['ratio'] is not None else 'wet'
     wxp = []
     for m in ('car', 'bike', 'ped'):
@@ -515,8 +516,8 @@ def main():
     p = os.path.join(out_dir, 'weather_backtest.json')
     with open(p, 'w', encoding='utf-8') as f:
         json.dump(out, f, ensure_ascii=False, indent=1)
-    print('✅ weather_backtest.json（%d KB）；BoM %s；dry %d h、wet %d h、rain %d h、fog %d h；模型误报 %d h；车道检测器 %d 个'
-          % (os.path.getsize(p) // 1024, '已核' if bom else '没有', len(dry), len(cls_hours['wet']), len(cls_hours['rain']),
+    print('✅ weather_backtest.json (%d KB); BoM %s; dry %d h, wet %d h, rain %d h, fog %d h; model false alarms %d h; %d lane detectors'
+          % (os.path.getsize(p) // 1024, 'checked' if bom else 'missing', len(dry), len(cls_hours['wet']), len(cls_hours['rain']),
              len(cls_hours['fog']), len(false_alarms), len(lanes)))
     for r in results:
         if r['period'] == 'day':

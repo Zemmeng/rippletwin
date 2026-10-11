@@ -1,6 +1,7 @@
-// index.js —— 引擎对外的全部接口（前端 T2 只 import 这个文件）。用法和结果格式见 docs/contract.md §evaluate。
-//   const engine = createEngine({ network, flows, readSigns, params: await loadParams() });   // readSigns 来自 T5（apps/api/public/js/reader.js）；没好之前用 mockReadSigns；params 读不到就用假设值
-//   await engine.prepare(方案);  const 结果 = engine.evaluate(方案);
+// index.js — public exports of the engine core. Usage and result format: docs/reference/interfaces.md (Engine API).
+// The web page's main entry is backend.js (connect()); it imports this file only for affected() / capFactors() to draw detours.
+//   const engine = createEngine({ network, flows, readSigns, params: await loadParams() });   // readSigns: apps/api/public/js/reader.js (mockReadSigns is the fallback / test double); params fall back to assumed values
+//   await engine.prepare(plan);  const result = engine.evaluate(plan);
 export { createEngine, MSA_ITERS, OCCUPANCY } from './pipeline.js';
 export { advise, mockAdvise, advisorSummary, applySuggestion, checkSuggestion } from './advisor.js';
 export { mockReadSigns, requestsFor, signsOn } from './reading.js';

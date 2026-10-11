@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""用途：把 public/ 下的 index.html + style.css + js/sim.js + js/ui.js + 数据拼成一个自包含的 HTML，
-      用来发成手机能直接打开的网页（claude.ai Artifact 只收单文件，不能 fetch 数据）。
+"""Purpose: inline public/index.html + style.css + js/sim.js + js/ui.js + the demand data into one self-contained HTML file,
+         to share as a page that opens directly on a phone (single-file hosts cannot fetch the data file).
 
-用法：python3 apps/sim/tools/build_single.py [输出路径，默认 out/sim-single.html]
-退出码：0 成功；1 拼接时找不到约定的锚点（index.html / ui.js 的结构改了，照报错改这里）
+Usage: python3 apps/sim/tools/build_single.py [output path, default out/sim-single.html]
+Exit code: 0 success; 1 an expected anchor was not found (the structure of index.html / ui.js changed; update this script to match the error)
 """
 import json, os, re, sys
 
@@ -29,17 +29,17 @@ def main():
     ui, n1 = re.subn(r"^import \{[^}]*\} from './sim\.js\?v=\d+';\n", '', ui, flags=re.M)
     ui, n2 = re.subn(r"^const DATA = await fetch\(.*\n", 'const DATA = %s;\n' % data, ui, flags=re.M)
     if not (n1 and n2):
-        die('ui.js 里找不到 import 行或 const DATA = await fetch(...) 行')
+        die('ui.js: cannot find the import line or the const DATA = await fetch(...) line')
     head = re.search(r'<head>\n(.*?)</head>', html, re.S)
     body = re.search(r'<body>\n(.*?)</body>', html, re.S)
     if not (head and body):
-        die('index.html 里找不到 <head> 或 <body>')
+        die('index.html: cannot find <head> or <body>')
     head_keep = '\n'.join(l for l in head.group(1).split('\n')
                           if not re.search(r'<meta |style\.css|js/ui\.js', l))
     page = '%s\n<style>\n%s</style>\n%s\n<script type="module">\n%s\n%s</script>\n' % (head_keep.strip(), css, body.group(1).strip(), sim, ui)
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
     open(out, 'w', encoding='utf-8').write(page)
-    print('✅ 写出 %s（%d KB）' % (out, len(page) // 1024))
+    print('✅ wrote %s (%d KB)' % (out, len(page) // 1024))
 
 
 if __name__ == '__main__':

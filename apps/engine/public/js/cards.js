@@ -1,5 +1,5 @@
-// cards.js —— 第 ② 步用的小工具：读屏秒数、路名清洗。请求本身在 reading.js（D-0929-1435 的「读数请求」）。
-// 读屏秒数 = 能看清的距离 ÷ 车速（WA VMS 指南 §7.4：字高 320 mm 约 200 米看得清，200 mm 约 100 米）。
+// cards.js — small helpers for step 2: sign read time and road-name cleaning. The requests themselves are in reading.js (the "reading request" of D-0929-1435).
+// Read time = legible distance ÷ speed (WA VMS guideline §7.4: 320 mm characters are legible at about 200 m, 200 mm at about 100 m).
 
 export function legibleM(char_mm = 320) {
   return char_mm >= 320 ? 200 : char_mm >= 200 ? 100 : 60;
@@ -9,7 +9,7 @@ export function readSeconds(kmh, char_mm = 320) {
   return Math.round(legibleM(char_mm) / (Math.max(5, kmh) / 3.6));
 }
 
-// 路名进提示词：只留 api 认的字符，最长 40
+// Road names going into the prompt: keep only the characters the api accepts, at most 40
 export function cleanName(s) {
   const t = String(s ?? '').replace(/[^A-Za-z0-9 .,'&/()-]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
   return t || 'Unnamed road';

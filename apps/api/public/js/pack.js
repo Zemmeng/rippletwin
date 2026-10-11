@@ -1,11 +1,11 @@
-// 执行包 + 设备租金（T5 · 提案 #48 第 ⑧ 步、第 ④ 步的租金）：人选定方案以后，拿走一份能执行的东西
-//   quote()     现场设备 → RPM 库存条目（apps/roads 的 equipment.json）× 件数 × 天数 = 租金；超库存、对不上的都标出来
-//   stockCheck() 多处施工同几天共用一份库存：哪天哪种设备不够
-//   buildPack() 一份施工的执行包：地点、时间、决定、设备清单和报价、VMS 排程、配置检查、要通知谁
-//   packText()  执行包 → 纯文本（中 / 英），网页「复制」「打印」用
-// 纯函数，浏览器里跑（路网、库存、引擎结果都在浏览器里）；不是新接口。
-// 🔒 日租价是假设值（equipment.json 的 sources 写明「官网没有公开价格」）：报价和文字版里一律写明「假设值，以 RPM Hire 正式报价为准」
-// 🔒 通知对象只写角色（电车公交运营方、应急服务……），不写具体机构和联系方式
+// Execution pack + equipment hire quote: once a person has chosen a plan, they take away something they can act on
+//   quote()      site equipment → RPM inventory items (equipment.json in apps/roads) × quantity × days = hire cost; over-stock and unmatched items are flagged
+//   stockCheck() several worksites sharing one inventory on the same days: which item runs short on which day
+//   buildPack()  the execution pack for one worksite: location, time, decision, equipment list and quote, VMS schedule, set-up checks, who to notify
+//   packText()   execution pack → plain text (zh / en), for the web page's Copy and Print
+// Pure functions that run in the browser (network, inventory and engine results are all there); not a new endpoint.
+// 🔒 Day rates are assumptions (the sources in equipment.json say no public prices are published): quotes and texts always say so ("assumptions; RPM Hire's formal quote applies")
+// 🔒 Notification targets are roles only (tram / bus operator, emergency services...), never specific organisations or contact details
 
 const dayNum = (s) => Date.parse(`${s}T00:00:00Z`) / 86400000;
 const fmtDay = (n) => new Date(n * 86400000).toISOString().slice(0, 10);
@@ -13,7 +13,7 @@ export const daysOf = (time) => dayNum(time.to) - dayNum(time.from) + 1;
 const pad = (h) => `${String(h).padStart(2, "0")}:00`;
 const commas = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
-// 标志牌上的字 → 库存里的哪一种（按顺序，先配上的算）
+// Sign text → inventory item (first match wins)
 const SIGN_RULES = [
   [/FOOTPATH CLOSED/, "sign_footpath_closed"],
   [/BIKE LANE CLOSED|BICYCLES MERGE/, "sign_bike_lane_closed"],
@@ -27,7 +27,7 @@ const SIGN_RULES = [
 ];
 const DEFAULT_ITEM = { vms: "vms_a", arrow: "arrow_board", barrier: "barrier_water" };
 
-// 一件现场设备 → { item | null, how }。how：given（写了 item）/ type（按类型）/ text（按屏上字）/ none（对不上）
+// One piece of site equipment → { item | null, how }. how: given (item set) / type (by type) / text (by sign text) / none (no match)
 export function itemFor(e) {
   if (e.item) return { item: e.item, how: "given" };
   if (e.type === "sign") {
@@ -37,7 +37,7 @@ export function itemFor(e) {
   return DEFAULT_ITEM[e.type] ? { item: DEFAULT_ITEM[e.type], how: "type" } : { item: null, how: "none" };
 }
 
-// network.json → Map(路段 id → { len_m, name, lanes, tram })；网页有 network 就传进来，护栏按封闭长度算节数
+// network.json → Map(link id → { len_m, name, lanes, tram }); the web page passes it in when it has the network, so barriers are counted from the closure length
 export function linkInfoFrom(network) {
   const m = new Map();
   for (const l of network?.links || []) m.set(l.id, { len_m: l.len_m, name: l.name || null, lanes: l.lanes, tram: Boolean(l.tram) });
@@ -46,7 +46,7 @@ export function linkInfoFrom(network) {
 
 const invIndex = (inventory) => new Map((inventory?.items || []).map((i) => [i.id, i]));
 
-// 一份施工的设备清单和租金。links：linkInfoFrom() 的结果（可以不给：护栏节数就算不出，标 length_unknown）
+// Equipment list and hire cost for one worksite. links: the result of linkInfoFrom() (optional: without it the barrier count is unknown and flagged length_unknown)
 export function quote(ws, inventory, { links } = {}) {
   const inv = invIndex(inventory);
   const days = daysOf(ws.time);
@@ -89,11 +89,11 @@ export function quote(ws, inventory, { links } = {}) {
     unmatched,
     over_stock: lines.filter((l) => l.over_stock).map((l) => ({ item: l.item, need: l.qty, stock: l.stock })),
     notes,
-    assumed: true, // 日租价和库存件数都是假设值
+    assumed: true, // day rates and stock counts are both assumptions
   };
 }
 
-// 多处施工同几天共用库存（只看日期，不看每天几点：设备放在现场就算占着）→ [{ item, date, need, stock, worksites }]，每种设备只报缺得最多的那天
+// Several worksites sharing inventory on the same days (dates only, not hours: equipment left on site counts as in use) → [{ item, date, need, stock, worksites }], reporting only the worst day per item
 export function stockCheck(worksites, inventory, opts = {}) {
   const inv = invIndex(inventory);
   const use = new Map(); // "item|day" → { need, ids }
@@ -121,7 +121,7 @@ export function stockCheck(worksites, inventory, opts = {}) {
   return [...worst.values()].sort((a, b) => (a.item < b.item ? -1 : 1));
 }
 
-// 配置检查（只查库存和清单能看出来的，不引标准条款）→ [{ code, ... }]
+// Set-up checks (only what the inventory and equipment list can show; no standard clauses are cited) → [{ code, ... }]
 function checksFor(ws, q, links) {
   const out = [];
   const has = (re) => (ws.equipment || []).some((e) => re.test(itemFor(e).item || ""));
@@ -136,7 +136,7 @@ function checksFor(ws, q, links) {
   return out;
 }
 
-// 要通知谁（角色，不写机构）→ [{ who, why: { code, ... } }]。impacts = explain.js 的 metrics（optionFromRun 的结果），可以不给
+// Who to notify (roles, not organisations) → [{ who, why: { code, ... } }]. impacts = explain.js metrics (from optionFromRun), optional
 function notifyFor(ws, links, impacts) {
   const m = impacts || {};
   const out = [{ who: "council", why: { code: "road_occupation" } }, { who: "frontage", why: { code: "access", lanes: ws.closes.lanes, footpath: ws.closes.footpath } }];
@@ -150,10 +150,10 @@ function notifyFor(ws, links, impacts) {
   return out;
 }
 
-// 一份施工（登记表的「施工」对象，或引擎格式的 §施工方案）的执行包
-// opts：{ inventory（必须）, links（linkInfoFrom 的结果）, impacts（选定方案的 metrics）, now（ISO，测试里固定）}
+// Execution pack for one worksite (a register worksite object, or an engine-format worksite plan)
+// opts: { inventory (required), links (from linkInfoFrom), impacts (metrics of the chosen plan), now (ISO, fixed in tests) }
 export function buildPack(ws, { inventory, links, impacts, now } = {}) {
-  if (!inventory || !Array.isArray(inventory.items)) throw new Error("buildPack 要传 inventory（apps/roads/public/cbd/equipment.json）");
+  if (!inventory || !Array.isArray(inventory.items)) throw new Error("buildPack needs inventory (apps/roads/public/cbd/equipment.json)");
   const q = quote(ws, inventory, { links });
   const streets = links ? [...new Set(ws.links.map((id) => links.get(id)?.name).filter(Boolean))] : [];
   return {
@@ -173,7 +173,7 @@ export function buildPack(ws, { inventory, links, impacts, now } = {}) {
   };
 }
 
-// ---- 文字版 ----
+// ---- Text versions ----
 
 const T = {
   zh: {
@@ -288,7 +288,7 @@ const T = {
   },
 };
 
-// 执行包 → 按区块给好、已经翻译好的字（网页排成一页文件用；措辞和 packText 同一张表）。金额、件数给数字，由页面格式化
+// Execution pack → translated text grouped by section (for the web page to lay out as a document; same wording table as packText). Amounts and quantities stay numbers for the page to format
 export function packDoc(p, lang = "en") {
   const t = T[lang] || T.en;
   const place = [p.where.streets.join(", "), t.seg(p.where.links.length, p.where.length_m), t.lanes(p.where.closes.lanes), t.foot[p.where.closes.footpath ?? "null"]].filter(Boolean);
@@ -352,10 +352,10 @@ export function packText(p, lang = "en") {
   return out.join("\n");
 }
 
-// 浏览器端：取库存（同源，apps/roads 发布的静态文件）
+// Browser side: fetch the inventory (same origin, the static file published by apps/roads)
 export async function loadInventory({ fetch, base = "" } = {}) {
   const f = fetch || globalThis.fetch;
   const r = await f(`${base}/roads/public/cbd/equipment.json`);
-  if (!r.ok) throw new Error(`equipment.json 取不到（${r.status}）`);
+  if (!r.ok) throw new Error(`could not load equipment.json (${r.status})`);
   return r.json();
 }

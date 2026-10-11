@@ -1,32 +1,34 @@
-// 屏上文字的规范 + 请求规范化 + 读数校验 + 缓存键。浏览器（reader.js）和 Worker（src/worker.js）共用同一份
-// 规范出处：RPM VMS 产品页（每帧 4 行 × 10 字符）、WA VMS 指南 §1.4、§7.4 —— 见 docs/arch/T5-PRD.md
-// 接口：docs/contract.md §路人读数
+// Sign-text spec + request normalisation + reading validation + cache key. One copy shared by the browser (reader.js) and the Worker (src/worker.js)
+// Spec sources: RPM Hire VMS product page (4 lines × 10 characters per frame), WA VMS guideline §1.4 and §7.4; see docs/hackathon/specs/T5-PRD.md
+// Interface: docs/reference/interfaces.md (road-user reading)
 
 export const PERSONAS = ["commuter", "local", "tourist", "delivery"];
 
 export const LIMITS = {
-  frames: 2, // VMS 最多 2 帧
-  lines: 4, // 每帧最多 4 行
-  chars: 10, // 每行最多 10 个字符
-  words: 8, // 一块屏所有帧合计最多 8 个词；静态标志牌同样按 8 个词算
-  signChars: 40, // 静态标志牌 / 箭头板一整句最多 40 个字符（例 RIGHT LANE CLOSED 是 17 个）
-  signs: 8, // 一次请求最多 8 块标志
-  roads: 8, // 当前路 + 候选绕行路最多 8 条
+  frames: 2, // at most 2 VMS frames
+  lines: 4, // at most 4 lines per frame
+  chars: 10, // at most 10 characters per line
+  words: 8, // at most 8 words across all frames of one sign; static signs also allow 8 words
+  signChars: 40, // a static sign / arrow board message is at most 40 characters (RIGHT LANE CLOSED is 17)
+  signs: 8, // at most 8 signs per request
+  roads: 8, // current road + candidate detours, at most 8
   roadChars: 40,
-  readS: 120, // 能读的秒数：超过按 120 算（引擎在 5 km/h 排队时会算出 100 多秒），负数才拒
+  readS: 120, // readable seconds: larger values are capped at 120 (the engine yields 100+ s in a 5 km/h queue); only negatives are rejected
   kmh: 130,
 };
 
-// 屏上只允许大写字母、数字、空格和常见标点；不许 < > 这类字符，免得有人在屏上拼出提示词里的标签
+// Sign text allows only capitals, digits, spaces and common punctuation; no < >, so nobody can forge the tag the prompt wraps sign text in
 const SIGN_CHARS = /^[A-Z0-9 .,'&:!?()+/-]*$/;
-// 路名和引擎的 cleanName() 同一套字符（#20 apps/engine/public/js/cards.js）；路名不进 <sign>，括号斜杠无妨
+// Road names use the same character set as the engine's cleanName() (apps/engine/public/js/cards.js); road names never go inside <sign>, so brackets and slashes are fine
 const ROAD_CHARS = /^[A-Za-z0-9 .,'&/()-]+$/;
 
+// The msg texts below are Chinese on purpose: the zh UI shows them verbatim, and the English UI maps them by code and
+// extracts the quoted 「line」 (apps/web/src/js/6-engine.js checkMsg)
 export class SignError extends Error {
   constructor(code, msg) {
     super(msg);
     this.name = "SignError";
-    this.code = code; // 机器可读短码，Worker 原样放进 { ok:false, error } 里
+    this.code = code; // machine-readable code; the Worker puts it into { ok:false, error } as is
   }
 }
 
@@ -34,7 +36,7 @@ const bad = (code, msg) => new SignError(code, msg);
 const isObj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
 const squash = (s) => s.replace(/\s+/g, " ").trim();
 
-// 屏上一行 / 一句：转大写、合并空格，再查字符集
+// One line / message of sign text: upper-case, collapse spaces, then check the character set
 function signText(x, where) {
   if (typeof x !== "string") throw bad("bad_sign", `${where} 要是字符串`);
   const t = squash(x.toUpperCase());
@@ -44,7 +46,7 @@ function signText(x, where) {
 
 export const countWords = (text) => (text ? text.split(" ").length : 0);
 
-// 一块标志 → 规范化后的标志；施工登记表（worksites.js）校验 equipment 的屏上文字也用这一份
+// One sign → normalised sign; the worksite register (worksites.js) uses this to validate equipment sign text too
 export function normSign(s, i) {
   const at = `signs[${i}]`;
   if (!isObj(s)) throw bad("bad_sign", `${at} 要是对象`);
@@ -75,7 +77,7 @@ export function normSign(s, i) {
     return { kind: "vms", frames, read_s };
   }
 
-  // 箭头板（arrow）可以只有箭头没有字：text 缺省当空串
+  // An arrow board may have no text: a missing text is treated as an empty string
   if (s.kind === "sign" || s.kind === "arrow") {
     const text = signText(s.kind === "arrow" && (s.text === undefined || s.text === null) ? "" : s.text, `${at}.text`);
     if (!text && s.kind === "sign") throw bad("empty_sign", `${at}.text 没有字`);
@@ -96,8 +98,8 @@ function normRoad(r, i) {
   return t;
 }
 
-// 请求 → 规范化后的请求；不合规范抛 SignError（Worker 回 400，浏览器端直接抛给调用方）
-// 规范化：大写、合并空格、去空行、read_s 取整、路名去重；多余字段丢掉
+// Request → normalised request; throws SignError if invalid (the Worker answers 400; in the browser it is thrown to the caller)
+// Normalisation: upper-case, collapse spaces, drop empty lines, round read_s, de-duplicate roads; unknown fields are dropped
 export function normalizeRequest(req) {
   if (!isObj(req)) throw bad("bad_request", "请求要是一个对象");
   if (!PERSONAS.includes(req.persona)) throw bad("bad_persona", `persona 只能是 ${PERSONAS.join(" / ")}`);
@@ -119,10 +121,10 @@ export function normalizeRequest(req) {
   };
 }
 
-// 一块标志的全部文字（帧和行用空格接起来，按阅读顺序）
+// All text on one sign (frames and lines joined with spaces, in reading order)
 export const signMessage = (s) => (s.kind === "vms" ? s.frames.flat().join(" ") : s.text);
 
-// 缓存用的规范串：只含「字 + 人 + 候选路」。按 T5-PRD，kmh 不进键（read_s 已经含了车速）；路名排序后顺序无关
+// Canonical string for caching: text + persona + candidate roads only. Per the T5 spec, kmh is not in the key (read_s already reflects speed); roads are sorted, so order does not matter
 export function canonical(req) {
   return JSON.stringify({ p: req.persona, s: req.signs, r: [...req.roads].sort() });
 }
@@ -132,8 +134,8 @@ export async function sha256Hex(text) {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// ---------------------------------------------------------------- 读数校验
-// 文件、KV、大模型回来的东西都当不可信数据：字段不对就返回 null（调用方改用规则），不硬凑
+// ---------------------------------------------------------------- reading validation
+// Anything from the answers file, KV or the LLM is untrusted: a bad field returns null (the caller falls back to the rules); nothing is patched up
 
 const MAX_MIN = 240;
 const WHY_MAX = 160;
@@ -159,7 +161,7 @@ export function cleanWhy(x) {
   return squash(x.replace(/[\u0000-\u001f\u007f]/g, " ")).slice(0, WHY_MAX);
 }
 
-// raw：任意来源的读数；req：规范化后的请求；src：这份读数实际从哪来
+// raw: a reading from any source; req: the normalised request; src: where this reading actually came from
 export function sanitizeReading(raw, req, src) {
   if (!isObj(raw) || !SRCS.includes(src)) return null;
   const notice = unit(raw.notice);
@@ -169,7 +171,7 @@ export function sanitizeReading(raw, req, src) {
   const delay = minutes(raw.delay_min);
   if (notice === null || understand === null || trust === null || saving === undefined || delay === undefined) return null;
 
-  // advice 只认请求里给过的路名（大小写不敏感，输出用请求里的写法），只认 use / avoid
+  // advice accepts only roads from the request (case-insensitive, output uses the request's spelling) and only use / avoid
   const advice = {};
   if (raw.advice !== undefined && !isObj(raw.advice)) return null;
   const byUpper = new Map(req.roads.map((r) => [r.toUpperCase(), r]));

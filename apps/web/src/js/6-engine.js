@@ -1,9 +1,9 @@
 'use strict';
 /* ============================================================
-   Engine wiring (T13, docs/arch/T13-web-wiring-PRD.md): the plan on the real CBD network → /engine/public/js/backend.js
+   Engine wiring (T13, docs/hackathon/specs/T13-web-wiring-PRD.md): the plan on the real CBD network → /engine/public/js/backend.js
    → numbers the panel shows (queue, detour split, per-type delay, advisor, before / after).
-   Backend not reachable (file://, a static server that only serves apps/web/public, offline) → BE.err is set,
-   the preset numbers stay on the page and the panel says so. No other host is ever contacted.
+   Backend not reachable (file://, a static server that only serves apps/web/public, offline) → BE.err is set and
+   the panel says there are no numbers to show (no preset numbers). No other host is ever contacted.
    ============================================================ */
 
 /* pure:begin — tests/test_engine.py runs this block in node */
@@ -36,7 +36,7 @@ function pickLink(cands,x,y,tol){
 // One VMS frame from a textarea: one line per row, upper case, single spaces, blank rows dropped
 function parseFrame(text){return String(text||'').toUpperCase().split('\n').map(s=>s.trim().replace(/\s+/g,' ')).filter(Boolean);}
 const WORKS_TIME={from:'2026-10-05',to:'2026-10-09',hours:[7,19]};
-// Page state → the plan the engine takes (docs/contract.md §施工方案). An empty VMS / sign is left out, not sent blank.
+// Page state → the plan the engine takes (docs/reference/interfaces.md §Worksite plan). An empty VMS / sign is left out, not sent blank.
 function planFrom(ep){
   const frames=[parseFrame(ep.f1),parseFrame(ep.f2)].filter(f=>f.length),eq=[];
   if(frames.length)eq.push({id:'VMS-1',type:'vms',at_m:ep.vmsAt,frames});
@@ -278,7 +278,7 @@ function engOutHTML(){
 }
 // Step 1, under the sign text: why there is a queue, trams / people on foot, where the numbers come from (T26 2.3)
 function engMoreHTML(){
-  if(typeof sumo3More==='function'&&sumoPlanOn())return sumo3More(); // T49：SUMO 方案上不出引擎的流量 / 分钟数，只有 AI 读牌（6e-sumo3.js）
+  if(typeof sumo3More==='function'&&sumoPlanOn())return sumo3More(); // SUMO plan: no engine flows or minutes, only the AI sign reading (6e-sumo3.js)
   const s=BE.api&&EP.link?EP.sum:null;if(!s)return'';
   const stale=EP.busy||EP.badText||!!EP.runErr;
   return`<div class="eng-out${stale?' stale':''}">${engWhy(s)}${engImpacts(s)}${engBadges(s.flags,s)}${s.flags.inactive?`<p class="small muted">${L(`Works run ${engHour(WORKS_TIME.hours[0])}–${engHour(WORKS_TIME.hours[1])}; at ${engHour(s.when.hour)} nothing is closed.`,`施工时段 ${engHour(WORKS_TIME.hours[0])}–${engHour(WORKS_TIME.hours[1])}；${engHour(s.when.hour)} 没有封路。`)}</p>`:''}</div>`;
@@ -355,7 +355,7 @@ function engHeadline(s){
   return s.queue_m>0?L(`One lane on ${st} backs up ${fmtN(s.queue_m)} m`,`${st} 封一条道，排队 ${fmtN(s.queue_m)} 米`):L(`One lane on ${st}: no queue this hour`,`${st} 封一条道：这个小时不排队`);
 }
 function engPanel3(){
-  if(typeof sumoPanel3==='function'&&sumoPlanOn())return sumo3Top()+(EP.view3==='evidence'?sumo3Evidence():EP.view3==='clash'?sumo3Clash():sumoPanel3())+navHTML(); // T49：SUMO 方案上 03 的交通数字全用 SUMO，引擎退幕后（6e-sumo3.js）
+  if(typeof sumoPanel3==='function'&&sumoPlanOn())return sumo3Top()+(EP.view3==='evidence'?sumo3Evidence():EP.view3==='clash'?sumo3Clash():sumoPanel3())+navHTML(); // SUMO plan: every traffic number in 03 is SUMO's; the engine stays behind the scenes (6e-sumo3.js)
   const s=EP.badText||(EP.runErr&&!EP.busy)?null:EP.sum;
   if(EP.runErr&&!EP.busy&&!EP.badText)return`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${L('Impact · network','影响 · 路网')}</span>${engStatusPill()}</div>${engTabs3()}<div class="card eng-note warn"><b>${L('The engine could not score this plan','引擎算不了这个方案')}</b><span>${esc(EP.runErr.message||EP.runErr)}</span></div>${navHTML()}`;
   if(!s)return`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${L('Impact · network','影响 · 路网')}</span>${engStatusPill()}</div>${engTabs3()}${EP.badText?`<div class="card eng-note warn"><b>${L('Fix the sign text in step 1 first','先回第 1 步把屏上文字改合规范')}</b></div>`:`<div class="card eng-note"><b>${L('Calculating…','计算中…')}</b></div>`}${navHTML()}`;
@@ -426,7 +426,7 @@ function engPanel4(){return BE.api?`<div id="eng4" class="stack eng4"></div><div
 function eng4HTML(){
   if(!engOn())return engOfflineCard();
   if(EP.badText)return`<div class="card eng-note warn"><b>${L('Fix the sign text in step 1 first','先回第 1 步把屏上文字改合规范')}</b></div>`;
-  if(typeof sumo3Eng4==='function'&&sumoPlanOn())return sumo3Eng4(); // T49：SUMO 方案上顾问只给写法，效果看下面 SUMO 的表（6e-sumo3.js）
+  if(typeof sumo3Eng4==='function'&&sumoPlanOn())return sumo3Eng4(); // SUMO plan: the advisor only suggests wordings; their effect is in the SUMO table below (6e-sumo3.js)
   const a=EP.adv;
   const n=a?a.options.length:0,rule=!a||a.src==='rule';
   let h=`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${rule?L('Planning advisor · rules · engine-checked','规划顾问 · 规则 · 引擎复核'):L('AI planning advisor · engine-checked','AI 规划顾问 · 引擎复核')}</span><span class="eyebrow">${a?`${n} ${n===1?L('option','个改法'):L('options','个改法')}`:''}</span></div>`;
@@ -474,7 +474,7 @@ function engRender4(){
 }
 // Extra lines for the copied playbook (engine numbers, when there are any)
 function engPlaybook(){
-  if(typeof sumo3Playbook==='function'&&sumoPlanOn())return sumo3Playbook(); // T49：SUMO 方案上导出文字用 SUMO 的数（6e-sumo3.js）
+  if(typeof sumo3Playbook==='function'&&sumoPlanOn())return sumo3Playbook(); // SUMO plan: the exported text uses SUMO's numbers (6e-sumo3.js)
   const s=engSumFor('now');if(!BE.api||!s)return['',''];
   const o=EP.adv&&EP.adv.options[EP.pick],c=EP.cmp;
   const en=`\n\nNetwork impact (engine, real CBD flows, ${engHour(s.when.hour)})\n${s.street} ${dirL(EP.dir)}: queue ${fmtN(s.queue_m)} m · +${fmtN(s.mean_delay_s)} s per affected vehicle · ${pctS(s.detour_share)} detour`+(o&&c?`\nAdvisor: ${o.why||o.kind} → queue ${fmtN(c.before.queue_m)} → ${fmtN(Math.max(0,c.before.queue_m+c.delta.queue_m))} m, +${fmtN(c.before.mean_delay_s)} → +${fmtN(c.after.mean_delay_s)} s per vehicle`:'')+(hasTransit(s)&&(s.transit.routes||[]).length?`\nTrams & buses: ${s.transit.routes.length} routes, ${fmtN(s.transit.pax_h)} riders/h, +${fmtN(s.transit.pax_min)} rider-min${s.transit.blocked_routes?`, ${s.transit.blocked_routes} blocked`:''}`:'')+(hasPeds(s)&&(s.peds.closed||[]).length?`\nPedestrians: ${fmtN(s.peds.ped_h)}/h walk round, +${fmtN(s.peds.detour_m)} m each`:'')+(s.flags.reading_src==='rule'?'\n(Sign reading estimated with keyword rules.)':'');
@@ -500,7 +500,7 @@ function engFit(){
   if(!EP.pts)return null;const xs=[],ys=[],add=p=>{xs.push(clamp(p[0],CITY.x0,CITY.x1));ys.push(clamp(p[1],CITY.y0,CITY.y1));};
   EP.pts.forEach(add);const s=engSumFor('now'),sh=new Map(((s&&s.routes)||[]).map(r=>[r.id,r.share||0]));
   if(s&&s.queue_m>0)engSub(Math.min(s.queue_m,engReach())).forEach(add);
-  if(typeof sumo3Fit==='function')sumo3Fit().forEach(add); // T49：SUMO 方案 03 取景带上 SUMO 的排队
+  if(typeof sumo3Fit==='function')sumo3Fit().forEach(add); // SUMO plan: the 03 framing includes SUMO's queue
   // every detour drawn clearly (≥ 1 %) is framed: with sign readings the three Lonsdale detours sit at 4–5 %, and a line cut at
   // the window edge reads as a bug (T27 acceptance) — the old ≥ 5 % cut them off
   for(const r of EP.alts)if((sh.get(r.id)||0)>=.01)for(const P of r.polys)P.forEach(add);
@@ -535,7 +535,7 @@ function engUp(m){const p=engPath();if(p&&p.pts.length>1)return pathAt(p,Math.ma
 // The street from the works start to m metres upstream (works start first)
 function engSub(m){const p=engPath();return p&&p.pts.length>1?pathSub(p,Math.max(0,m)):[engUp(0),engUp(m)];}
 // Numbers that belong to what is on screen: none while the sign text is invalid or the last run failed
-function engSumFor(which){if(EP.badText||EP.runErr||(typeof sumoPlanOn==='function'&&sumoPlanOn()))return null;return which==='before'?(EP.cmp&&EP.cmp.before)||EP.sum:which==='after'?(EP.cmp&&EP.cmp.after)||EP.sum:EP.sum;} // T49：SUMO 方案上没有引擎的数（地图不画引擎的排队 / 涟漪 / 绕行及其标签）
+function engSumFor(which){if(EP.badText||EP.runErr||(typeof sumoPlanOn==='function'&&sumoPlanOn()))return null;return which==='before'?(EP.cmp&&EP.cmp.before)||EP.sum:which==='after'?(EP.cmp&&EP.cmp.after)||EP.sum:EP.sum;} // SUMO plan: no engine numbers (the map draws no engine queue / ripple / detours or their tags)
 // Walk-link geometry for the pedestrian detour, fetched only once a plan closes a footpath (same file the engine reads)
 function engWalkGeo(){
   if(EP.walkGeo||EP.walkLoading)return EP.walkGeo;EP.walkLoading=true;
@@ -560,7 +560,7 @@ function engDraw(which){
   if(!engOn()||!EP.pts||!S.layers.works||!TK.works)return;
   const s=engSumFor(which),k=clamp(V.s/2.4,.7,1.6),off=3.5;
   ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
-  if(!s&&typeof sumo3QueueDraw==='function')sumo3QueueDraw(which,k,off); // T49：SUMO 方案 03 画 SUMO 整点排队（施工段压在上面）
+  if(!s&&typeof sumo3QueueDraw==='function')sumo3QueueDraw(which,k,off); // SUMO plan: 03 draws SUMO's end-of-hour queue (the works segment is drawn on top)
   if(s&&S.step!==2){
     const faint=S.step===1,share=new Map((s.routes||[]).map(r=>[r.id,r.share||0]));
     for(const r of EP.alts){const sh=share.get(r.id)||0;if(sh<.005)continue;ctx.globalAlpha=faint?.55:.85;ctx.strokeStyle=TK.accent;ctx.lineWidth=(2+10*sh)*k;for(const P of r.polys){engLine(P,off);ctx.stroke();}}
@@ -597,7 +597,7 @@ function engLabels(){
     const share=new Map((s.routes||[]).map(r=>[r.id,r.share||0]));let k2=0;
     for(const r of EP.alts){const sh=share.get(r.id)||0;if(sh<.05||k2>=2||!r.polys.length)continue;const P=r.polys[Math.min(r.polys.length-1,1)],c=P[Math.floor(P.length/2)];if(c[0]<CITY.x0||c[0]>CITY.x1||c[1]<CITY.y0||c[1]>CITY.y1)continue;drawTag(ctx,V.X(c[0]),V.Y(c[1]),k2?-50:50,k2?40:-36,`${L('DETOUR','绕行')} ${shortSt(r.name).toUpperCase()} ${pctS(sh)}`,TK.accent);k2++;}
     let n=0;for(const h of s.hot||[]){if(h.id===EP.link||n>=3)continue;const P=engGeo(h.id);if(!P)continue;const c=P[Math.floor(P.length/2)];if(c[0]<CITY.x0||c[0]>CITY.x1||c[1]<CITY.y0||c[1]>CITY.y1)continue;const o=[[46,-44],[-46,46],[50,40]][n++];drawTag(ctx,V.X(c[0]),V.Y(c[1]),o[0],o[1],`${shortSt(h.name).toUpperCase()} +${fmtN(h.extra_min)} ${L('veh·min','车·分钟')}`,h.extra_min>=60?TK.risk:TK.works);}}
-  if(!s&&typeof sumo3QueueTag==='function')sumo3QueueTag(vis); // T49：SUMO 方案 03 标「SUMO queue at 09:00 · X m」
+  if(!s&&typeof sumo3QueueTag==='function')sumo3QueueTag(vis); // SUMO plan: 03 tags it “SUMO queue at 09:00 · X m”
   tagFlush();
 }
 // How far upstream the queue can be drawn: along its street to where the street runs out in the network, and inside CITY.

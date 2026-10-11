@@ -1,6 +1,6 @@
-// 零依赖迷你断言：ok / eq / throws / sec / done
-// 通过的断言不打印，只打印失败和分节标题；done() 的最后一行「N passed, M failed」给 test.sh 解析
-// 用法：import { ok, eq, sec, done } from "./mini.mjs"; await sec("分节", async () => { ok(x, "说明") }); done();
+// Zero-dependency mini assertions: ok / eq / throws / sec / done
+// Passing assertions print nothing; only failures and section titles are printed. done() prints the final "N passed, M failed" line that test.sh parses
+// Usage: import { ok, eq, sec, done } from "./mini.mjs"; await sec("section", async () => { ok(x, "what") }); done();
 
 let pass = 0;
 let fail = 0;
@@ -13,27 +13,27 @@ export function ok(cond, msg) {
   }
 }
 
-// 用 JSON 比较，对象 / 数组也能直接比；失败时把两边都打出来
+// Compares as JSON, so objects / arrays work directly; prints both sides on failure
 export function eq(actual, expected, msg) {
   const a = JSON.stringify(actual);
   const b = JSON.stringify(expected);
-  ok(a === b, `${msg}\n      实际：${a}\n      期望：${b}`);
+  ok(a === b, `${msg}\n      actual:   ${a}\n      expected: ${b}`);
 }
 
-// fn 必须抛错；给了 pattern 就再检查错误消息
+// fn must throw; if a pattern is given, the error message is checked too
 export function throws(fn, pattern, msg) {
   try {
     fn();
   } catch (e) {
     if (pattern && !pattern.test(String(e?.message ?? e))) {
-      return ok(false, `${msg}（抛了，但消息不对：${e?.message ?? e}）`);
+      return ok(false, `${msg} (threw, but with the wrong message: ${e?.message ?? e})`);
     }
     return ok(true, msg);
   }
-  ok(false, `${msg}（没有抛错）`);
+  ok(false, `${msg} (did not throw)`);
 }
 
-// 分节：打印标题；给了 fn 就执行它，里面抛出的异常记 1 个失败而不是让整个文件崩掉
+// Section: prints the title; runs fn if given, counting an exception thrown inside as 1 failure instead of crashing the whole file
 export async function sec(name, fn) {
   console.log(`— ${name}`);
   if (!fn) return;
@@ -41,11 +41,11 @@ export async function sec(name, fn) {
     await fn();
   } catch (e) {
     fail++;
-    console.log(`  ✗ 本节抛出异常：${e?.stack ?? e}`);
+    console.log(`  ✗ section threw: ${e?.stack ?? e}`);
   }
 }
 
-// macOS 上 stdout 接管道时是异步写：等最后一行真正写出去再 exit，否则 `| tail -1` 可能拿不到计数行
+// On macOS, stdout writes to a pipe asynchronously: wait until the last line is really written before exiting, or `| tail -1` may miss the count line
 export function done() {
   process.stdout.write(`${pass} passed, ${fail} failed\n`, () => process.exit(fail ? 1 : 0));
 }

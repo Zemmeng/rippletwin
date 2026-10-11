@@ -341,7 +341,7 @@ input[type="range"]#vmsAt{width:100%;accent-color:var(--accent)}
 .eng-tr small{display:block;font:400 10.5px/1.4 var(--f-mono);margin-top:3px;white-space:normal}
 
 /* ============================================================
-   T14 liquid glass (docs/arch/T14-liquid-glass-PRD.md) — appearance only.
+   T14 liquid glass (docs/hackathon/specs/T14-liquid-glass-PRD.md) — appearance only.
    Desktop: the map fills the window and every panel floats over it as glass; .app's --safe-* say how much of the map
    the glass covers (js/7-glass.js keeps the view, scale bar and alert inside the rest). Refraction on .panel / .top
    comes from js/7-glass.js (liquid-glass.js by Deepika Rao, MIT); everything here is the frosted base it sits on.
@@ -699,7 +699,7 @@ input[type="range"]#vmsAt{accent-color:var(--sun)}
 .ai-why{font-size:11.5px;color:var(--fg-2);font-style:italic;overflow-wrap:anywhere}
 .ai-why:empty{display:none}
 .ai-note{margin:0;font-size:11px;line-height:1.4;color:var(--fg-3)}
-/* 6-step workbench (templates/workflow-preview): Back / Next at the foot, overview plan cards, evidence / check lists */
+/* 6-step workbench: Back / Next at the foot, overview plan cards, evidence / check lists */
 .nav-row{display:flex;gap:8px;align-items:stretch}
 .nav-row .btn{width:auto}
 .nav-row .nav-next{flex:1;min-width:0}
@@ -2108,7 +2108,8 @@ class GridSim{
   resetStats(){
     this.events=[];this.recent=new Map();this.critical=null;this.stats={conflicts:0,critical:0,harsh:0,delay:0,done:0,noRoute:0,merges:0};
     this.minute.fill(0);this.mSeen.fill(0);this.mHit.fill(0);this.risk.fill(0);
-    for(const ln of this.lanes||[])for(const c of ln.cars){c.inV=false;c.hit=false;} // cars already in the 2×2 count again from herethis.riskVer++;this.redRun=0;
+    for(const ln of this.lanes||[])for(const c of ln.cars){c.inV=false;c.hit=false;} // cars already in the 2×2 count again from here
+    this.riskVer++;this.redRun=0;
     this.entry=this.spec.dirs.map(D=>({id:D.entry,street:D.street,dir:D.dir,vph:D.vph,arr:0,ins:0,div:0}));
   }
   setWeather(k,env){this.wxk=k;this.wx=WXP[k]||WXP.clear;this.env=env;}
@@ -2312,7 +2313,7 @@ class GridSim{
 /* sumo:begin */
 // Step 2 on the REAL network (T40): a replay of Eclipse SUMO runs on the CBD network built from OSM (network.json) with
 // SCATS weekday 08:00 flows — baked (/sumo/public/real/) or a live cloud run, both in the v2 replay format
-// (docs/contract.md §HTTP API): per scenario a manifest (vehicle table, signal heads, chunks, metrics) and chunks of
+// (docs/reference/interfaces.md §HTTP API): per scenario a manifest (vehicle table, signal heads, chunks, metrics) and chunks of
 // samples every sample_s (1 or 2 s) [i, lon×1e6, lat×1e6, angle°, speed cm/s] + every signal's state string + the works queue (m).
 // SumoReplay wears the same surface the page already draws from GridSim (4b-grid.js): isGrid, t, step(), all / agents,
 // signalHeads(), works(), stats, minute, risk … so drawAgents / drawJunctions / updateLive / gridPick need no SUMO branch.
@@ -3026,7 +3027,7 @@ function sumoImpactHTML(s){
     <tbody>${row('original',L('Original · ROADWORK AHEAD','原方案 · ROADWORK AHEAD'))}${row('ai',L('AI plan · USE RUSSELL','AI 方案 · USE RUSSELL'))}</tbody></table></div>
     ${note}</div>${cmpP}`;
 }
-// T47: pick the seed BEFORE the run — on 01 Configure, right above 「Save & simulate」; entering step 2 runs SUMO with it
+// T47: pick the seed BEFORE the run — on 01 Configure, right above “Save & simulate”; entering step 2 runs SUMO with it
 function sumoPreHTML(){
   if(!BE.api||EP.link!==SUMO_LINK||EP.all||EP.lanes!==1)return'';
   return`<div class="stack sumo-pre"><span class="eyebrow">${L('SUMO · step 2 runs in the cloud with this seed','SUMO · 第 2 步用这个种子在云端算')}</span>
@@ -3184,7 +3185,7 @@ function renderPanel(){
   P.querySelectorAll('.cta [data-go]').forEach(b=>b.onclick=()=>goUi(+b.dataset.go));
   updateLive(true);
 }
-// ---- 6-step workbench (09-30, from the team template apps/web/templates/workflow-preview): Overview → Configure → Simulate →
+// ---- 6-step workbench (09-30): Overview → Configure → Simulate →
 // Impact → Compare → Export. S.ui is the step on screen; S.step (1–4) stays the map / engine / simulation mode under it
 const UI_STEP=[1,1,2,3,4,4],UI_NEXT=[['Set up the plan →','配置施工 →'],['Save & simulate →','保存并进入仿真 →'],['See the impact →','查看影响分析 →'],['Compare plans →','比较方案 →'],['Confirm & export →','确认方案并导出 →'],null];
 function goUi(n){n=clamp(n,0,5);S.ui=n;const st=UI_STEP[n];if(S.step===st){updateSteps();renderPanel();}else goStep(st);}
@@ -3463,10 +3464,10 @@ function boot(){
 (document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(boot,boot);
 
 /* ============================================================
-   Engine wiring (T13, docs/arch/T13-web-wiring-PRD.md): the plan on the real CBD network → /engine/public/js/backend.js
+   Engine wiring (T13, docs/hackathon/specs/T13-web-wiring-PRD.md): the plan on the real CBD network → /engine/public/js/backend.js
    → numbers the panel shows (queue, detour split, per-type delay, advisor, before / after).
-   Backend not reachable (file://, a static server that only serves apps/web/public, offline) → BE.err is set,
-   the preset numbers stay on the page and the panel says so. No other host is ever contacted.
+   Backend not reachable (file://, a static server that only serves apps/web/public, offline) → BE.err is set and
+   the panel says there are no numbers to show (no preset numbers). No other host is ever contacted.
    ============================================================ */
 
 /* pure:begin — tests/test_engine.py runs this block in node */
@@ -3499,7 +3500,7 @@ function pickLink(cands,x,y,tol){
 // One VMS frame from a textarea: one line per row, upper case, single spaces, blank rows dropped
 function parseFrame(text){return String(text||'').toUpperCase().split('\n').map(s=>s.trim().replace(/\s+/g,' ')).filter(Boolean);}
 const WORKS_TIME={from:'2026-10-05',to:'2026-10-09',hours:[7,19]};
-// Page state → the plan the engine takes (docs/contract.md §施工方案). An empty VMS / sign is left out, not sent blank.
+// Page state → the plan the engine takes (docs/reference/interfaces.md §Worksite plan). An empty VMS / sign is left out, not sent blank.
 function planFrom(ep){
   const frames=[parseFrame(ep.f1),parseFrame(ep.f2)].filter(f=>f.length),eq=[];
   if(frames.length)eq.push({id:'VMS-1',type:'vms',at_m:ep.vmsAt,frames});
@@ -3741,7 +3742,7 @@ function engOutHTML(){
 }
 // Step 1, under the sign text: why there is a queue, trams / people on foot, where the numbers come from (T26 2.3)
 function engMoreHTML(){
-  if(typeof sumo3More==='function'&&sumoPlanOn())return sumo3More(); // T49：SUMO 方案上不出引擎的流量 / 分钟数，只有 AI 读牌（6e-sumo3.js）
+  if(typeof sumo3More==='function'&&sumoPlanOn())return sumo3More(); // SUMO plan: no engine flows or minutes, only the AI sign reading (6e-sumo3.js)
   const s=BE.api&&EP.link?EP.sum:null;if(!s)return'';
   const stale=EP.busy||EP.badText||!!EP.runErr;
   return`<div class="eng-out${stale?' stale':''}">${engWhy(s)}${engImpacts(s)}${engBadges(s.flags,s)}${s.flags.inactive?`<p class="small muted">${L(`Works run ${engHour(WORKS_TIME.hours[0])}–${engHour(WORKS_TIME.hours[1])}; at ${engHour(s.when.hour)} nothing is closed.`,`施工时段 ${engHour(WORKS_TIME.hours[0])}–${engHour(WORKS_TIME.hours[1])}；${engHour(s.when.hour)} 没有封路。`)}</p>`:''}</div>`;
@@ -3818,7 +3819,7 @@ function engHeadline(s){
   return s.queue_m>0?L(`One lane on ${st} backs up ${fmtN(s.queue_m)} m`,`${st} 封一条道，排队 ${fmtN(s.queue_m)} 米`):L(`One lane on ${st}: no queue this hour`,`${st} 封一条道：这个小时不排队`);
 }
 function engPanel3(){
-  if(typeof sumoPanel3==='function'&&sumoPlanOn())return sumo3Top()+(EP.view3==='evidence'?sumo3Evidence():EP.view3==='clash'?sumo3Clash():sumoPanel3())+navHTML(); // T49：SUMO 方案上 03 的交通数字全用 SUMO，引擎退幕后（6e-sumo3.js）
+  if(typeof sumoPanel3==='function'&&sumoPlanOn())return sumo3Top()+(EP.view3==='evidence'?sumo3Evidence():EP.view3==='clash'?sumo3Clash():sumoPanel3())+navHTML(); // SUMO plan: every traffic number in 03 is SUMO's; the engine stays behind the scenes (6e-sumo3.js)
   const s=EP.badText||(EP.runErr&&!EP.busy)?null:EP.sum;
   if(EP.runErr&&!EP.busy&&!EP.badText)return`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${L('Impact · network','影响 · 路网')}</span>${engStatusPill()}</div>${engTabs3()}<div class="card eng-note warn"><b>${L('The engine could not score this plan','引擎算不了这个方案')}</b><span>${esc(EP.runErr.message||EP.runErr)}</span></div>${navHTML()}`;
   if(!s)return`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${L('Impact · network','影响 · 路网')}</span>${engStatusPill()}</div>${engTabs3()}${EP.badText?`<div class="card eng-note warn"><b>${L('Fix the sign text in step 1 first','先回第 1 步把屏上文字改合规范')}</b></div>`:`<div class="card eng-note"><b>${L('Calculating…','计算中…')}</b></div>`}${navHTML()}`;
@@ -3889,7 +3890,7 @@ function engPanel4(){return BE.api?`<div id="eng4" class="stack eng4"></div><div
 function eng4HTML(){
   if(!engOn())return engOfflineCard();
   if(EP.badText)return`<div class="card eng-note warn"><b>${L('Fix the sign text in step 1 first','先回第 1 步把屏上文字改合规范')}</b></div>`;
-  if(typeof sumo3Eng4==='function'&&sumoPlanOn())return sumo3Eng4(); // T49：SUMO 方案上顾问只给写法，效果看下面 SUMO 的表（6e-sumo3.js）
+  if(typeof sumo3Eng4==='function'&&sumoPlanOn())return sumo3Eng4(); // SUMO plan: the advisor only suggests wordings; their effect is in the SUMO table below (6e-sumo3.js)
   const a=EP.adv;
   const n=a?a.options.length:0,rule=!a||a.src==='rule';
   let h=`<div class="row between"><span class="eyebrow" style="color:var(--sun-ink)">${rule?L('Planning advisor · rules · engine-checked','规划顾问 · 规则 · 引擎复核'):L('AI planning advisor · engine-checked','AI 规划顾问 · 引擎复核')}</span><span class="eyebrow">${a?`${n} ${n===1?L('option','个改法'):L('options','个改法')}`:''}</span></div>`;
@@ -3937,7 +3938,7 @@ function engRender4(){
 }
 // Extra lines for the copied playbook (engine numbers, when there are any)
 function engPlaybook(){
-  if(typeof sumo3Playbook==='function'&&sumoPlanOn())return sumo3Playbook(); // T49：SUMO 方案上导出文字用 SUMO 的数（6e-sumo3.js）
+  if(typeof sumo3Playbook==='function'&&sumoPlanOn())return sumo3Playbook(); // SUMO plan: the exported text uses SUMO's numbers (6e-sumo3.js)
   const s=engSumFor('now');if(!BE.api||!s)return['',''];
   const o=EP.adv&&EP.adv.options[EP.pick],c=EP.cmp;
   const en=`\n\nNetwork impact (engine, real CBD flows, ${engHour(s.when.hour)})\n${s.street} ${dirL(EP.dir)}: queue ${fmtN(s.queue_m)} m · +${fmtN(s.mean_delay_s)} s per affected vehicle · ${pctS(s.detour_share)} detour`+(o&&c?`\nAdvisor: ${o.why||o.kind} → queue ${fmtN(c.before.queue_m)} → ${fmtN(Math.max(0,c.before.queue_m+c.delta.queue_m))} m, +${fmtN(c.before.mean_delay_s)} → +${fmtN(c.after.mean_delay_s)} s per vehicle`:'')+(hasTransit(s)&&(s.transit.routes||[]).length?`\nTrams & buses: ${s.transit.routes.length} routes, ${fmtN(s.transit.pax_h)} riders/h, +${fmtN(s.transit.pax_min)} rider-min${s.transit.blocked_routes?`, ${s.transit.blocked_routes} blocked`:''}`:'')+(hasPeds(s)&&(s.peds.closed||[]).length?`\nPedestrians: ${fmtN(s.peds.ped_h)}/h walk round, +${fmtN(s.peds.detour_m)} m each`:'')+(s.flags.reading_src==='rule'?'\n(Sign reading estimated with keyword rules.)':'');
@@ -3963,7 +3964,7 @@ function engFit(){
   if(!EP.pts)return null;const xs=[],ys=[],add=p=>{xs.push(clamp(p[0],CITY.x0,CITY.x1));ys.push(clamp(p[1],CITY.y0,CITY.y1));};
   EP.pts.forEach(add);const s=engSumFor('now'),sh=new Map(((s&&s.routes)||[]).map(r=>[r.id,r.share||0]));
   if(s&&s.queue_m>0)engSub(Math.min(s.queue_m,engReach())).forEach(add);
-  if(typeof sumo3Fit==='function')sumo3Fit().forEach(add); // T49：SUMO 方案 03 取景带上 SUMO 的排队
+  if(typeof sumo3Fit==='function')sumo3Fit().forEach(add); // SUMO plan: the 03 framing includes SUMO's queue
   // every detour drawn clearly (≥ 1 %) is framed: with sign readings the three Lonsdale detours sit at 4–5 %, and a line cut at
   // the window edge reads as a bug (T27 acceptance) — the old ≥ 5 % cut them off
   for(const r of EP.alts)if((sh.get(r.id)||0)>=.01)for(const P of r.polys)P.forEach(add);
@@ -3998,7 +3999,7 @@ function engUp(m){const p=engPath();if(p&&p.pts.length>1)return pathAt(p,Math.ma
 // The street from the works start to m metres upstream (works start first)
 function engSub(m){const p=engPath();return p&&p.pts.length>1?pathSub(p,Math.max(0,m)):[engUp(0),engUp(m)];}
 // Numbers that belong to what is on screen: none while the sign text is invalid or the last run failed
-function engSumFor(which){if(EP.badText||EP.runErr||(typeof sumoPlanOn==='function'&&sumoPlanOn()))return null;return which==='before'?(EP.cmp&&EP.cmp.before)||EP.sum:which==='after'?(EP.cmp&&EP.cmp.after)||EP.sum:EP.sum;} // T49：SUMO 方案上没有引擎的数（地图不画引擎的排队 / 涟漪 / 绕行及其标签）
+function engSumFor(which){if(EP.badText||EP.runErr||(typeof sumoPlanOn==='function'&&sumoPlanOn()))return null;return which==='before'?(EP.cmp&&EP.cmp.before)||EP.sum:which==='after'?(EP.cmp&&EP.cmp.after)||EP.sum:EP.sum;} // SUMO plan: no engine numbers (the map draws no engine queue / ripple / detours or their tags)
 // Walk-link geometry for the pedestrian detour, fetched only once a plan closes a footpath (same file the engine reads)
 function engWalkGeo(){
   if(EP.walkGeo||EP.walkLoading)return EP.walkGeo;EP.walkLoading=true;
@@ -4023,7 +4024,7 @@ function engDraw(which){
   if(!engOn()||!EP.pts||!S.layers.works||!TK.works)return;
   const s=engSumFor(which),k=clamp(V.s/2.4,.7,1.6),off=3.5;
   ctx.save();ctx.lineCap='round';ctx.lineJoin='round';
-  if(!s&&typeof sumo3QueueDraw==='function')sumo3QueueDraw(which,k,off); // T49：SUMO 方案 03 画 SUMO 整点排队（施工段压在上面）
+  if(!s&&typeof sumo3QueueDraw==='function')sumo3QueueDraw(which,k,off); // SUMO plan: 03 draws SUMO's end-of-hour queue (the works segment is drawn on top)
   if(s&&S.step!==2){
     const faint=S.step===1,share=new Map((s.routes||[]).map(r=>[r.id,r.share||0]));
     for(const r of EP.alts){const sh=share.get(r.id)||0;if(sh<.005)continue;ctx.globalAlpha=faint?.55:.85;ctx.strokeStyle=TK.accent;ctx.lineWidth=(2+10*sh)*k;for(const P of r.polys){engLine(P,off);ctx.stroke();}}
@@ -4060,7 +4061,7 @@ function engLabels(){
     const share=new Map((s.routes||[]).map(r=>[r.id,r.share||0]));let k2=0;
     for(const r of EP.alts){const sh=share.get(r.id)||0;if(sh<.05||k2>=2||!r.polys.length)continue;const P=r.polys[Math.min(r.polys.length-1,1)],c=P[Math.floor(P.length/2)];if(c[0]<CITY.x0||c[0]>CITY.x1||c[1]<CITY.y0||c[1]>CITY.y1)continue;drawTag(ctx,V.X(c[0]),V.Y(c[1]),k2?-50:50,k2?40:-36,`${L('DETOUR','绕行')} ${shortSt(r.name).toUpperCase()} ${pctS(sh)}`,TK.accent);k2++;}
     let n=0;for(const h of s.hot||[]){if(h.id===EP.link||n>=3)continue;const P=engGeo(h.id);if(!P)continue;const c=P[Math.floor(P.length/2)];if(c[0]<CITY.x0||c[0]>CITY.x1||c[1]<CITY.y0||c[1]>CITY.y1)continue;const o=[[46,-44],[-46,46],[50,40]][n++];drawTag(ctx,V.X(c[0]),V.Y(c[1]),o[0],o[1],`${shortSt(h.name).toUpperCase()} +${fmtN(h.extra_min)} ${L('veh·min','车·分钟')}`,h.extra_min>=60?TK.risk:TK.works);}}
-  if(!s&&typeof sumo3QueueTag==='function')sumo3QueueTag(vis); // T49：SUMO 方案 03 标「SUMO queue at 09:00 · X m」
+  if(!s&&typeof sumo3QueueTag==='function')sumo3QueueTag(vis); // SUMO plan: 03 tags it “SUMO queue at 09:00 · X m”
   tagFlush();
 }
 // How far upstream the queue can be drawn: along its street to where the street runs out in the network, and inside CITY.
@@ -4103,7 +4104,7 @@ function engBindMap(){
 }
 
 /* ============================================================
-   Whole-CBD layer (T27, docs/arch/T26-T27-web-PRD.md §3). The fine window (WORLD: orthophoto, weather, the junction
+   Whole-CBD layer (T27, docs/hackathon/specs/T26-T27-web-PRD.md §3). The fine window (WORLD: orthophoto, weather, the junction
    micro-model) stays as it is. Around it the whole Hoddle Grid (+~150 m, CITY in 1-world.js) is drawn from real data:
    the real OSM vector basemap underneath (T35 — water, green space, land use, rail from OpenFreeMap's OpenMapTiles vector
    tiles, /roads/public/cbd/vectormap.json), then every building footprint (flat — no extrusion, no edge), then the road
@@ -4221,7 +4222,7 @@ function vlBest(rows){
   rows.forEach((r,i)=>{if(!Number.isFinite(r.q))return;const b=rows[bi];if(!b||r.q<b.q||(r.q===b.q&&vlWords(r.frames)<vlWords(b.frames)))bi=i;});
   return bi>=0&&base&&rows[bi].q<base.q?bi:-1;
 }
-// T49 (the SUMO plan, lead D-0930): no engine queue on screen, so the pick is the strongest detour signal — the highest share of
+// SUMO plan (D-1001-0045): no engine queue on screen, so the pick is the strongest detour signal — the highest share of
 // drivers who detour in the engine's sign reading (rows[i].share, SUMO's input); a tie goes to fewer words. -1 when none beats the baseline
 function vlBestShare(rows){
   const base=rows.find(r=>r.k==='base');let bi=-1;
@@ -4257,7 +4258,7 @@ async function vlRun(){
   VL.busy=false;vlRender();
 }
 function vlUse(frames,at){EP.f1=frames[0].join('\n');EP.f2=(frames[1]||[]).join('\n');if(at!=null)EP.vmsAt=at;renderPanel();engChanged(0);}
-// T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan each row shows the share of drivers who detour in the engine's
+// SUMO-primary mode (D-1001-0045): on the SUMO plan each row shows the share of drivers who detour in the engine's
 // sign reading (SUMO's input) instead of the engine's queue; what that does to traffic is SUMO's job in step 2. Same rows,
 // same clicks; the pick is the strongest detour signal (vlBestShare), worded without any queue claim
 function vlSuHTML(){
@@ -4304,7 +4305,7 @@ function vlRender(){
 }
 
 /* ============================================================
-   T49 (lead D-0930「SUMO 为主，引擎退幕后」): on the plan SUMO covers — the Lonsdale demo works, one lane closed
+   SUMO-primary mode (decision D-1001-0045 in docs/decisions.md): on the plan SUMO covers — the Lonsdale demo works, one lane closed
    (EP.link===SUMO_LINK && !EP.all && EP.lanes===1, the same test as sumoWant() in 5-app.js / suPlan() in 8-compare.js) —
    every traffic number on screen is SUMO's, from the step-2 run (SU.index / SU.src, 5-app.js). The engine still runs behind
    the scenes: it reads the signs (AI) and gives SUMO its detour share p. From it the page may show that reading only (seen /
@@ -4532,7 +4533,7 @@ function sumo3QueueTag(vis){
 if(typeof document!=='undefined'&&document.addEventListener)document.addEventListener('click',e=>{const b=e.target&&e.target.closest&&e.target.closest('[data-sumo3-go]');if(b&&typeof goStep==='function'){e.preventDefault();goStep(2);}});
 
 /* ============================================================
-   T14 liquid glass (docs/arch/T14-liquid-glass-PRD.md) — appearance only, no numbers change.
+   T14 liquid glass (docs/hackathon/specs/T14-liquid-glass-PRD.md) — appearance only, no numbers change.
    · Floating layout (desktop): the map fills the window; top bar, layer rail, analysis panel and timeline float over it.
      .app carries --safe-l/r/t/b = how much of the map the glass covers; the view, scale bar, graticule labels and the alert
      keep inside what is left (insets()).
@@ -4593,7 +4594,7 @@ function applyGlass(){
 
 /* ---------- compact analysis panel ---------- */
 const SEC_KEEP='textarea,input,select,.metrics,.eng-opts,#engOut,#eng4,#aiBox,.eng-checklist,#cmp4';
-const SEC_FOLD='.eng-where'; // 6-step UI: nearby works and compare have their own tab / step now // brief mode opens these folded (09-30, tutor: fewer words) — the header says the gist, a tap opens them // #aiBox：AI 路人面板在简洁模式下也默认展开（演示要一眼看到）
+const SEC_FOLD='.eng-where'; // 6-step UI: nearby works and compare have their own tab / step now // brief mode opens these folded (09-30, tutor: fewer words) — the header says the gist, a tap opens them // #aiBox: the AI road-users panel also starts open in brief mode (the demo needs it visible at a glance)
 function compactPanel(){
   const P=document.getElementById('panel');if(!P)return;
   if(GL.obs)GL.obs.disconnect();
@@ -4715,7 +4716,7 @@ function clashHTML(){
   if(CL.busy)return one(L('checking the works register for overlaps…','正在查登记表里同期的施工…'));
   if(CL.err)return one(L('clash check unavailable right now.','叠加检查暂时用不了。'));
   if(!CL.other)return one(L('no other registered works overlap this plan’s dates.','登记表里没有和本方案同期的其他施工。'));
-  if(suPlan())return clashSuHTML(); // T49 (lead D-0930): the SUMO plan shows no engine clash cost
+  if(suPlan())return clashSuHTML(); // SUMO plan (D-1001-0045): no engine clash cost
   const{o,ws,r}=CL.other,net=engNet(),l0=net&&net.links.get(ws.links[0]),street=esc(shortSt(l0&&l0.name||'')),title=esc(o.title);
   const U=L('veh·min','车·分钟'),hrs=r.hours.map(engHour).join(', '),days=r.overlap.days;
   const head=`<div class="row between"><span class="eyebrow">${L('Nearby works · clash check','附近施工 · 叠加检查')}</span><span class="eyebrow"${r.flags.reliable&&r.cost>0?' style="color:var(--risk)"':''}>${r.flags.reliable&&r.cost>0?`+${fmtN(r.cost)} ${U}`:L(`${days} day${days===1?'':'s'} overlap`,`重叠 ${days} 天`)}</span></div>
@@ -4736,9 +4737,9 @@ function clashHTML(){
   else if(r.cost>0){const n=clashDays(ws);act=`<p class="small muted">${CL.stErr?L('Stagger failed — try again (button at the bottom of the panel).','错开没算成，再点一次面板底部的按钮。'):L(`“Stagger by ${n} day${n===1?'':'s'}” at the bottom of the panel moves ${title} later, re-scored by the engine day by day.`,`面板底部的「错开 ${n} 天」把「${title}」往后挪，引擎逐天重算。`)}</p>`;}
   return`${head}${metrics}${sub}${why}${act}${more}`;
 }
-// T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan the section names the overlapping works, the dates and the
+// SUMO-primary mode (D-1001-0045): on the SUMO plan the section names the overlapping works, the dates and the
 // window, and suggests a stagger in days worked out from the dates alone (clashDays: start the day after this plan ends) — no
-// engine clash cost, no engine stagger (its result is a cost), and SUMO does not model two works at once: 「叠加影响 SUMO 暂不覆盖」
+// engine clash cost, no engine stagger (its result is a cost), and SUMO does not model two works at once (“Combined impact not covered by SUMO”)
 function clashSuHTML(){
   const{o,ws,r}=CL.other,net=engNet(),l0=net&&net.links.get(ws.links[0]),street=esc(shortSt(l0&&l0.name||'')),title=esc(o.title);
   const days=r.overlap.days,n=clashDays(ws),win=cmpWin(days,r.hours.length,LANG.cur==='zh');
@@ -4868,7 +4869,7 @@ function cmpWin(days,hours,zh){
   const d=Math.round(+days||0),h=Math.round(+hours||0);if(d<1||h<1)return'';
   return zh?`${d} 天 × ${h} 个高峰小时`:`${d} day${d===1?'':'s'} × ${h} peak hour${h===1?'':'s'}`;
 }
-// ---- T49 (lead D-0930 「SUMO 为主，引擎退幕后」): on the SUMO plan 04's traffic numbers come from SUMO, never the engine ----
+// ---- SUMO-primary mode (D-1001-0045): on the SUMO plan 04's traffic numbers come from SUMO, never the engine ----
 // The engine only reads each option's signs into p, the share of drivers who detour = 1 − the 'stay' route's share in the
 // option's summary (options() brief or run() summary; detour_share when there are no routes), to 0.1 % — SUMO's input. null = no reading
 function cmpP(s){
@@ -4980,7 +4981,7 @@ function cmpSuFoot(L){return L('Traffic figures come from SUMO (a model, not fie
 
 const CP={key:'',seq:0,busy:false,rows:[],src:'',pick:null,cl:null,by:'contractor',reason:'',mod:null,inv:null,invErr:null,loading:null,exKey:'',exSeq:0,exBusy:false,explain:null,exError:false,su:null};
 // T49: the plan SUMO covers (the Lonsdale demo works, one lane closed — as sumoImpactHTML in 5-app.js). On it no engine traffic
-// outcome is shown in 04 / 05, 03's nearby works or the VMS lab: SUMO's numbers, or 「SUMO 暂不覆盖」 where SUMO has none
+// outcome is shown in 04 / 05, 03's nearby works or the VMS lab: SUMO's numbers, or “not covered by SUMO” where SUMO has none
 function suPlan(){return typeof SUMO_LINK==='string'&&EP.link===SUMO_LINK&&!EP.all&&EP.lanes===1;}
 
 // Execution pack, AI explanation and inventory; all model text is rendered as textContent.
@@ -5126,7 +5127,7 @@ function cmpExplainRender(el){
   if(decide)decide.textContent=result?.decide||L('This is advice only. The person responsible chooses the plan and records why.','这只是建议，由负责人选择方案并记录理由。');
 }
 
-// ---- T49 (lead D-0930): 04 / 05 traffic numbers on the SUMO plan come from SUMO ----
+// ---- SUMO plan (D-1001-0045): 04 / 05 traffic numbers come from SUMO ----
 // Each option's p (cmpP: the engine's sign reading, behind the scenes) → the SUMO client's runOptions([{ id, p }…], { seed })
 // (sumo-client.js, T49-a; loaded by 5-app.js sumoClient(), feature-detected). Missing, failing or empty → '—' + the reason,
 // never engine numbers. CP.su = { key, busy, t0, job, res: { id: metrics | null } | null, err, src: { source, elapsedMs, why (the client's reason, labelled), seed, hour }, tick }

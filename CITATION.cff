@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use RippleTwin in your work, please cite it using the metadata in this file."
+type: software
+title: "RippleTwin"
+abstract: >-
+  RippleTwin is a digital twin of the Melbourne CBD for temporary traffic
+  management. A planner places the barriers, signs and variable message signs
+  for a road closure and sees the effect on queues, delay, detours, trams,
+  buses and pedestrians before deployment. A language model reads the signs
+  as four types of road user would, a deterministic in-browser engine computes
+  the traffic impacts from open data, and Eclipse SUMO cross-checks the main
+  scenario on the real street network. Built by Team Uncapped at the FEIT
+  Hackathon Festival 2026 (University of Melbourne), where it won the RPM Hire
+  Prize.
+authors:
+  - name: "Team Uncapped"
+repository-code: "https://github.com/Zemmeng/rippletwin"
+url: "https://hackathon-site.zemmmeng.workers.dev/web/public/"
+license: MIT
+version: "1.0.0"
+date-released: "2026-10-01"
+keywords:
+  - digital twin
+  - traffic simulation
+  - temporary traffic management
+  - road closure
+  - variable message signs
+  - large language models
+  - Eclipse SUMO
+  - Cloudflare Workers
+  - open data
+  - Melbourne

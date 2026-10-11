@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
-# .githooks/pre-push —— push 前兜底：不直推 main；只推当前 HEAD；检查不绿不推
+# .githooks/pre-push -- last local gate before a push: no direct pushes to main; push only the current HEAD;
+# no push unless the check is green
 #
-# 用途：在没有分支保护时兜住三件事——
-#       [1] 目标是 refs/heads/main（含删除 main）且没设 ALLOW_MAIN=1 → 拒绝，提示先开分支
-#       [2] 要推的提交不是当前 HEAD → 拒绝，提示切到该分支再推
-#           （check.sh 查的是当前工作区，推别的分支等于没查）
-#       [3] 跑 BRANCH=<被推的分支> CHECK_TEST_TIMEOUT=70 bash scripts/check.sh --quick（整体限时 90 秒）
-#           有 ❌ 或缺「======== 汇总」行 → 拒绝并打印汇总节
-#           单个 test.sh 限时比整体短 20 秒：死循环的测试先被 check 判 [5] ❌，不会走到下面的超时放行
-#           脚本不存在 → ⚠️ 放行；整体超时 → ⚠️ 放行（CI 会跑全量）
-# 什么时候触发：git push 时自动触发（前提：git config core.hooksPath .githooks，setup.sh 会做）。
-#       git 从 stdin 每行传入：<local ref> <local sha> <remote ref> <remote sha>
-# 怎么绕过：
-#       lead 的小改动直推 main：ALLOW_MAIN=1 git push   （commit 里写原因）
-#       紧急时整个跳过：git push --no-verify   （必须在 PR 里说明；CI 仍会再查）
-# 退出码：0 放行；1 拒绝
-# 兼容 macOS 自带 bash 3.2（没有 timeout 命令：后台运行 + kill -0 轮询）和 ubuntu。
+# What it does: covers three things that branch protection would otherwise handle --
+#       [1] target is refs/heads/main (including deleting main) and ALLOW_MAIN=1 is not set → refuse and suggest
+#           a branch first
+#       [2] the commit being pushed is not the current HEAD → refuse and suggest switching to that branch first
+#           (check.sh inspects the current worktree, so pushing another branch would push it unchecked)
+#       [3] runs BRANCH=<pushed branch> CHECK_TEST_TIMEOUT=70 bash scripts/check.sh --quick (90 s overall limit)
+#           any ❌, or a missing "======== Summary" line → refuse and print the summary block
+#           the per-test limit is 20 s shorter than the overall one: a hanging test is reported as [5] ❌ by the
+#           check before the overall timeout below would let the push through
+#           script missing → ⚠️ allow; overall timeout → ⚠️ allow (CI runs the full check)
+# When it runs: automatically on git push (requires git config core.hooksPath .githooks; setup.sh does this).
+#       git passes one line per ref on stdin: <local ref> <local sha> <remote ref> <remote sha>
+# How to bypass:
+#       a small maintainer change pushed straight to main: ALLOW_MAIN=1 git push   (give the reason in the commit)
+#       skip the hook entirely in an emergency: git push --no-verify   (explain it in the PR; CI still checks)
+# Exit codes: 0 allow; 1 refuse
+# Works with macOS's bundled bash 3.2 (no timeout command: run in the background and poll with kill -0) and Ubuntu.
 set -uo pipefail
 
 LIMIT_S=90
@@ -27,7 +30,7 @@ cd "$root" || exit 0
 head_sha=$(git rev-parse -q --verify HEAD 2>/dev/null || true)
 cur_branch=$(git symbolic-ref --short -q HEAD 2>/dev/null || true)
 
-# ---- 读 stdin：要推哪些 ref ----
+# ---- Read stdin: which refs are being pushed ----
 to_main=0
 has_update=0
 not_head=""
@@ -36,10 +39,10 @@ while read -r lref lsha rref rsha; do
   [ -n "${rref:-}" ] || continue
   [ "$rref" = "refs/heads/main" ] && to_main=1
   case "${lsha:-}" in
-    "$ZERO"|"") continue ;;   # 删除远端 ref：没有新代码可查
+    "$ZERO"|"") continue ;;   # deleting a remote ref: no new code to check
   esac
   has_update=1
-  # 附注 tag 的 sha 是 tag 对象，剥到它指向的提交再比
+  # an annotated tag sha is the tag object; peel it to the commit before comparing
   commit=$(git rev-parse -q --verify "${lsha}^{commit}" 2>/dev/null || echo "$lsha")
   if [ "$commit" != "$head_sha" ]; then
     not_head="$not_head    $lref → $rref
@@ -48,7 +51,7 @@ while read -r lref lsha rref rsha; do
   if [ -z "$push_branch" ]; then
     case "$lref" in
       refs/heads/*) push_branch=${lref#refs/heads/} ;;
-      *) push_branch=$cur_branch ;;          # git push origin HEAD / 推 tag：用当前分支名
+      *) push_branch=$cur_branch ;;          # git push origin HEAD / pushing a tag: use the current branch name
     esac
     if [ -z "$push_branch" ]; then
       case "$rref" in refs/heads/*) push_branch=${rref#refs/heads/} ;; esac
@@ -56,49 +59,49 @@ while read -r lref lsha rref rsha; do
   fi
 done
 
-# ---- [1] 不直推 main ----
+# ---- [1] No direct pushes to main ----
 if [ "$to_main" -eq 1 ] && [ "${ALLOW_MAIN:-}" != "1" ]; then
-  echo "🚫 pre-push：不直推 main。先开分支再推，然后开 PR："
-  echo "    git switch -c <handle>/<模块>/T<n>-<slug>"
+  echo "🚫 pre-push: no direct pushes to main. Create a branch, push it, then open a PR:"
+  echo "    git switch -c <handle>/<module>/T<n>-<slug>"
   echo "    git push -u origin HEAD"
   echo "    gh pr create --fill"
-  echo "  lead 的小改动确实要直推：ALLOW_MAIN=1 git push   （commit 里写原因）"
+  echo "  For a small maintainer change that really must go straight to main: ALLOW_MAIN=1 git push   (give the reason in the commit)"
   exit 1
 fi
 
 [ "$has_update" -eq 1 ] || exit 0
 
-# ---- [2] 只推当前 HEAD ----
+# ---- [2] Push only the current HEAD ----
 if [ -n "$not_head" ]; then
-  echo "🚫 pre-push：要推的提交不是当前 HEAD（当前在 ${cur_branch:-detached HEAD}）。"
-  echo "  检查只能查当前工作区，推别的分支等于没查。下面这些被拒："
+  echo "🚫 pre-push: the commit being pushed is not the current HEAD (currently on ${cur_branch:-detached HEAD})."
+  echo "  The check only inspects the current worktree, so another branch would be pushed unchecked. Refused:"
   printf '%s' "$not_head"
-  echo "  切到该分支再推："
-  echo "    git switch <分支名> && git push -u origin HEAD"
-  echo "  （git push --all 或 push.default=matching 一次推多个分支也会被拦，请逐个切过去推）"
+  echo "  Switch to that branch and push from there:"
+  echo "    git switch <branch> && git push -u origin HEAD"
+  echo "  (git push --all or push.default=matching, which push several branches at once, are refused too; push them one at a time)"
   exit 1
 fi
 
-# ---- [3] check.sh --quick，整体限时 90 秒 ----
+# ---- [3] check.sh --quick, 90 s overall limit ----
 if [ ! -f scripts/check.sh ]; then
-  echo "⚠️ pre-push：没找到 scripts/check.sh，跳过检查（放行）"
+  echo "⚠️ pre-push: scripts/check.sh not found, check skipped (push allowed)"
   exit 0
 fi
 
 test_timeout=$((LIMIT_S - 20))
 [ "$test_timeout" -ge 10 ] || test_timeout=10
 
-out=$(mktemp "${TMPDIR:-/tmp}/pre-push-check.XXXXXX") || { echo "⚠️ pre-push：mktemp 失败，跳过检查（放行）"; exit 0; }
+out=$(mktemp "${TMPDIR:-/tmp}/pre-push-check.XXXXXX") || { echo "⚠️ pre-push: mktemp failed, check skipped (push allowed)"; exit 0; }
 trap 'rm -f "$out"' EXIT
 
-echo "⏳ pre-push：BRANCH=${push_branch:-（未知）} bash scripts/check.sh --quick（整体最多 ${LIMIT_S} 秒，单个测试 ${test_timeout} 秒）"
-# set -m：让 check.sh 自成一个进程组，超时时连它起的测试子进程一起杀掉
+echo "⏳ pre-push: BRANCH=${push_branch:-(unknown)} bash scripts/check.sh --quick (at most ${LIMIT_S} s overall, ${test_timeout} s per test)"
+# set -m: run check.sh in its own process group so a timeout also kills the test processes it started
 set -m
 BRANCH="$push_branch" CHECK_TEST_TIMEOUT="$test_timeout" bash scripts/check.sh --quick </dev/null >"$out" 2>&1 &
 pid=$!
 set +m
 
-# 每秒把新增的输出打出来：长检查也能看到进度
+# print new output every second, so a long check still shows progress
 shown=0
 waited=0
 timed_out=0
@@ -110,7 +113,7 @@ flush_new() {
     shown=$n
   fi
 }
-# 超时被杀时 bash 会往 stderr 打一行「Terminated」作业通知：轮询和收尸期间把 stderr 临时静音
+# when the job is killed on timeout, bash prints a "Terminated" job notice to stderr: silence stderr while polling and reaping
 exec 3>&2 2>/dev/null
 while kill -0 "$pid"; do
   if [ "$waited" -ge "$LIMIT_S" ]; then
@@ -128,34 +131,34 @@ wait "$pid"
 code=$?
 exec 2>&3 3>&-
 flush_new
-# 最后一行没有换行符时 wc -l 数不到它，补打一次
+# wc -l does not count a final line without a newline, so print it once more
 if [ -s "$out" ] && [ -n "$(tail -c 1 "$out")" ]; then
   tail -n 1 "$out"; echo ""
 fi
 
 if [ "$timed_out" -eq 1 ]; then
-  echo "⚠️ pre-push：check.sh --quick 超过 ${LIMIT_S} 秒，已终止，这次放行（CI 会跑全量；本地可以单独跑 bash scripts/check.sh --quick 看哪步慢）"
+  echo "⚠️ pre-push: check.sh --quick took longer than ${LIMIT_S} s and was stopped; allowing this push (CI runs the full check; run bash scripts/check.sh --quick locally to see which step is slow)"
   exit 0
 fi
 
-summary=$(grep -E '^======== 汇总' "$out" | tail -n 1)
-nfail=$(printf '%s\n' "$summary" | sed -nE 's/^======== 汇总 ([0-9]+) ❌.*/\1/p')
+summary=$(grep -E '^======== Summary' "$out" | tail -n 1)
+nfail=$(printf '%s\n' "$summary" | sed -nE 's/^======== Summary ([0-9]+) ❌.*/\1/p')
 
 if [ -z "$summary" ] || [ "$code" -ne 0 ] || [ "${nfail:-1}" != "0" ]; then
   echo ""
-  echo "🚫 pre-push：检查没过，拒绝 push。汇总节："
+  echo "🚫 pre-push: the check failed, push refused. Summary block:"
   echo "----------------------------------------"
   if [ -n "$summary" ]; then
-    # check.sh 的汇总节 = 汇总行 + 所有 ❌/⚠️ 行原样再列一遍
-    sed -n '/^======== 汇总/,$p' "$out"
+    # check.sh's summary block = the summary line + every ❌/⚠️ line repeated verbatim
+    sed -n '/^======== Summary/,$p' "$out"
   else
-    echo "（check.sh 没有输出「======== 汇总」行，退出码 $code —— 多半是崩了，按失败处理）"
+    echo "(check.sh printed no \"======== Summary\" line, exit code $code -- it most likely crashed; treated as a failure)"
   fi
   echo "----------------------------------------"
-  echo "  完整输出：logs/last-check.txt"
-  echo "  修好后重新 push；紧急时 git push --no-verify，但必须在 PR 里说明，CI 仍会再查。"
+  echo "  Full output: logs/last-check.txt"
+  echo "  Fix it and push again; in an emergency use git push --no-verify, but explain it in the PR -- CI still checks."
   exit 1
 fi
 
-echo "✅ pre-push：检查通过"
+echo "✅ pre-push: check passed"
 exit 0

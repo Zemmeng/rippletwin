@@ -509,7 +509,7 @@ function sumoImpactHTML(s){
     <tbody>${row('original',L('Original · ROADWORK AHEAD','原方案 · ROADWORK AHEAD'))}${row('ai',L('AI plan · USE RUSSELL','AI 方案 · USE RUSSELL'))}</tbody></table></div>
     ${note}</div>${cmpP}`;
 }
-// T47: pick the seed BEFORE the run — on 01 Configure, right above 「Save & simulate」; entering step 2 runs SUMO with it
+// T47: pick the seed BEFORE the run — on 01 Configure, right above “Save & simulate”; entering step 2 runs SUMO with it
 function sumoPreHTML(){
   if(!BE.api||EP.link!==SUMO_LINK||EP.all||EP.lanes!==1)return'';
   return`<div class="stack sumo-pre"><span class="eyebrow">${L('SUMO · step 2 runs in the cloud with this seed','SUMO · 第 2 步用这个种子在云端算')}</span>
@@ -667,7 +667,7 @@ function renderPanel(){
   P.querySelectorAll('.cta [data-go]').forEach(b=>b.onclick=()=>goUi(+b.dataset.go));
   updateLive(true);
 }
-// ---- 6-step workbench (09-30, from the team template apps/web/templates/workflow-preview): Overview → Configure → Simulate →
+// ---- 6-step workbench (09-30): Overview → Configure → Simulate →
 // Impact → Compare → Export. S.ui is the step on screen; S.step (1–4) stays the map / engine / simulation mode under it
 const UI_STEP=[1,1,2,3,4,4],UI_NEXT=[['Set up the plan →','配置施工 →'],['Save & simulate →','保存并进入仿真 →'],['See the impact →','查看影响分析 →'],['Compare plans →','比较方案 →'],['Confirm & export →','确认方案并导出 →'],null];
 function goUi(n){n=clamp(n,0,5);S.ui=n;const st=UI_STEP[n];if(S.step===st){updateSteps();renderPanel();}else goStep(st);}

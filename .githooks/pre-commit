@@ -1,52 +1,52 @@
 #!/usr/bin/env bash
-# .githooks/pre-commit —— commit 前的快速拦截：秘密、秘密文件、大文件
+# .githooks/pre-commit -- fast gate before each commit: secrets, secret files, large files
 #
-# 用途：不管用不用 AI，每个人本地 commit 都会过这一关。
-#       [1] bash scripts/secret-scan.sh --staged（脚本不存在 → ⚠️ 放行，不卡人）
-#       [2] 暂存区里有 .env / .dev.vars / settings.local.json / keys.json（及同类）→ 拦
-#       [3] 暂存区里单个文件 > 1MB → 拦（压缩，或放网盘把链接写进 README）；
-#           apps/<模块>/public/ 下的 .json 数据文件放宽到 2MB（和 PRD「每个文件 < 2 MB」一致，D-0929-1430）
-#           docs/pitch-assets/ 下的 .pdf 放宽到 10MB（初筛 / 决赛要交的 PDF，D-0930-0116）
-# 什么时候触发：git commit 时自动触发。前提是启用过 hooks：
-#       git config core.hooksPath .githooks   （bash scripts/setup.sh 会帮你做）
-# 怎么绕过：紧急时 git commit --no-verify。CI 会用 scripts/check.sh 再查一遍，PR 里写明原因。
-# 退出码：0 放行；1 拦下
-# 兼容 macOS 自带 bash 3.2 和 ubuntu。
+# What it does: every local commit passes this gate, with or without AI tools.
+#       [1] bash scripts/secret-scan.sh --staged (script missing → ⚠️ and let the commit through)
+#       [2] staged .env / .dev.vars / settings.local.json / keys.json (and similar) → blocked
+#       [3] any staged file > 1 MB → blocked (compress it, or host it elsewhere and link it from a README);
+#           .json data files under apps/<module>/public/ may be up to 2 MB (matches the PRD's "each file < 2 MB")
+#           .pdf files under docs/hackathon/pitch/ may be up to 10 MB (the submitted pitch PDFs)
+# When it runs: automatically on git commit, once the hooks are enabled:
+#       git config core.hooksPath .githooks   (bash scripts/setup.sh does this for you)
+# How to bypass: in an emergency, git commit --no-verify. CI runs scripts/check.sh again; explain why in the PR.
+# Exit codes: 0 allow; 1 block
+# Works with macOS's bundled bash 3.2 and on Ubuntu.
 set -uo pipefail
 
 root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$root" || exit 0
 
-MAX_BYTES=1048576        # 1MB
-MAX_DATA_BYTES=2097152   # 2MB：apps/<模块>/public/ 下的 .json
+MAX_BYTES=1048576        # 1 MB
+MAX_DATA_BYTES=2097152   # 2 MB: .json under apps/<module>/public/
 DATA_RE='^apps/[^/]+/public/.+\.json$'
-MAX_PDF_BYTES=10485760   # 10MB：docs/pitch-assets/ 下的 .pdf（D-0930-0116）
-PDF_RE='^docs/pitch-assets/.+\.pdf$'
+MAX_PDF_BYTES=10485760   # 10 MB: .pdf under docs/hackathon/pitch/
+PDF_RE='^docs/hackathon/pitch/.+\.pdf$'
 fail=0
 scan_failed=0
 bad_secret_files=""
 bad_big_files=""
 
-echo "🔍 pre-commit：秘密扫描 / 秘密文件 / 大文件"
+echo "🔍 pre-commit: secret scan / secret files / large files"
 
-# ---- [1] 秘密扫描 ----
+# ---- [1] Secret scan ----
 if [ -f scripts/secret-scan.sh ]; then
   if bash scripts/secret-scan.sh --staged; then
-    echo "[1] 秘密扫描 ✅"
+    echo "[1] Secret scan ✅"
   else
-    echo "[1] 秘密扫描 ❌ 暂存内容里疑似有 key / token（上面只列了 文件:行号:模式，不打印值）"
+    echo "[1] Secret scan ❌ the staged content looks like it contains a key / token (only file:line:pattern is listed above; values are never printed)"
     scan_failed=1
     fail=1
   fi
 else
-  echo "[1] 秘密扫描 ⚠️ 没找到 scripts/secret-scan.sh，跳过（放行）"
+  echo "[1] Secret scan ⚠️ scripts/secret-scan.sh not found, skipped (commit allowed)"
 fi
 
-# ---- [2] 秘密文件 + [3] 大文件：只看新增 / 修改 / 改名的（删除不拦，删除正是修法）----
+# ---- [2] Secret files + [3] large files: only added / modified / renamed files (deleting is the fix, never blocked) ----
 while IFS= read -r -d '' f; do
   base=${f##*/}
   case "$base" in
-    *.example) ;;  # .env.example / .dev.vars.example 只写变量名，允许
+    *.example) ;;  # .env.example / .dev.vars.example list variable names only, allowed
     .env|.env.*|.dev.vars|.dev.vars.*|settings.local.json|keys.json|credentials*.json|*.pem|*.key)
       bad_secret_files="$bad_secret_files    $f
 " ;;
@@ -57,45 +57,45 @@ while IFS= read -r -d '' f; do
   if [[ $f =~ $PDF_RE ]]; then limit=$MAX_PDF_BYTES; limit_name=10MB; fi
   if [ "${size:-0}" -gt "$limit" ] 2>/dev/null; then
     kb=$((size / 1024))
-    bad_big_files="$bad_big_files    ${f}（${kb}KB > ${limit_name}）
+    bad_big_files="$bad_big_files    ${f} (${kb}KB > ${limit_name})
 "
   fi
 done < <(git diff --cached --name-only --diff-filter=ACMR -z)
 
 if [ -n "$bad_secret_files" ]; then
-  echo "[2] 秘密文件 ❌ 这些文件永远不进 git："
+  echo "[2] Secret files ❌ these files never go into git:"
   printf '%s' "$bad_secret_files"
   fail=1
 else
-  echo "[2] 秘密文件 ✅"
+  echo "[2] Secret files ✅"
 fi
 
 if [ -n "$bad_big_files" ]; then
-  echo "[3] 大文件 ❌ 单个文件超过上限（apps/<模块>/public/ 下的 .json 2MB，docs/pitch-assets/ 下的 .pdf 10MB，其余 1MB）："
+  echo "[3] Large files ❌ files over the size limit (2 MB for .json under apps/<module>/public/, 10 MB for .pdf under docs/hackathon/pitch/, 1 MB otherwise):"
   printf '%s' "$bad_big_files"
   fail=1
 else
-  echo "[3] 大文件 ✅"
+  echo "[3] Large files ✅"
 fi
 
 [ "$fail" -eq 0 ] && exit 0
 
-# ---- 失败：打印修法 ----
+# ---- Blocked: print the fixes ----
 echo ""
-echo "🚫 commit 被拦下。修法："
+echo "🚫 Commit blocked. To fix:"
 if [ -n "$bad_secret_files" ]; then
-  echo "  · 秘密文件：git rm --cached <文件>   （只移出暂存区，本地文件保留）"
-  echo "    确认 .gitignore 已覆盖它；值放 .env / 密码管理器，示例文件只写变量名"
+  echo "  · Secret files: git rm --cached <file>   (removes it from the index only; the local file stays)"
+  echo "    Make sure .gitignore covers it; keep values in .env or a password manager, and list variable names only in example files"
 fi
 if [ -n "$bad_big_files" ]; then
-  echo "  · 大文件：git restore --staged <文件>"
-  echo "    图片转 webp / 压缩（入库只放网页版），视频和原图放网盘，链接写进模块 README"
-  echo "    原始素材放 raw/ 或 assets-src/（已 gitignore）"
+  echo "  · Large files: git restore --staged <file>"
+  echo "    Convert images to webp / compress them (commit only web-sized versions); host videos and originals elsewhere and link them from the module README"
+  echo "    Keep raw material in raw/ or assets-src/ (already gitignored)"
 fi
 if [ "$scan_failed" -eq 1 ]; then
-  echo "  · 秘密扫描命中：删掉那行里的值，改成读环境变量；误报就改写法或加进 secret-scan.sh 的白名单（找 lead）"
-  echo "    key 如果已经 commit 过（哪怕没 push）：先找 lead 轮换这个 key，再讨论清理历史"
+  echo "  · Secret scan hit: remove the value from that line and read it from an environment variable instead; for a false positive, rewrite the line or add a whitelist rule to secret-scan.sh"
+  echo "    If the key was ever committed (even unpushed): rotate the key first, then decide whether to clean the history"
 fi
 echo ""
-echo "  紧急情况可以 git commit --no-verify 跳过，但 CI 会再查一遍，PR 里要写明原因。"
+echo "  In an emergency, git commit --no-verify skips this hook, but CI checks again and the PR must explain why."
 exit 1

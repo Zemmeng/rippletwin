@@ -1,23 +1,23 @@
-// params.js —— 引擎参数的入口：T12 @Unzzip 交的 `/params/public/params.json`（每个数带出处，格式见 docs/arch/T12-params-PRD.md 第 4 节）。
-// 读得到就用有出处的数，读不到 / 缺项 / 不合格就逐项回退到 choice.js、calibrate.js 里的假设值［待核］，并记下每一项用的是哪个。
-// 用法：const params = await loadParams();  const engine = createEngine({ network, flows, readSigns, params });
-//        node 里：applyParams(JSON.parse(fs.readFileSync('apps/params/public/params.json', 'utf8')))
+// params.js — entry point for engine parameters: `/params/public/params.json` from apps/params (every value carries a source; format in docs/hackathon/specs/T12-params-PRD.md §4).
+// Sourced values are used when readable; anything unreadable, missing or invalid falls back item by item to the assumed values in choice.js / calibrate.js, and the source of every item is recorded.
+// Usage: const params = await loadParams();  const engine = createEngine({ network, flows, readSigns, params });
+//        in Node: applyParams(JSON.parse(fs.readFileSync('apps/params/public/params.json', 'utf8')))
 //
-// 引擎认的字段（其余字段照收不用，列在 used.ignored）：
-//   mix.<类型>                    4 类人占比，4 个都要有、各在 0–1、加起来 1 ± 0.02（会归一），否则整组用假设值
-//   anchors.generic_warning_divert 只写「前方施工」的绕行比例 → 两点校准低点；named_route_divert 写推荐路线 → 高点。两个都要有、0–1 之间、低 < 高
-//   persona.<类型>.hurry | familiar | trust | queue_averse | truck_only   直接对应 choice.js 的 PERSONAS，逐项回退
-//   persona.<类型>.route_familiarity（T12 #31 的叫法，知道替代路线的比例 0–1）= familiar 的别名，familiar 没给时用它
-//   persona.<类型>.sign_trust     照屏上说的走的比例（0–1）。某类人没给 trust、而 4 类都有 sign_trust 时，
-//                                 换算成相对倍数 sign_trust ÷（按占比加权的平均），平均的人 = 1（绝对高低由两点校准的推荐力度 B 吸收）
-// 每个数可以写成 { value: 数 } 或直接写数；value 是 null（没找到）就当没给。
+// Fields the engine accepts (other fields are accepted but unused, listed in used.ignored):
+//   mix.<persona>                 share of each of the 4 personas; all 4 required, each 0–1, summing to 1 ± 0.02 (normalised), otherwise the whole group uses assumed values
+//   anchors.generic_warning_divert diversion under a generic "roadwork ahead" warning → low calibration point; named_route_divert with a named route → high point. Both required, 0–1, low < high
+//   persona.<persona>.hurry | familiar | trust | queue_averse | truck_only   map directly to PERSONAS in choice.js, falling back item by item
+//   persona.<persona>.route_familiarity (older alias from the T12 parameter spec: share who know an alternative route, 0–1) = alias of familiar, used when familiar is absent
+//   persona.<persona>.sign_trust  share who follow what the sign says (0–1). For a persona without trust, when at least 2 personas have sign_trust,
+//                                 it converts to a relative multiplier sign_trust ÷ (mix-weighted mean), average driver = 1 (the absolute level is absorbed by calibration strength B)
+// Each value can be { value: n } or a bare number; value null (not found) counts as absent.
 
 import { TYPES, MIX, PERSONAS, FAMILIAR_MIN } from './choice.js';
 import { ANCHORS } from './calibrate.js';
 
 export const PARAMS_URL = '/params/public/params.json';
 
-// 每项的合法范围（超出就报错并用假设值；familiar 进 ln()，下限和 choice.js 用同一个常量）
+// valid range per item (out of range → error + assumed value; familiar goes into ln(), so its lower bound is the same constant as in choice.js)
 const PERSONA_KEYS = {
   hurry: [0.05, 5],
   familiar: [FAMILIAR_MIN, 1],
@@ -25,7 +25,7 @@ const PERSONA_KEYS = {
   queue_averse: [0, 5],
 };
 const MIX_TOL = 0.02;
-const APPLIED = new WeakSet(); // applyParams 的结果打上记号：createEngine 只认这个，别的一律当 params.json 原文处理
+const APPLIED = new WeakSet(); // marks applyParams results: createEngine trusts only these and treats anything else as raw params.json
 
 const own = (o, k) => o != null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
 const inRange = (v, [lo, hi]) => v != null && v >= lo && v <= hi;
@@ -40,22 +40,22 @@ function defaults() {
   };
 }
 
-// json → { mix, personas, anchors, used }；json 不是对象就全用假设值。不改动 MIX / PERSONAS / ANCHORS 本身
+// json → { mix, personas, anchors, used }; if json is not an object, everything uses assumed values. MIX / PERSONAS / ANCHORS themselves are never modified
 export function applyParams(json) {
   const out = defaults();
   const used = { src: 'default', version: null, mix: 'default', anchors: 'default', persona: {}, ignored: [], errors: [] };
   for (const t of TYPES) used.persona[t] = Object.fromEntries([...Object.keys(PERSONA_KEYS), 'truck_only'].map(k => [k, 'default']));
   const done = () => { const r = { ...out, used }; APPLIED.add(r); return r; };
   if (json == null || typeof json !== 'object' || Array.isArray(json)) {
-    if (json != null) used.errors.push('params.json 不是对象');
+    if (json != null) used.errors.push('params.json is not an object');
     return done();
   }
-  // 取一个数：{ value: 数 } 或直接写数。value 是 null / 没写 → 没找到（不算错）；写了但不是有限数（"0.05"、"3%"、true）→ 报错
+  // read a number: { value: n } or a bare number. value null / missing → not found (not an error); present but not a finite number ("0.05", "3%", true) → error
   const num = (x, path) => {
     const v = x != null && typeof x === 'object' && !Array.isArray(x) ? x.value : x;
     if (v == null) return null;
     if (typeof v === 'number' && Number.isFinite(v)) return v;
-    used.errors.push(`${path} = ${JSON.stringify(v)} 不是数`);
+    used.errors.push(`${path} = ${JSON.stringify(v)} is not a number`);
     return null;
   };
   const ignore = (obj, keep, prefix) => {
@@ -65,27 +65,27 @@ export function applyParams(json) {
   used.version = num(json.version, 'version');
   ignore(json, new Set(['version', 'mix', 'anchors', 'persona']), '');
 
-  // 4 类人占比：整组要么全用，要么全不用（缺一类就没法归一）
+  // persona mix: all or nothing (cannot normalise with one missing)
   if (own(json, 'mix')) {
     ignore(json.mix, new Set(TYPES), 'mix.');
     const m = Object.fromEntries(TYPES.map(t => [t, own(json.mix, t) ? num(json.mix[t], `mix.${t}`) : null]));
     const sum = TYPES.reduce((s, t) => s + (m[t] ?? NaN), 0);
-    if (!TYPES.every(t => inRange(m[t], [0, 1]))) used.errors.push('mix：4 类人要都有 0–1 之间的数');
-    else if (!(Math.abs(sum - 1) <= MIX_TOL)) used.errors.push(`mix：加起来是 ${+sum.toFixed(3)}，不是 1`);
+    if (!TYPES.every(t => inRange(m[t], [0, 1]))) used.errors.push('mix: all 4 personas need a value between 0 and 1');
+    else if (!(Math.abs(sum - 1) <= MIX_TOL)) used.errors.push(`mix: values sum to ${+sum.toFixed(3)}, not 1`);
     else { for (const t of TYPES) out.mix[t] = m[t] / sum; used.mix = 'params'; }
   }
 
-  // 两点校准的两个目标（要一起换：只换一个，A、B 就是按两套不同来源的数解出来的）
+  // the two calibration targets (replaced together: replacing only one would solve A and B from two different sources)
   if (own(json, 'anchors')) {
     ignore(json.anchors, new Set(['generic_warning_divert', 'named_route_divert']), 'anchors.');
     const lo = own(json.anchors, 'generic_warning_divert') ? num(json.anchors.generic_warning_divert, 'anchors.generic_warning_divert') : null;
     const hi = own(json.anchors, 'named_route_divert') ? num(json.anchors.named_route_divert, 'anchors.named_route_divert') : null;
-    if (lo == null && hi == null) { /* 都没找到：用假设值，不算错 */ }
-    else if (!(inRange(lo, [0.001, 0.999]) && inRange(hi, [0.001, 0.999]) && lo < hi)) used.errors.push('anchors：generic_warning_divert 和 named_route_divert 要都在 0–1 之间、前者小于后者');
+    if (lo == null && hi == null) { /* neither found: use assumed values, not an error */ }
+    else if (!(inRange(lo, [0.001, 0.999]) && inRange(hi, [0.001, 0.999]) && lo < hi)) used.errors.push('anchors: generic_warning_divert and named_route_divert must both be between 0 and 1, the first smaller than the second');
     else { out.anchors = { lo, hi }; used.anchors = 'params'; }
   }
 
-  // 每类人参数：逐项回退
+  // per-persona parameters: fall back item by item
   const P = own(json, 'persona') && json.persona && typeof json.persona === 'object' ? json.persona : null;
   if (P) {
     ignore(P, new Set(TYPES), 'persona.');
@@ -93,31 +93,31 @@ export function applyParams(json) {
     for (const t of TYPES) {
       const src = own(P, t) ? P[t] : null;
       if (!src || typeof src !== 'object') continue;
-      const alias = !own(src, 'familiar') && own(src, 'route_familiarity'); // T12 #31 的叫法
+      const alias = !own(src, 'familiar') && own(src, 'route_familiarity'); // older alias from the T12 parameter spec
       ignore(src, new Set([...Object.keys(PERSONA_KEYS), 'truck_only', 'sign_trust', ...(alias ? ['route_familiarity'] : [])]), `persona.${t}.`);
       for (const [k, range] of Object.entries(PERSONA_KEYS)) {
         const key = k === 'familiar' && alias ? 'route_familiarity' : k;
         if (!own(src, key)) continue;
         const v = num(src[key], `persona.${t}.${key}`);
         if (v == null) continue;
-        if (!inRange(v, range)) { used.errors.push(`persona.${t}.${key} = ${v} 超出 ${range[0]}–${range[1]}`); continue; }
+        if (!inRange(v, range)) { used.errors.push(`persona.${t}.${key} = ${v} is outside ${range[0]}–${range[1]}`); continue; }
         out.personas[t][k] = v;
         used.persona[t][k] = 'params';
       }
       if (own(src, 'truck_only')) {
         const v = src.truck_only != null && typeof src.truck_only === 'object' ? src.truck_only.value : src.truck_only;
         if (typeof v === 'boolean') { out.personas[t].truck_only = v; used.persona[t].truck_only = 'params'; }
-        else if (v != null) used.errors.push(`persona.${t}.truck_only = ${JSON.stringify(v)} 不是布尔`);
+        else if (v != null) used.errors.push(`persona.${t}.truck_only = ${JSON.stringify(v)} is not a boolean`);
       }
       if (own(src, 'sign_trust')) {
         const v = num(src.sign_trust, `persona.${t}.sign_trust`);
         if (v == null) continue;
-        if (!inRange(v, [0, 1])) { used.errors.push(`persona.${t}.sign_trust = ${v} 不在 0–1`); continue; }
+        if (!inRange(v, [0, 1])) { used.errors.push(`persona.${t}.sign_trust = ${v} is not within 0–1`); continue; }
         st[t] = v;
       }
     }
-    // sign_trust（照屏走的比例）→ 相对倍数：在给了数的几类人里按占比加权取平均 = 1；至少 2 类才有「相对」可言。
-    // 只补没直接给 trust 的类型；超过上限的截到上限（整组比例不变形得最少），不单独退回假设值
+    // sign_trust (share who follow the sign) → relative multiplier: the mix-weighted mean over the personas that have a value = 1; "relative" needs at least 2.
+    // Only fills personas without an explicit trust; values above the cap are clipped to it (distorts the group least) rather than reverting to the assumed value
     const have = TYPES.filter(t => st[t] != null);
     if (have.length >= 2) {
       const w = have.reduce((s, t) => s + out.mix[t], 0);
@@ -126,33 +126,33 @@ export function applyParams(json) {
         for (const t of have) {
           if (used.persona[t].trust === 'params') continue;
           let v = st[t] / mean;
-          if (v > PERSONA_KEYS.trust[1]) { used.errors.push(`persona.${t}.sign_trust 换算后 ${+v.toFixed(3)}，截到 ${PERSONA_KEYS.trust[1]}`); v = PERSONA_KEYS.trust[1]; }
+          if (v > PERSONA_KEYS.trust[1]) { used.errors.push(`persona.${t}.sign_trust converts to ${+v.toFixed(3)}, clipped to ${PERSONA_KEYS.trust[1]}`); v = PERSONA_KEYS.trust[1]; }
           out.personas[t].trust = v;
           used.persona[t].trust = 'sign_trust';
         }
       }
     } else if (have.length === 1) {
-      used.errors.push(`persona.*.sign_trust：只有 ${have[0]} 有数，至少 2 类人才能换算成相对倍数`);
+      used.errors.push(`persona.*.sign_trust: only ${have[0]} has a value; at least 2 personas are needed to convert to relative multipliers`);
     }
   }
   used.ignored.sort();
   return done();
 }
 
-// 浏览器里默认从同源的 /params/public/params.json 读；读不到（404、断网、不是 JSON）一律回退，不抛错
+// in the browser, reads /params/public/params.json from the same origin by default; any failure (404, offline, not JSON) falls back without throwing
 export async function loadParams({ url = PARAMS_URL, fetch: f = globalThis.fetch } = {}) {
   if (typeof f !== 'function') return applyParams(null);
   try {
     const res = await f(url);
     if (!res || !res.ok) {
       const r = applyParams(null);
-      r.used.errors.push(`读 ${url} 失败：HTTP ${res ? res.status : '无响应'}`);
+      r.used.errors.push(`Failed to read ${url}: HTTP ${res ? res.status : 'no response'}`);
       return r;
     }
     return applyParams(await res.json());
   } catch (e) {
     const r = applyParams(null);
-    r.used.errors.push(`读 ${url} 失败：${e?.message || e}`);
+    r.used.errors.push(`Failed to read ${url}: ${e?.message || e}`);
     return r;
   }
 }

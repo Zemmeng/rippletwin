@@ -1,7 +1,7 @@
-# 本仓库只放源码、文档、配置和压缩后的小素材；秘密、依赖、大文件、生成产物一律不进。
-# 🔒 只有 lead 改这份文件；AI 不许改，也不许 git add -f 强加被忽略的文件。
+# This repository holds source code, docs, configuration and small compressed assets only; secrets, dependencies,
+# large files and generated output stay out. Never force-add an ignored file with git add -f.
 
-# ---- 秘密与本机配置（永远不进；值放密码管理器，示例文件只写变量名）----
+# ---- Secrets and local configuration (never committed; values live in a password manager, example files list names only) ----
 .env
 .env.*
 !.env.example
@@ -14,24 +14,24 @@ keys.json
 credentials*.json
 .claude/settings.local.json
 
-# ---- 本机 AI 中间产物（多 agent 落盘区，结论归并进 docs 后可清）----
+# ---- Local AI tool output (agent scratch files; safe to delete once merged into docs) ----
 .claude/agent-out/
-# Claude 会话 / Workflow 的临时 worktree（wf_* 等），不进库；不忽略的话 check [3] 在无关会话里报越界
+# Temporary worktrees of AI coding sessions; if not ignored, check [3] reports them as cross-module changes
 .claude/worktrees/
 
-# ---- 依赖 ----
+# ---- Dependencies ----
 node_modules/
 .venv/
 __pycache__/
 *.pyc
 
-# ---- 平台缓存与构建产物（.wrangler 缓存误提交过一次，别再来）----
+# ---- Platform caches and build output (the .wrangler cache was committed by mistake once) ----
 .wrangler/
 dist/
 build/
 .cache/
 
-# ---- 大媒体与生成产物（原图 / 录屏放网盘，入库只放压缩后的网页版）----
+# ---- Large media and generated output (originals and screen recordings are hosted elsewhere; commit web-sized versions only) ----
 raw/
 out/
 assets-src/
@@ -42,7 +42,7 @@ candidates/
 *.wav
 *.zip
 
-# ---- 数据与日志（样例数据放 fixtures/，大数据走网盘）----
+# ---- Data and logs (sample data goes in fixtures/; large datasets are hosted elsewhere) ----
 data/
 *.sqlite
 *.sqlite3
@@ -51,10 +51,10 @@ data/
 logs/
 *.log
 
-# ---- 个人草稿 ----
+# ---- Personal drafts ----
 scratch/
 
-# ---- 系统与编辑器 ----
+# ---- OS and editor files ----
 .DS_Store
 Thumbs.db
 .idea/

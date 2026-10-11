@@ -42,7 +42,7 @@ REAL_IDS=('baseline','original','ai')
 
 
 def fake_validate_real(payload):
-    # 按 contract F 写的替身：白名单 + 范围；真 build_real.validate_real 另有一条测试直接查
+    # Stand-in written to interface spec F: allow-list + ranges; the real build_real.validate_real is checked directly by a separate test
     if not isinstance(payload,dict):raise ValueError('payload must be an object')
     extra=set(payload)-{'seed','p_original','p_ai','scenarios'}
     if extra:raise ValueError('unknown fields: '+', '.join(sorted(extra)))
@@ -56,7 +56,7 @@ def fake_validate_real(payload):
 
 
 def fake_build_real(args):
-    # contract A 的最小目录：index.json + <id>/manifest.json + <id>/frames-000.json
+    # Minimal directory per interface spec A: index.json + <id>/manifest.json + <id>/frames-000.json
     out=pathlib.Path(args.output)
     model.dump(out/'index.json',{'version':2,'network':'real','seed':args.seed,'hour':8,
         'params':{'seed':args.seed,'p_original':args.p_original,'p_ai':args.p_ai,'scenarios':args.scenarios},
@@ -69,7 +69,7 @@ def fake_build_real(args):
 
 
 def fake_build_options(args):
-    # T49 方案模式的最小目录：index.json + baseline / opt-<id> 的 manifest.json；frames:false → chunks 为空、没有 frames-NNN.json
+    # Minimal directory for options mode: index.json + manifest.json for baseline / opt-<id>; frames:false → empty chunks, no frames-NNN.json
     out=pathlib.Path(args.output)
     model.dump(out/'index.json',{'version':2,'network':'real','seed':args.seed,'hour':8,
         'params':{'seed':args.seed,'options':args.options,'frames':args.frames,'scenarios':args.scenarios},
@@ -326,7 +326,7 @@ class BackendTests(unittest.TestCase):
             with self.subTest(argv=argv,env=env),self.assertRaises(SystemExit),contextlib.redirect_stderr(io.StringIO()):
                 serve.settings(argv,env)
 
-    # ---- 实网（contract v2 B/F）：network:'real' 走 build_real，别的照旧 ----
+    # ---- Real network (interface spec v2 B/F): network:'real' goes to build_real, everything else unchanged ----
     def real_jobs(self,build=fake_build_real,validate=fake_validate_real):
         calls=[]
         def runner(args):calls.append(args);build(args)
@@ -415,7 +415,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(e.exception.status,409)
 
     def test_output_files_are_sent_byte_for_byte_so_sha256_matches(self):
-        # 写的人用别的格式（缩进、\\u 转义）也不能变：浏览器按 manifest 里的 sha256 核对收到的正文
+        # Must stay byte-identical even if the writer used another format (indentation, \\u escapes): the browser checks the received body against the sha256 in the manifest
         def indented(args):
             fake_build_real(args);f=pathlib.Path(args.output)/'ai/frames-000.json'
             f.write_text(json.dumps({'frames':[{'t':0,'a':[],'tls':{'x':'Gr'},'q':1.5,'note':'路口'}]},indent=1))
@@ -428,7 +428,7 @@ class BackendTests(unittest.TestCase):
         status,value=self.jobs.route('GET',f"{serve.PREFIX}/runs/{job['id']}/ai/frames-000.json")
         self.assertEqual(value['frames'][0]['note'],'路口')
 
-    @unittest.skipUnless((TOOLS/'build_real.py').exists(),'build_real.py 还没有')
+    @unittest.skipUnless((TOOLS/'build_real.py').exists(),'build_real.py not present')
     def test_build_real_validate_matches_contract_f(self):
         import build_real
         v=build_real.validate_real({})
@@ -450,7 +450,7 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual(server.RequestHandlerClass.timeout,30)
             finally:server.shutdown();server.server_close()
 
-    # ---- T49 方案模式：{network:'real', seed?, options:[{id,p}], frames?} → baseline + opt-<id>；旧的 {p_original,p_ai,scenarios} 不变 ----
+    # ---- Options mode: {network:'real', seed?, options:[{id,p}], frames?} → baseline + opt-<id>; the old {p_original,p_ai,scenarios} form is unchanged ----
     OPTS=[{'id':'C','p':.607},{'id':'A','p':.14},{'id':'B','p':.14}]
 
     def options_jobs(self):
@@ -461,12 +461,12 @@ class BackendTests(unittest.TestCase):
         calls=self.options_jobs()
         job=self.run_real({'network':'real','seed':7,'options':self.OPTS})
         self.assertEqual(job['status'],'complete')
-        want=[{'id':'A','p':.14},{'id':'B','p':.14},{'id':'C','p':.607}]  # 按 id 排好
+        want=[{'id':'A','p':.14},{'id':'B','p':.14},{'id':'C','p':.607}]  # sorted by id
         self.assertEqual(job['config'],{'network':'real','seed':7,'options':want,'frames':False,'scenarios':['baseline','opt-A','opt-B','opt-C']})
         root=pathlib.Path(self.temp.name).resolve()/job['id']
         self.assertEqual(vars(calls[0]),{'seed':7,'options':want,'frames':False,'scenarios':['baseline','opt-A','opt-B','opt-C'],
                                          'output':root/'output','work_dir':root/'raw'})
-        # 旧形式照旧：没有 options / frames 字段
+        # The old form still works: no options / frames fields
         job2=self.jobs.configure({'network':'real','p_ai':.6})
         self.assertEqual(job2,{'network':'real','seed':42,'p_original':.14,'p_ai':.6,'scenarios':list(REAL_IDS)})
 
