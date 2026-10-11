@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generated": "2026-09-29",
-  "note": "T12 引擎选择模型参数。每个数带 source + confidence。confidence: high/medium/low/none。找不到写 null，不编。键名全 ASCII（D-05）。",
+  "note": "Behaviour and valuation parameters for the engine's choice model. Every value carries a source and a confidence: high/medium/low/none. Unknown values are null, never invented. Keys are ASCII only (docs/decisions.md D-05).",
   "mix": {
     "commuter": {
       "value": 0.5,
@@ -10,9 +10,9 @@
         0.6
       ],
       "unit": "share",
-      "source": "ABS Census 2016 via Huda et al. 2025 (ScienceDirect): 436,752 people commute to work in Melbourne CBD, 27% by car; plus City of Melbourne Transport Strategy 2030 work-trip focus. Remainder of car-trip mix split by CBD function (work vs retail/services) with VISTA trip-purpose categories.",
+      "source": "ABS Census 2016 journey to work (CBD commuting); City of Melbourne Transport Strategy 2030 work-trip focus. Remainder of car-trip mix split by CBD function (work vs retail/services) with VISTA trip-purpose categories.",
       "confidence": "low",
-      "note": "没有「CBD 车行出行目的四分」的直接公开表。0.50 是通勤占车行主体的工作假设：CBD 白天车流以通勤为主，ABS 显示 CBD 岗位高度集中；区间放宽到 0.40-0.60。"
+      "note": "There is no public table splitting CBD car trips into these four purposes. 0.50 is a working assumption that commuting makes up most car trips: daytime CBD traffic is mainly commuters, and ABS data show jobs are highly concentrated in the CBD. The range is widened to 0.40–0.60. Figures previously quoted here via Huda et al. 2025 (436,752 CBD commuters, 27% by car) were removed because neither could be found in that paper."
     },
     "local": {
       "value": 0.25,
@@ -23,7 +23,7 @@
       "unit": "share",
       "source": "VISTA trip purpose categories (Buy Something / Pick-up or Deliver / Education / social); City of Melbourne Transport Strategy 2030 (local access).",
       "confidence": "low",
-      "note": "本地办事/购物/接送。VISTA 有 trip purpose 分类但没有「目的地=LGA 且用车」的四类拆分公开汇总；0.25 为零售与服务型出行的常见量级。"
+      "note": "Local errands, shopping and pick-ups. VISTA has trip-purpose categories but no published four-way split of car trips with a destination in the LGA; 0.25 is a typical order of magnitude for retail and service trips."
     },
     "tourist": {
       "value": 0.1,
@@ -34,7 +34,7 @@
       "unit": "share",
       "source": "City of Melbourne / Tourism Victoria CBD visitor economy reports (qualitative); VISTA social & recreation trip share.",
       "confidence": "low",
-      "note": "游客/休闲。CBD 有大量国际与州际访客，但多数步行/电车；车行游客占比偏低。0.10 是保守工作假设。"
+      "note": "Visitors and leisure. The CBD has many international and interstate visitors, but most walk or take the tram, so their share of car traffic is low. 0.10 is a conservative working assumption."
     },
     "delivery": {
       "value": 0.15,
@@ -45,12 +45,12 @@
       "unit": "share",
       "source": "ABS Survey of Motor Vehicle Use (freight fleet: 84.5% light commercial); O'Fallon & Sullivan light/medium commercial vehicle use in urban centres; Infrastructure Australia Urban Transport Crowding and Congestion (service vehicles).",
       "confidence": "low",
-      "note": "送货/商用车。ABS 车队构成是全国的，不是 CBD 车流份额；城配+服务车在 CBD 白天车流里常见 10-20% 量级。0.15 取中。"
+      "note": "Delivery and commercial vehicles. The ABS fleet make-up is national, not a share of CBD traffic; delivery plus service vehicles are commonly 10–20% of daytime CBD traffic. 0.15 is the midpoint."
     }
   },
   "mix_sum_check": {
     "value": 1.0,
-    "note": "四类占比之和必须为 1（test.sh 强制）"
+    "note": "The four shares must sum to 1 (enforced by test.sh)."
   },
   "anchors": {
     "generic_warning_divert": {
@@ -60,9 +60,9 @@
         0.06
       ],
       "unit": "share",
-      "source": "Working assumption. Literature: Bonsall 1999 (TRID) early VMS surveys diversion 10-80%; Wardman 1996 (White Rose) 5-80%. Named-route messages divert more than generic warnings (Erke 2007 field trial used named alternative).",
+      "source": "Working assumption. Literature: Bonsall & Palmer 1999 (book chapter in Emmerink & Nijkamp (eds), Behavioural and network impacts of driver information systems, Ashgate; Routledge reissue https://doi.org/10.4324/9781351119740-9) report early VMS surveys with diversion of 10-80%; Wardman, Bonsall & Shires 1996 (ITS Leeds Working Paper 475, White Rose eprints) cite earlier counts of 5-80%. Messages that recommend a route are assumed to divert more than generic warnings (the Erke 2007 field trial recommended an alternative route).",
       "confidence": "low",
-      "note": "只写「前方施工」、不给推荐路线时的绕行比例。没有单独的「纯警告」实测；0.03 来自 lead 的两点校准假设（D-0929-1435）。区间宽，待实测。"
+      "note": "Diversion when the sign only says 'roadwork ahead' and recommends no route. There is no separate field measurement for warning-only messages; 0.03 is the team's working assumption for the engine's two-point calibration (docs/decisions.md D-0929-1435). Wide range; needs measurement."
     },
     "named_route_divert": {
       "value": 0.2,
@@ -71,9 +71,9 @@
         0.3
       ],
       "unit": "share",
-      "source": "Erke, Sagberg & Hagman 2007, Effects of route guidance variable message signs (VMS) on driver behaviour, Transportation Research Part F. Field trial, motorway road closure + recommended alternative: about every fifth vehicle changed route (~20%). ScienceDirect: https://www.sciencedirect.com/science/article/abs/pii/S1369847806000909",
+      "source": "Erke, Sagberg & Hagman 2007, Effects of route guidance variable message signs (VMS) on driver behaviour, Transportation Research Part F 10(6):447-457. Field trial at two motorway sites outside Oslo, road closure + recommended alternative: about every fifth vehicle changed route (~20%). https://doi.org/10.1016/j.trf.2007.03.003",
       "confidence": "high",
-      "note": "原文摘要：“About every fifth vehicle changed route choice according to the recommendation, and almost none drove as far as the closed road section.” 推荐绕行路约比主路长 70%。二手转述核对到原文。"
+      "note": "Abstract: “About every fifth vehicle changed route choice according to the recommendation, and almost none drove as far as the closed road section.” The recommended detour was about 70% longer than the main route. Second-hand reports were checked against the original."
     },
     "stated_to_actual": {
       "value": 0.2,
@@ -82,9 +82,9 @@
         0.35
       ],
       "unit": "ratio",
-      "source": "Chatterjee 2002, Driver response to variable message sign information in London, Transportation Research Part A. Questionnaire stated intention vs observed diversion: only one-fifth of expected drivers actually diverted. ePrints Soton / ScienceDirect: https://www.sciencedirect.com/science/article/abs/pii/S0965856401000173",
+      "source": "Chatterjee, Hounsell, Firmin & Bonsall 2002, Driver response to variable message sign information in London, Transportation Research Part C 10(2):149-169. Questionnaire stated intention vs observed diversion: only one-fifth of expected drivers actually diverted. https://doi.org/10.1016/S0968-090X(01)00008-0",
       "confidence": "high",
-      "note": "原文：“Only one-fifth of the number of drivers diverted compared to that expected from the results of the stated intention questionnaire.” 用途：问卷/大模型表态 → 实际行为的折扣系数（D-0929-1435 校准用）。"
+      "note": "Original: “Only one-fifth of the number of drivers diverted compared to that expected from the results of the stated intention questionnaire.” Intended as the discount from stated intention (survey or LLM answers) to actual behaviour. No code reads it: the LLM only reads the sign and the engine's choice model computes the shares (docs/decisions.md D-0929-1435)."
     }
   },
   "persona": {
@@ -95,7 +95,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "赶不赶时间（引擎：乘在每分钟效用上，均值≈1，0.05–5）。无按四类人的公开数；delivery/commuter 可能更高但未核实。"
+        "note": "How much the driver is in a hurry (engine: multiplies the per-minute utility; mean ≈ 1, range 0.05–5). No public figures per persona; delivery and commuter drivers may be higher, but this is unverified."
       },
       "familiar": {
         "value": 0.8,
@@ -106,7 +106,7 @@
         "unit": "share",
         "source": "Qualitative: commuters use habitual routes (route choice literature); Erke 2007 note that non-diverters knew local network.",
         "confidence": "low",
-        "note": "熟悉替代路线的比例（P1）。通勤者日常固定路线，熟悉度高。工作假设。"
+        "note": "Share who know an alternative route. Commuters drive the same route every day, so familiarity is high. Working assumption."
       },
       "sign_trust": {
         "value": null,
@@ -114,7 +114,7 @@
         "unit": "share",
         "source": null,
         "confidence": "none",
-        "note": "没找到按通勤/本地/游客/送货四分的 VMS 信任率公开数据。Ermagun 2021 (ScienceDirect)：信任越高遵从越高，且 trip purpose 影响响应，但无干净比例。"
+        "note": "No public data on VMS trust rates split into commuter / local / tourist / delivery. Ermagun 2021 (ScienceDirect): higher trust means higher compliance, and trip purpose affects the response, but there are no clean shares."
       },
       "queue_averse": {
         "value": null,
@@ -122,7 +122,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "怕不怕堵（引擎：乘在排队上，0–5）。P2 风险偏好未找可引用数值。"
+        "note": "How much the driver avoids queues (engine: multiplies the queue term; range 0–5). No citable figure found for risk preference (lower-priority item P2)."
       },
       "truck_only": {
         "value": null,
@@ -130,7 +130,7 @@
         "unit": "bool",
         "source": null,
         "confidence": "none",
-        "note": "只能走货车路（布尔）。delivery 在部分货车禁行道上应为 true，但是否按人设拆未定；交给引擎/方案侧。"
+        "note": "Restricted to truck routes (boolean). Should be true for delivery vehicles where some roads ban trucks, but whether to set it per persona is undecided; left to the engine and plan side."
       }
     },
     "local": {
@@ -140,7 +140,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "赶不赶时间（引擎：乘在每分钟效用上，均值≈1，0.05–5）。无按四类人的公开数；delivery/commuter 可能更高但未核实。"
+        "note": "How much the driver is in a hurry (engine: multiplies the per-minute utility; mean ≈ 1, range 0.05–5). No public figures per persona; delivery and commuter drivers may be higher, but this is unverified."
       },
       "familiar": {
         "value": 0.7,
@@ -151,7 +151,7 @@
         "unit": "share",
         "source": "Qualitative assumption.",
         "confidence": "low",
-        "note": "本地居民对 CBD 路网较熟。"
+        "note": "Local residents know the CBD network fairly well."
       },
       "sign_trust": {
         "value": null,
@@ -159,7 +159,7 @@
         "unit": "share",
         "source": null,
         "confidence": "none",
-        "note": "同上，无四分信任率。"
+        "note": "As above: no per-persona trust rate."
       },
       "queue_averse": {
         "value": null,
@@ -167,7 +167,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "怕不怕堵（引擎：乘在排队上，0–5）。P2 风险偏好未找可引用数值。"
+        "note": "How much the driver avoids queues (engine: multiplies the queue term; range 0–5). No citable figure found for risk preference (lower-priority item P2)."
       },
       "truck_only": {
         "value": null,
@@ -175,7 +175,7 @@
         "unit": "bool",
         "source": null,
         "confidence": "none",
-        "note": "只能走货车路（布尔）。delivery 在部分货车禁行道上应为 true，但是否按人设拆未定；交给引擎/方案侧。"
+        "note": "Restricted to truck routes (boolean). Should be true for delivery vehicles where some roads ban trucks, but whether to set it per persona is undecided; left to the engine and plan side."
       }
     },
     "tourist": {
@@ -185,7 +185,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "赶不赶时间（引擎：乘在每分钟效用上，均值≈1，0.05–5）。无按四类人的公开数；delivery/commuter 可能更高但未核实。"
+        "note": "How much the driver is in a hurry (engine: multiplies the per-minute utility; mean ≈ 1, range 0.05–5). No public figures per persona; delivery and commuter drivers may be higher, but this is unverified."
       },
       "familiar": {
         "value": 0.25,
@@ -196,7 +196,7 @@
         "unit": "share",
         "source": "Qualitative assumption; tourism wayfinding literature (not cited numerically).",
         "confidence": "low",
-        "note": "游客对替代路线不熟，更依赖标志导航。"
+        "note": "Tourists do not know alternative routes and rely more on signs."
       },
       "sign_trust": {
         "value": null,
@@ -204,7 +204,7 @@
         "unit": "share",
         "source": null,
         "confidence": "none",
-        "note": "无数据。"
+        "note": "No data."
       },
       "queue_averse": {
         "value": null,
@@ -212,7 +212,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "怕不怕堵（引擎：乘在排队上，0–5）。P2 风险偏好未找可引用数值。"
+        "note": "How much the driver avoids queues (engine: multiplies the queue term; range 0–5). No citable figure found for risk preference (lower-priority item P2)."
       },
       "truck_only": {
         "value": null,
@@ -220,7 +220,7 @@
         "unit": "bool",
         "source": null,
         "confidence": "none",
-        "note": "只能走货车路（布尔）。delivery 在部分货车禁行道上应为 true，但是否按人设拆未定；交给引擎/方案侧。"
+        "note": "Restricted to truck routes (boolean). Should be true for delivery vehicles where some roads ban trucks, but whether to set it per persona is undecided; left to the engine and plan side."
       }
     },
     "delivery": {
@@ -230,7 +230,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "赶不赶时间（引擎：乘在每分钟效用上，均值≈1，0.05–5）。无按四类人的公开数；delivery/commuter 可能更高但未核实。"
+        "note": "How much the driver is in a hurry (engine: multiplies the per-minute utility; mean ≈ 1, range 0.05–5). No public figures per persona; delivery and commuter drivers may be higher, but this is unverified."
       },
       "familiar": {
         "value": 0.75,
@@ -241,7 +241,7 @@
         "unit": "share",
         "source": "O'Fallon & Sullivan urban commercial vehicle use (professional drivers know network); qualitative.",
         "confidence": "low",
-        "note": "职业司机路熟，但赶时间窗口。"
+        "note": "Professional drivers know the network, but are pressed by delivery windows."
       },
       "sign_trust": {
         "value": null,
@@ -249,7 +249,7 @@
         "unit": "share",
         "source": null,
         "confidence": "none",
-        "note": "无数据。"
+        "note": "No data."
       },
       "queue_averse": {
         "value": null,
@@ -257,7 +257,7 @@
         "unit": "relative",
         "source": null,
         "confidence": "none",
-        "note": "怕不怕堵（引擎：乘在排队上，0–5）。P2 风险偏好未找可引用数值。"
+        "note": "How much the driver avoids queues (engine: multiplies the queue term; range 0–5). No citable figure found for risk preference (lower-priority item P2)."
       },
       "truck_only": {
         "value": null,
@@ -265,7 +265,7 @@
         "unit": "bool",
         "source": null,
         "confidence": "none",
-        "note": "只能走货车路（布尔）。delivery 在部分货车禁行道上应为 true，但是否按人设拆未定；交给引擎/方案侧。"
+        "note": "Restricted to truck routes (boolean). Should be true for delivery vehicles where some roads ban trucks, but whether to set it per persona is undecided; left to the engine and plan side."
       }
     }
   },
@@ -277,9 +277,9 @@
         28.0
       ],
       "unit": "m_per_mm_capheight",
-      "source": "NSW TSI-SP-008 Variable Message Signs (standards.transport.nsw.gov.au): legibility distance taken as 700 × letter height (cap height, same units → 25 m per 25 mm). US MUTCD / Access Board: ~35-40 ft per inch letter height (~10.7-12.2 m per 25 mm) is more conservative; AS 4852.1/4852.2 cover VMS design.",
+      "source": "NSW TSI-SP-008 Variable Message Signs (standards.transport.nsw.gov.au): legibility distance taken as 700 × letter height (cap height, same units, i.e. 0.7 m per mm). US MUTCD / Access Board: ~35-40 ft per inch letter height (~10.7-12.2 m per 25 mm) is more conservative; AS 4852.1:2019 / AS 4852.2:2019 cover VMS design.",
       "confidence": "medium",
-      "note": "可读距离 ≈ 25 m × (字高 mm)。日间常用；夜间/恶劣天气要降。25 mm 字 → 约 625 m 理论可读（实际更短）。"
+      "note": "Intended as legibility distance = value × letter height in mm (daytime; lower at night or in bad weather). Known error, not yet corrected: the source's 700 × letter height is 0.7 m per mm, so 25 is about 36 times too high (25 mm letters would read at 625 m instead of 17.5 m). No code reads this parameter."
     },
     "reading_rate_wps": {
       "value": 2.5,
@@ -290,7 +290,7 @@
       "unit": "words_per_second",
       "source": "Human factors / VMS message design practice (Austroads Guide to Traffic Management Part 10; NJDOT VMS Operations Manual Dudek 2001). No single Australian mandated wps; 2-3 wps common planning value.",
       "confidence": "low",
-      "note": "读完一句屏上文案的速度。引擎用「可读距离 ÷ 车速 = 秒」再对照这句话能不能读完。"
+      "note": "How fast a driver reads the sign text. Intended use: legibility distance ÷ speed gives the seconds available, compared with the length of the message. A check on 30 Sep 2026 did not find 2.5 in either cited document, so treat it as an assumption. No code reads this parameter."
     },
     "max_frames": {
       "value": 2,
@@ -301,7 +301,7 @@
       "unit": "count",
       "source": "Austroads GTM Part 10 / AS 4852 message design: short messages, few phases preferred.",
       "confidence": "low",
-      "note": "VMS 轮播页数上限（P1 辅助）。"
+      "note": "Maximum number of frames a VMS message cycles through."
     }
   },
   "value_of_time": {
@@ -312,9 +312,9 @@
         16.0
       ],
       "unit": "aud_per_person_hour",
-      "source": "ATAP Parameter Values / Travel Time (atap.gov.au): private car travel $14.99 per person-hour (40% of Average Weekly Earnings). Cited in ATAP research report and BITRE (2025) which uses $35.59/h for some commuter cases — different basis (vehicle vs person, survey year).",
+      "source": "ATAP Parameter Values / Travel Time (atap.gov.au): private car travel $14.99 per person-hour (40% of Average Weekly Earnings, June 2013 prices). Cited in ATAP research report and BITRE (2025) which uses $35.59/h for some commuter cases — different basis (vehicle vs person, survey year).",
       "confidence": "medium",
-      "note": "P1。私家车乘客人·小时。车辆小时 = 人均 × 载客。"
+      "note": "Private car occupant, per person-hour. Vehicle-hour value = per-person value × occupancy."
     },
     "business_car_occupant_aud_ph": {
       "value": 48.63,
@@ -323,9 +323,9 @@
         52.0
       ],
       "unit": "aud_per_person_hour",
-      "source": "ATAP Travel Time: business car travel $48.63 per person-hour (129.8% of AWE).",
+      "source": "ATAP Travel Time: business car travel $48.63 per person-hour (129.8% of AWE, June 2013 prices).",
       "confidence": "medium",
-      "note": "P1。公务车。"
+      "note": "Business car travel."
     },
     "commercial_occupant_aud_ph": {
       "value": 26.5,
@@ -334,9 +334,9 @@
         28.45
       ],
       "unit": "aud_per_person_hour",
-      "source": "ATAP Travel Time: commercial vehicle occupants $25.41 (courier/utility) to $28.45 (A-triple/double B-double) per person-hour.",
+      "source": "ATAP Travel Time: commercial vehicle occupants $25.41 (courier/utility) to $28.45 (A-triple/double B-double) per person-hour (June 2013 prices).",
       "confidence": "medium",
-      "note": "P1。商用车乘员取区间中值。货车本身的时间价值另有 freight 项。"
+      "note": "Commercial vehicle occupants, midpoint of the range. The time value of the freight itself is a separate item."
     },
     "car_occupancy": {
       "value": 1.09,
@@ -345,9 +345,9 @@
         1.2
       ],
       "unit": "persons_per_vehicle",
-      "source": "City of Melbourne VISTA report (AWS PDF): “Car occupancy remains low, with just 1.09 persons per vehicle.” Cross-check: We Ride Australia submission cites 1.1 average occupancy.",
+      "source": "City of Melbourne, Update of the strategic transport evidence base (slide deck; the PDF on AWS is named VISTA_2015-16_Summary): “Car occupancy remains low, with just 1.09 persons per vehicle.” The figure is for work trips to the City of Melbourne from the 2016 Census journey to work, not from VISTA. Cross-check: We Ride Australia submission cites 1.1 average occupancy.",
       "confidence": "high",
-      "note": "P1。墨尔本小汽车平均载客 1.09。"
+      "note": "Average occupancy of cars on work trips to the City of Melbourne: 1.09."
     },
     "private_vehicle_hour_aud": {
       "value": 16.34,
@@ -356,9 +356,9 @@
         18.0
       ],
       "unit": "aud_per_vehicle_hour",
-      "source": "Derived: ATAP private $14.99/person-hour × VISTA occupancy 1.09 ≈ $16.34/vehicle-hour.",
+      "source": "Derived: ATAP private $14.99/person-hour × car occupancy 1.09 (City of Melbourne evidence base) ≈ $16.34/vehicle-hour.",
       "confidence": "medium",
-      "note": "P1 派生量。引擎若要按车辆延误计价用这个。"
+      "note": "Derived value (formula in source). Use this to price delay per vehicle-hour."
     }
   },
   "risk_preference": {
@@ -368,13 +368,13 @@
       "unit": "share",
       "source": null,
       "confidence": "none",
-      "note": "P2。怕不怕堵 / 对排队不确定性的风险偏好，未找可引用数值。Song et al. 2025 指出 LLM 比真人更怕风险，但不是行为参数本身。"
+      "note": "Lower-priority item (P2). Queue aversion, i.e. risk preference under uncertain queues; no citable figure found. Song et al. 2025 report that LLMs are more risk-averse than people, but that is not a behaviour parameter itself."
     }
   },
   "time_of_day_mix": {
     "value": null,
     "source": null,
     "confidence": "none",
-    "note": "P2。占比按时段变化。VISTA 有 day/hour 但未做成四类人时段矩阵；需要再拆。"
+    "note": "Lower-priority item (P2). Persona shares by time of day. VISTA has day and hour, but no persona-by-hour matrix has been built; needs a further split."
   }
 }
