@@ -1,25 +1,27 @@
-// sumo —— Worker hackathon-sumo + Cloudflare Container（现场 SUMO，T37，D-0930-1700）
-// 只由 lead 在本机部署：colima 里的 Docker 要开着，cd apps/sumo && npx wrangler deploy（README.md §部署）。
-// 故意不进 hackathon.conf 的 DEPLOY_MODULES：没 Docker 的机器跑 deploy.sh all 会失败。
-// site 用服务绑定 SUMO 把 /api/sumo/* 转过来；这个 Worker 必须先于 site 的 SUMO 绑定部署，否则 site 部署报 Could not resolve service binding
+// sumo: Worker hackathon-sumo + Cloudflare Container (live SUMO, D-0930-1700)
+// Deployed only by the lead from their own machine, with Docker running in colima: cd apps/sumo && npx wrangler deploy (README.md, deployment).
+// Deliberately not in DEPLOY_MODULES in hackathon.conf: deploy.sh all would fail on a machine without Docker.
+// The site forwards /api/sumo/* here over the SUMO service binding; this Worker must exist before the site's SUMO binding is deployed,
+// otherwise the site deploy fails with "Could not resolve service binding".
+// Post-event: this Worker and its container were deleted after the hackathon; the file is kept so the service can be redeployed.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // = apps/site/wrangler.jsonc services 里 SUMO 的 service（改名两边一起改）
+  // = the SUMO service in apps/site/wrangler.jsonc services (rename both together)
   "name": "hackathon-sumo",
   "main": "src/worker.js",
   "compatibility_date": "2026-09-01",
 
-  // 不开 hackathon-sumo.<子域>.workers.dev：唯一入口是 site 的服务绑定（同源，不用 CORS）
+  // no hackathon-sumo.<subdomain>.workers.dev: the only entry point is the site service binding (same origin, no CORS)
   "workers_dev": false,
-  // 不给每次上传的版本单独开预览链接
+  // no separate preview URL for each uploaded version
   "preview_urls": false,
-  // 线上日志（容器启动 / 停止、转发出错）在 Cloudflare 后台 Workers Logs 里查，或 npx wrangler tail hackathon-sumo
+  // production logs (container start / stop, forwarding errors) are in Workers Logs on the Cloudflare dashboard, or npx wrangler tail hackathon-sumo
   "observability": { "enabled": true },
 
-  // 容器：image 是 Dockerfile，构建上下文是 apps/（Dockerfile 里 COPY web/tools/sumo/… 和实网要的 roads/public/cbd/*.json）
-  // standard-4 = 4 vCPU / 12 GiB / 20 GB 盘（Cloudflare 容器上限）：跑满一小时时几个情景各开一个 SUMO 进程并行（SUMO_REAL_JOBS=4），
-  // 1 核要约 1.5 分钟一次；lead 10-01 定「狠狠提升」、总预算 20 美元（内存按醒着计费，到评审结束约 1.5–3 美元）
-  // max_instances 1：serve.py 的任务状态只在这一个实例里（worker.js 固定用 getContainer(…, 'main')）
+  // Container: the image is the Dockerfile, the build context is apps/ (the Dockerfile COPYs web/tools/sumo/… and the roads/public/cbd/*.json the real network needs)
+  // standard-4 = 4 vCPU / 12 GiB / 20 GB disk (the Cloudflare container maximum): for the full hour each scenario runs its own SUMO process in parallel (SUMO_REAL_JOBS=4);
+  // one vCPU needs about 1.5 minutes per run. The lead chose the upgrade on 1 Oct with a total budget of US$20 (memory is billed while awake, about US$1.5–3 to the end of judging)
+  // max_instances 1: serve.py's job state lives only in this one instance (worker.js always uses getContainer(…, 'main'))
   "containers": [
     {
       "class_name": "SumoContainer",
@@ -30,19 +32,19 @@
     }
   ],
 
-  // 容器类本身是个 Durable Object：绑定名 SUMO_CONTAINER（worker.js 读），类名 = worker.js 里 export 的 SumoContainer
+  // The container class is itself a Durable Object: binding SUMO_CONTAINER (read by worker.js), class = SumoContainer exported from worker.js
   "durable_objects": {
     "bindings": [
       { "name": "SUMO_CONTAINER", "class_name": "SumoContainer" }
     ]
   },
-  // 第一次部署声明这个 Durable Object 类（容器要 SQLite 存储的 DO）；已部署过的 tag 不能改，以后加类就追加 v2
+  // Declares the Durable Object class on first deploy (containers need a SQLite-backed DO); a deployed tag cannot change, so add v2 for any new class
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SumoContainer"] }
   ],
 
-  // 每个 IP（CF-Connecting-IP）每分钟最多 3 次 POST /runs；period 只能是 10 或 60。namespace_id 是账号里随便取的正整数，别和别的 Worker 撞
-  // 这个限流是每个 Cloudflare 机房各算各的、最终一致，不是精确计数；兜底还有忙闸（容器里同时 ≥ 2 个任务回 429）
+  // At most 3 POST /runs per IP (CF-Connecting-IP) per minute; period can only be 10 or 60. namespace_id is any positive integer unique within the account
+  // This limit is counted per Cloudflare location and eventually consistent, not exact; the busy gate backs it up (≥ 2 jobs in the container → 429)
   "ratelimits": [
     { "name": "SUMO_RL", "namespace_id": "3501", "simple": { "limit": 3, "period": 60 } }
   ]

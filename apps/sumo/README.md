@@ -1,123 +1,325 @@
-# sumo —— 现场 SUMO 上云：Worker `hackathon-sumo` + Cloudflare Container，连不上就回预先跑好的结果
+# sumo: cloud SUMO service
 Owner: @Zemmeng
 
-T37（D-0930-1700「C + Cloudflare 容器」）。浏览器 → site 的 `/api/sumo/v1/*` →（服务绑定 `SUMO`）→ 本 Worker → 容器里的 `apps/web/tools/sumo/serve.py`（原生 SUMO 1.27.1）的 `/sumo/v1/*`。
+Runs native [Eclipse SUMO](https://eclipse.dev/sumo/) 1.27.1 for the RippleTwin workbench. A Cloudflare Worker (`hackathon-sumo`) sits in front of a Cloudflare Container that runs `apps/web/tools/sumo/serve.py`. The module also ships the browser client (`public/js/sumo-client.js`) and the pre-computed SUMO replays the page falls back to whenever a live cloud run is unavailable.
 
-- **C（默认、必须有）**：预先跑好的结果放 `public/baked/`（线上 `/sumo/public/baked/…`，`tools/bake.py` 生成），网页经 `public/js/sumo-client.js` 调用；云端没开 / 连不上 / 在启动 / 限流 / 忙 / 超时 / 运行失败都回它，并标「预先跑好」。
-- **B（加分）**：本目录的 Worker + 容器，只开 **1 个** standard-2 实例（1 vCPU / 6 GiB）。页面**不许依赖它**：挂了自动回 C。
-- **实网（T40，contract v2）**：`POST /runs` 带 `"network":"real"` 就在**真实 CBD 路网**（`apps/roads/public/cbd/` 的 OSM 路网 + SCATS 路口 + SCATS 08:00 流量）上跑 `baseline` / `original` / `ai` 三个情景（`apps/web/tools/sumo/build_real.py`）；不带 `network` 或 `"synthetic"` 还是原来的 2×2。预跑的实网结果在 `public/real/`。
+SUMO is a **model cross-check** of the traffic engine on the real CBD street network, with assumed signal timing and turn shares. It does not validate or prove the engine's numbers.
 
-## 部署（只有 lead，在自己的 Mac 上）
+> **Status: decommissioned after the hackathon.** The `hackathon-sumo` Worker and its container were deleted after FEIT Hackathon Festival 2026. On the live site, `/api/sumo/v1/*` returns `502 sumo_down`, and the page replays the pre-computed real-network run in `public/real/`. The code, image definition and tests are kept so the service can be redeployed; see [Redeploying](#redeploying).
 
-> 🔒 不走 `scripts/deploy.sh`：`sumo` 故意**不在** `hackathon.conf` 的 `DEPLOY_MODULES` 里 —— 镜像要 Docker 构建，没 Docker 的机器跑 `deploy.sh all` 会直接失败。
-> 高h 的 Workers Editor 角色**不能新建 Worker**，第一次部署必须 lead 来；之后镜像有改动也由 lead 部署。
+## Post-event status
 
-前置：账号已升级 Workers Paid（没升级时 `npx wrangler containers list` 报「requires the Workers Paid plan」）。
+| Part | State |
+|---|---|
+| Worker `hackathon-sumo` + container `SumoContainer` | deleted |
+| `GET /api/sumo/v1/health` on the live site | `502 {"ok":false,"error":"sumo_down","msg":…}`, answered by the site Worker's catch branch because its `SUMO` binding now points at a missing Worker |
+| `/sumo/public/js/sumo-client.js`, `/sumo/public/real/*`, `/sumo/public/baked/*` | served as static assets by the site Worker (HTTP 200) |
+| `bash apps/sumo/test.sh` | runs offline (no Docker, no npm install, no network): 396 passed |
 
-```bash
-colima start --vm-type vz --vz-rosetta     # Docker；Cloudflare 只跑 linux/amd64，Apple 芯片靠 Rosetta 转译构建
-docker info > /dev/null && echo docker ok
-cd apps/sumo && npm ci                      # wrangler 4.143.0 + @cloudflare/containers，版本锁死在 package-lock.json
-npx wrangler whoami                         # 确认是 lead 的账号
-npx wrangler deploy                         # 构建镜像（首次约 1–2 分钟，约 290 MB）→ 推到 Cloudflare 的镜像仓库 → 上线 Worker
-npx wrangler containers list                # 看容器应用的状态
+What the workbench does now:
+
+- **Step 02 (Simulate).** `runReal()` gets `502 sumo_down` from the health check, so it returns `{source:'baked', reason:'health_down', detail:'sumo_down'}` with the seed-42 replay from `public/real/`. The pill reads "SUMO · pre-computed (cloud unavailable) · seed 42" with the reason "Cloud SUMO is unreachable". Choosing another seed still shows the seed-42 replay, labelled seed 42.
+- **Step 03 (Impact).** Shows the same run, labelled pre-computed.
+- **Step 04 (Compare).** `runOptions()` has **no pre-computed fallback**, so it returns `source:'none'`; the per-plan SUMO cells show "—" with the reason. The background prefetch of the options run only follows a live step 02 run, so it never fires.
+- The synthetic 2×2 replays in `public/baked/` are not used by the current UI; only the legacy `run()` / `bakedFor()` API reads them.
+
+The live `502` body still carries the original Chinese `msg` text, because the site Worker has not been redeployed since the event. Clients should rely on `error`, never on `msg`.
+
+> **Redeploy hazard.** `apps/site/wrangler.jsonc` still binds `SUMO` → `hackathon-sumo`. Redeploying the site while that Worker does not exist is expected to fail with "Could not resolve service binding". Either redeploy `hackathon-sumo` first, or remove the binding and, in the same commit, relax `apps/site/tests/config.test.mjs` (which requires exactly the `API` and `SUMO` bindings) and `apps/sumo/tests/config.test.mjs` (which checks the binding name). Without the binding the site answers `503 sumo_off`, which the client treats like `sumo_down`.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  B["Browser<br/>apps/web + sumo-client.js"] -->|"/api/sumo/v1/*"| S["hackathon-site Worker<br/>(apps/site)"]
+  B -->|"/sumo/public/real/*<br/>/sumo/public/baked/*"| S
+  S -.->|"service binding SUMO"| W["hackathon-sumo Worker<br/>src/worker.js + src/proxy.js"]
+  W -.->|"getContainer(…, 'main')"| C["SumoContainer<br/>Durable Object + Container<br/>standard-4, max 1 instance"]
+  C -.-> P["serve.py /sumo/v1/*"]
+  P -.-> D["build_demo.py<br/>synthetic 2×2"]
+  P -.-> R["build_real.py<br/>real CBD network"]
+  D -.-> N["native sumo / netconvert 1.27.1"]
+  R -.-> N
 ```
 
-- **第一次部署后要等几分钟**：Worker 先上线，容器还在供应；这期间 `/api/sumo/v1/*` 回 `503 sumo_starting`，页面照常用预跑结果。
-- **然后才部署 site**（它的 `SUMO` 服务绑定要求 `hackathon-sumo` 已存在，否则报 Could not resolve service binding）：高h 照常 `bash scripts/deploy.sh all`。
-- **冒烟**（评审前也这样预热一次：容器冷启动几秒，醒着 12 h）：
+Dashed links: deleted after the event. The static replays are served by the site Worker, which copies `apps/sumo/public/` to `/sumo/public/` at build time (`apps/site/build.mjs`).
 
-```bash
-curl -s https://hackathon-site.zemmmeng.workers.dev/api/sumo/v1/health    # {"version":1,"engine":"Eclipse SUMO sumo 1.27.1","status":"ready","active_jobs":0}
-curl -s -X POST -H 'content-type: application/json' --data '{}' https://hackathon-site.zemmmeng.workers.dev/api/sumo/v1/runs   # 202 + id
-curl -s https://hackathon-site.zemmmeng.workers.dev/api/sumo/v1/runs/<id>  # queued → running → complete（1 vCPU 上约 10–20 s）
-# 实网（三个情景）：
-curl -s -X POST -H 'content-type: application/json' --data '{"network":"real"}' https://hackathon-site.zemmmeng.workers.dev/api/sumo/v1/runs
-curl -s https://hackathon-site.zemmmeng.workers.dev/api/sumo/v1/runs/<id>/index.json   # complete 以后；再读 <baseline|original|ai>/manifest.json、frames-NNN.json
+- **Same origin only.** The Worker has no `workers.dev` URL (`workers_dev: false`, `preview_urls: false`); the only way in is the site's service binding, so no CORS is needed.
+- **One instance.** serve.py keeps job state in memory and on the container's ephemeral disk, so the Worker always addresses `getContainer(env.SUMO_CONTAINER, 'main')` and `wrangler.jsonc` pins `max_instances: 1`.
+- **Container.** `standard-4` (4 vCPU / 12 GiB / 20 GB disk, the largest Cloudflare instance type at the time) with `sleepAfter = '12h'`; `/data` is ephemeral and wiped on sleep, restart or redeploy. The instance type was raised to 4 vCPU so the scenarios of the full one-hour run can execute in parallel (`SUMO_REAL_JOBS=4`).
+- **Edge logic in `proxy.js`.** It imports no Cloudflare module, so Node tests it directly. `worker.js` is a short shell that may export only `default` and the Durable Object class, because workerd treats every named export as an entrypoint.
+
+A run, as the client drives it:
+
+```mermaid
+sequenceDiagram
+  participant Page as Page (sumo-client.js)
+  participant W as hackathon-sumo (proxy.js)
+  participant C as serve.py (container)
+  Page->>W: GET /health
+  W->>C: GET /sumo/v1/health
+  C-->>Page: 200 {status:"ready", active_jobs, networks}
+  Page->>W: POST /runs {network:"real", seed, p_original, p_ai}
+  Note over W: body ≤ 2 KB → 3 POST/min/IP → busy gate (active_jobs below 2)
+  W->>C: POST /sumo/v1/runs
+  C-->>Page: 202 {id, status:"queued"}
+  loop every 1 s
+    Page->>W: GET /runs/{id}
+    W-->>Page: queued | running | complete | failed
+  end
+  Page->>W: GET /runs/{id}/index.json, {scenario}/manifest.json, frames-NNN.json
+  W-->>Page: 200, cached for a day; chunk SHA-256 checked in the browser
+  Note over Page: any failure → fallback with a reason code (baked replay, or source 'none')
 ```
 
-- 日志：`npx wrangler tail hackathon-sumo`，或 Cloudflare 后台 Workers Logs（容器启动 / 停止、转发出错都会打）。
+The site Worker sits between the page and `hackathon-sumo` and forwards `/api/sumo` and `/api/sumo/*` unchanged.
 
-### 费用（D-09 记账）
+## Simulation modes
 
-Workers Paid **US$5/月** + 容器按醒着的时间计费：standard-2 约 **US$0.05/h**（内存 6 GiB + 盘；CPU 只在跑 SUMO 时另算，100 次运行也在每月赠送额度内）。`sleepAfter` 是 12 h，醒满 48 h 约 US$2–3。**决赛后 lead 退订 Workers Paid。**
+Model details, assumptions and measured results are in [`apps/web/tools/sumo/README.md`](../web/tools/sumo/README.md); the method is summarised in [`docs/architecture/traffic-simulation.md`](../../docs/architecture/traffic-simulation.md).
 
-### 关掉（kill switch）
+**Synthetic 2×2 grid** (default; `network` absent or `"synthetic"`). Four junctions with assumed geometry, not Melbourne. Scenarios `baseline` / `closure` / `guided` / `footpath` (`baseline` is always added). Parameters: `seed` (integer 0–2147483647, default 42), `scenarios`, `demand_duration_s` (10–600, default 600), `clearance_s` (600–2400, default 1200), `demand_scale` (0.1–1.2, default 1.0), `diversion_share` (0–1, default 0.45).
 
-1. **只关现场、保留预跑**：删掉 `apps/site/wrangler.jsonc` 里的 `SUMO` 绑定，重新部署 site → `/api/sumo/*` 回 `503 sumo_off`，页面自动用预跑结果。⚠️ `apps/site/tests/config.test.mjs`（要求正好 API、SUMO 两个绑定）和 `tests/config.test.mjs`（查 site 的 `SUMO` 绑定名）会因此变红，`deploy.sh` 的 [5/6] 全量 check 就拒绝部署：同一个提交里要把这两处断言一起放宽。
-2. **评审结束后彻底删**：先做第 1 步，再 `cd apps/sumo && npx wrangler delete`（Worker + Durable Object）；`npx wrangler containers list` 里还有 `hackathon-sumo-sumocontainer` 就 `npx wrangler containers delete <ID>`，`npx wrangler containers images list` 里的镜像用 `npx wrangler containers images delete <image>` 删；最后退订。
+**Real CBD network** (`"network":"real"`, contract v2). OSM `network.json`, SCATS `signals.json` and weekday 08:00–09:00 `flows.json` from `apps/roads/public/cbd/`, with demand fitted by SUMO's routeSampler; cars only. The network starts empty at 07:57 (warm-up, not shown); from 08:00 the right lane of Lonsdale St westbound (link `l595594354_9756035316`) is closed; 08:00–09:00 is shown and measured. Scenarios:
 
-## 怎么跑（本机）
+| id | Diversion share | Meaning |
+|---|---|---|
+| `baseline` | 0 | no works (metrics only, no frames) |
+| `original` | `p_original`, default 0.14 | the engine's reading of the sign "ROADWORK AHEAD" |
+| `ai` | `p_ai`, default 0.53 | the engine's reading of "USE RUSSELL / SAVE 9 MIN" |
+
+**Options mode** (`"network":"real"` + `options`). Same network and works; each plan changes only the diversion share. `options` is 1–5 items `{id, p}` with a unique `id` in A–E and `p` in 0–1; `frames` defaults to `false` (metrics only); it cannot be combined with `p_original`, `p_ai` or `scenarios` (400 `bad_config`). A job runs `baseline` + `opt-<id>`; options with equal `p` run once and are copied with `reused_from`. Step 04 of the workbench sends plans A (no VMS), B (two VMS showing the delay) and C (one VMS naming the detour), with `p` taken from the engine's reading of each plan's signs.
+
+### Seeds and reproducibility
+
+- Seed range 0–2147483647, default 42. Pre-computed copies exist only for seed 42.
+- Departures are Poisson arrivals drawn from the seed, and the diversion draw uses a second seeded generator shared across scenarios (common random numbers), so `baseline`, `original` and `ai` simulate the same vehicles and differences come from the treatment. Candidate routes and routeSampler use a fixed seed (7) inside the cached demand.
+- Results depend on the platform: routeSampler picks different demand on macOS and Linux, so replays are baked in the linux/amd64 image. Every output records `generator_sha256`, the SHA-256 of the generator script (see [Provenance](#provenance)).
+
+## HTTP API (`/api/sumo/v1`)
+
+The full contract (fields of `index.json`, manifests and frame chunks, formats v1 / v2) is in [`docs/reference/interfaces.md`](../../docs/reference/interfaces.md). Only these paths exist; anything else is `404 not_found` and never wakes the container.
+
+| Method | Path (prefix `/api/sumo/v1`) | Cache-Control |
+|---|---|---|
+| GET / HEAD | `/health` (passed through byte for byte) | `no-store` |
+| POST | `/runs` (body ≤ 2,048 bytes; per-IP rate limit, then the busy gate) | `no-store` |
+| GET / HEAD | `/runs/<32 lower-case hex>` (job status; its `result` field is the container path `/sumo/v1/…`, so build URLs from `id`) | `no-store` |
+| GET / HEAD | `/runs/<id>/index.json` and `/runs/<id>/<scenario>/<manifest\|frames-NNN>.json`, where `<scenario>` is `baseline\|closure\|guided\|footpath\|original\|ai\|opt-A`…`opt-E` and `NNN` exactly three digits | `public, max-age=86400, immutable` on 200 |
+| GET / HEAD | `/runs/<id>/frame?scenario=…&t=…` (the only route that keeps its query string; synthetic runs only, real-network runs answer 404) | `no-store` |
+
+Request bodies:
+
+```jsonc
+{}                                                                   // synthetic 2×2, all defaults
+{"seed": 7, "diversion_share": 0.3, "demand_scale": 1.2}             // synthetic 2×2
+{"network": "real", "seed": 42, "p_original": 0.14, "p_ai": 0.53}    // real network: baseline + original + ai
+{"network": "real", "seed": 42, "options": [{"id": "A", "p": 0.14}, {"id": "B", "p": 0.14}, {"id": "C", "p": 0.607}]}  // options mode
+```
+
+Responses:
+
+- `GET /health` → `{"version":1,"engine":"Eclipse SUMO sumo 1.27.1","status":"ready","active_jobs":0,"networks":["synthetic","real"]}` (`networks` lists only what the image can run).
+- `POST /runs` → `202 {"version":1,"id":"<32 hex>","status":"queued","created_at":…,"config":{…}}`.
+- `GET /runs/<id>` → `{id, status: queued|running|complete|failed, config, result?, error?, created_at, updated_at}`. Only the newest 20 finished runs are kept.
+
+Errors are always `{ "ok": false, "error": "<code>", "msg": "<explanation>" }`:
+
+| Status | `error` | When |
+|---|---|---|
+| 404 | `not_found` | path not whitelisted (container untouched), or no such run / file (every old run id is a 404 after a container restart) |
+| 405 | `method_not_allowed` | wrong method; carries an `Allow` header |
+| 413 | `too_big` | POST body over 2,048 bytes |
+| 429 | `sumo_rate` | 4th POST from the same IP within a minute (`Retry-After: 60`) |
+| 429 | `sumo_busy` | the container already has 2 or more jobs (`Retry-After: 15`) |
+| 503 | `sumo_starting` | the container is provisioning, starting or its port is not ready yet (`Retry-After: 10`) |
+| 502 | `sumo_down` | the container is unreachable, disconnected or threw, or answered a 5xx not in the repo format |
+| 409 / 4xx | `not_ready` / `bad_request` | legacy `{error:"…"}` container errors, translated by status (409 → `not_ready`, other 4xx → `bad_request`) |
+| as sent | `bad_config`, `bad_json`, `sumo_error`, … | serve.py errors already in the repo format pass through with their status (e.g. `400 bad_config`, `500 sumo_error`; full list in `apps/web/tools/sumo/README.md`) |
+| 503 | `sumo_off` | from the site Worker when no `SUMO` binding exists |
+
+Wrapper errors from `@cloudflare/containers` are plain text; `proxy.js` classifies them (`STARTING_RE`) into `sumo_starting` or `sumo_down` and never forwards their internals. serve.py's English detail is appended to `msg` in brackets for diagnosis.
+
+## Cost and abuse controls
+
+The container was a single paid instance, so every layer limits how often it can be woken or kept busy:
+
+- **Fail-closed whitelist.** One regex table (`ROUTES` in `src/proxy.js`); unknown, traversal (`..`, `%2e%2e`, `%2f`) and wrong-case paths get 404 and wrong methods get 405 *before* `getStub()` is called, so probes cannot wake or bill the container. `tests/worker.test.mjs` checks about 33 hostile paths.
+- **Body cap.** 2,048 bytes, counted while streaming, so chunked uploads without `Content-Length` are caught too (serve.py has its own 16 KB cap).
+- **Rate limit.** Workers Rate Limiting binding `SUMO_RL`: 3 POSTs per `CF-Connecting-IP` per 60 s (namespace `3501`). It is counted per Cloudflare location and eventually consistent; if the limiter itself errors, the request is let through.
+- **Busy gate.** Before forwarding a POST, the Worker reads the container's own `active_jobs` from `/health` and answers `429 sumo_busy` at 2 or more.
+- **Queue.** serve.py runs one job at a time with at most 4 unfinished jobs, and keeps only the newest 20 runs (`SUMO_KEEP_RUNS`).
+- **Header stripping.** `Origin`, `Cookie` and `Authorization` never reach the container; the container's own response headers (e.g. `Server`) are not passed back.
+- **Caching.** Run ids are random and outputs are immutable once complete, so a 200 for `index.json`, a manifest or a frame chunk is cached for a day; status, health and errors are `no-store`.
+- **Sizing.** `max_instances: 1`, `sleepAfter = '12h'` (kept awake through judging; billed while awake).
+
+Cost during the event: Workers Paid (US$5 per month) plus container time while awake. The team set a total budget of US$20 and estimated about US$1.5–3 of container time up to the end of judging. With the Worker and container deleted, no container time accrues.
+
+## Browser client (`public/js/sumo-client.js`)
+
+An ES module with no dependencies that runs in the browser and in Node (pass `fetch` and absolute URLs in Node). It is the page's only entry point to SUMO.
+
+```js
+import { createSumoClient, realSourceLabel, reasonLabel } from '/sumo/public/js/sumo-client.js';
+const sumo = createSumoClient();   // { base: '/api/sumo/v1', baked: '/sumo/public/baked', real: '/sumo/public/real', timeoutMs: 45000, pollMs: 1000 }
+const r = await sumo.runReal({ seed: 42, p_original: 0.14, p_ai: 0.53 }, { onStatus, signal });
+realSourceLabel(r, 'en');          // 'Cloud · live · 31.4 s' or 'SUMO · pre-computed'
+if (r.reason) reasonLabel(r.reason, 'en');   // e.g. 'Cloud SUMO is unreachable'
+const m = await sumo.realManifest(r, 'original');
+const c = await sumo.realChunk(r, 'original', m.chunks[0]);   // SHA-256 checked against the manifest
+```
+
+Every result carries `source`: `'live'`, `'baked'` or `'none'`, plus a `reason` code when it is not live. A pre-computed result is never labelled live, even if the file claims `source:'live'` or carries `elapsedMs` / `runId`; the tests assert this in reverse.
+
+| Method | Live path | Fallback | Time limit |
+|---|---|---|---|
+| `runReal(params, {onStatus, signal, timeoutMs})` | health → POST → poll → `index.json` | `public/real/` (seed 42), `source:'baked'` | 180 s (health check 12 s) |
+| `runOptions(options, {seed, onStatus, signal, timeoutMs})` | same, options body | none: `source:'none'`, `index:null` | 180 s (health check 12 s) |
+| `run(params, {onStatus, signal})` (legacy, synthetic) | same | nearest grid point in `public/baked/` (`exact`, `failedExact`) | 45 s (health check 6 s) |
+| `loadReal()`, `realManifest()`, `realChunk()` | — | static files in `public/real/`, or the live run's outputs | 20 s per file |
+
+Reason codes: `health_down`, `sumo_off`, `sumo_down`, `sumo_starting`, `sumo_rate`, `sumo_busy`, `sumo_failed`, `timeout`, `network`, `not_found`, `cancelled`, `too_big`, `bad_params`, `bad_response`, `bad_chunk`. For the real network every health failure is reported as `health_down`, with the specific cause in `detail`. Cancelling via `signal` returns the fallback with `reason:'cancelled'`.
+
+`labels` (synthetic) and `realLabels` (real network) are frozen bilingual tables (`zh` / `en`) of status texts and the caveats that must be shown alongside a result; `sourceLabel`, `realSourceLabel` and `reasonLabel` default to `'zh'`, and the web always passes the current UI language.
+
+## Pre-computed replays
+
+| Directory | Contents | Used by |
+|---|---|---|
+| `public/real/` | 64 files, about 30 MB. Real CBD network (contract v2), seed 42, baked on linux/amd64: `index.json`, `baseline/manifest.json` (metrics only, `chunks: []`), and `original/`, `ai/` each with a manifest + 30 two-minute frame chunks (2 s sampling). Rows are `[i, lon_e6, lat_e6, angle_deg, speed_cms]` plus signal strings and the queue length. | step 02 / 03 fallback (`runReal`, `loadReal`) |
+| `public/baked/` | 101 files, about 21 MB. Synthetic 2×2 (contract v1, local metres): `baked.json` catalogue; `preset/` (seed 42 defaults: index + 4 scenarios × manifest + 20 frame chunks); `grid/` (15 index-only points: diversion {0, 0.15, 0.3, 0.45, 0.6} × demand {0.8, 1.0, 1.2}). | legacy `run()` / `bakedFor()` only |
+
+Both are generated files; do not edit them by hand.
+
+- **Re-bake `public/real/`** with `build_real.py` inside the linux/amd64 image; the exact commands are in [`apps/web/tools/sumo/README.md`](../web/tools/sumo/README.md#re-baking-the-replay).
+- **Re-bake `public/baked/`** against any running API (a local `serve.py` or container):
+
+  ```bash
+  python3 apps/sumo/tools/bake.py --base http://127.0.0.1:8021/sumo/v1 --source docker-linux-amd64   # add --dry-run to print the plan only
+  ```
+
+  `bake.py` (Python ≥ 3.9, standard library only) submits one job at a time, retries 429 / 5xx, verifies every chunk's SHA-256, byte count and frame count, records failed grid points with `error_kind` `sumo` or `service` instead of skipping or inventing them, and swaps the output directory in atomically. Exit codes: 0 written; 1 nothing written; 2 written, but some grid points failed for service reasons (re-run with `--only grid`).
+
+### Provenance
+
+- `public/real/index.json` records `generator_sha256` = SHA-256 of `apps/web/tools/sumo/build_real.py`. `apps/web/tests/test_sumo_real.py` fails if `build_real.py` changes without a re-bake, so even a comment edit to it needs a new bake.
+- `public/baked/` records `generator_sha256` = SHA-256 of `apps/web/tools/sumo/build_demo.py`, plus the engine and `source` (`docker-linux-amd64`, generated 2026-09-30). `bake.py` refuses to merge runs from different generators or engines.
+- The container's real-network cache (`SUMO_REAL_CACHE`) is keyed on `build_real.py`, the three input files, the SUMO version and the signal 2935 green share.
+
+## Container image (`Dockerfile`)
+
+`python:3.12-slim` (linux/amd64) + X11 / GL / libatomic runtime libraries + `eclipse-sumo==1.27.1` / `sumolib==1.27.1` + `numpy==2.2.6` / `scipy==1.15.3` + the three real-network inputs from `apps/roads/public/cbd/`. The build context is `apps/` (`image_build_context: ".."`), and the image mirrors the repo layout (`/app/web/tools/sumo`, `/app/roads/public/cbd`). The image is about 290 MB; the first build takes 1–2 minutes.
+
+The build fails early, instead of after a deploy, if any of these checks fails:
+
+1. `ldd` finds a missing shared library for `sumo` or `netconvert` (this is how the missing `libatomic1` was found).
+2. `sumo --version` is not `Eclipse SUMO sumo 1.27.1`, or `netconvert`, `routeSampler.py`, `numpy` or `scipy.optimize` is missing.
+3. A minimal end-to-end synthetic run (`build_demo.py --scenarios closure --demand-duration-s 60 --clearance-s 600`) does not produce `index.json`.
+4. `build_real` cannot be imported or its parameter validation fails; then `build_real.py --prepare-only` pre-builds the real-network cache (netconvert + routeSampler) into the image, so each live run only runs `sumo`.
+
+Environment: `HOST=0.0.0.0 PORT=8080 SUMO_DATA_DIR=/data SUMO_KEEP_RUNS=20 SUMO_REAL_JOBS=4` (identical to `CONTAINER_ENV` in `src/proxy.js`, which `worker.js` passes as `envVars`; the tests enforce this), plus `SUMO_ROADS_DIR=/app/roads/public/cbd` and `SUMO_REAL_CACHE=/app/real-cache`. `ALLOW_ORIGINS`, `SUMO_API_KEY` and `SUMO_POSTS_PER_MIN` are deliberately unset: the Worker strips `Origin` and rate-limits per viewer IP. serve.py handles `SIGTERM` (running job finishes, queued jobs are dropped). The `HEALTHCHECK` is for local `docker run` only; Cloudflare probes `SumoContainer.pingEndpoint`.
+
+To run every build-time check without deploying (needs Docker):
 
 ```bash
-cd apps/sumo && npm ci && npm run dev       # = wrangler dev --port 8791：要 Docker；本机构建镜像并在 Docker 里跑容器
+cd apps/sumo && npx wrangler deploy --dry-run --outdir .wrangler/dry-run
+```
+
+## Local development
+
+```bash
+bash apps/sumo/test.sh                     # offline tests; needs Node ≥ 20.6
+
+# Worker + container locally (needs Docker; on Apple silicon: colima start --vm-type vz --vz-rosetta)
+cd apps/sumo && npm ci && npm run dev      # = wrangler dev --port 8791
 curl -s http://localhost:8791/api/sumo/v1/health
+
+# Container only, no Worker (build context is apps/, not apps/web; no /api prefix, whitelist or rate limit)
+docker build --platform linux/amd64 -f apps/sumo/Dockerfile -t hackathon-sumo:dev apps
+docker run --rm -p 8792:8080 hackathon-sumo:dev
+curl http://localhost:8792/sumo/v1/health
+curl -s -X POST -H 'content-type: application/json' --data '{"network":"real"}' http://localhost:8792/sumo/v1/runs
 ```
 
-只想跑容器、不要 Worker（构建上下文是 `apps/`，不是 `apps/web`）：`docker build --platform linux/amd64 -f apps/sumo/Dockerfile -t hackathon-sumo:dev apps && docker run --rm -p 8792:8080 hackathon-sumo:dev`，然后 `curl http://localhost:8792/sumo/v1/health`（注意没有 `/api` 前缀，也没有白名单和限流）。实网冒烟：`curl -s -X POST -H 'content-type: application/json' --data '{"network":"real"}' http://localhost:8792/sumo/v1/runs`。
+Without Docker, run `serve.py` from a virtual environment as described in [`apps/web/tools/sumo/README.md`](../web/tools/sumo/README.md#running-locally) (real-network results on macOS differ from the linux/amd64 bake).
 
-## 怎么测
+## Redeploying
+
+`sumo` is deliberately **not** in `DEPLOY_MODULES` in `hackathon.conf`: the image needs Docker, so `bash scripts/deploy.sh all` would fail on a machine without it. The Worker is deployed by hand. Deployment topology and the rest of the post-event status are described in [`docs/architecture/deployment.md`](../../docs/architecture/deployment.md).
+
+Prerequisites: a Cloudflare account on Workers Paid (Containers require it; on the free plan `npx wrangler containers list` reports that it requires the Workers Paid plan) and Docker with BuildKit.
 
 ```bash
-bash apps/sumo/test.sh      # 最后一行「N passed, M failed」；不需要 npm i、不需要 Docker、不联网
+colima start --vm-type vz --vz-rosetta     # Docker; Cloudflare runs linux/amd64 only, Apple silicon builds through Rosetta
+docker info > /dev/null && echo docker ok
+cd apps/sumo && npm ci                     # wrangler 4.143.0 + @cloudflare/containers 0.3.7, pinned in package-lock.json
+npx wrangler whoami                        # confirm the account
+npx wrangler deploy                        # builds the image, pushes it to Cloudflare's registry, deploys the Worker
+npx wrangler containers list               # container application status
 ```
 
-| 测试 | 查什么 |
-|---|---|
-| `tests/worker.test.mjs` | 假容器 + 假限流器测 `proxy.js` / `worker.js`：白名单、只有 `/runs` 收 POST、删头、路径改写、缓存头、限流、忙闸、每个错误码；`worker.js` 只导出 `default` 和 `SumoContainer`（用 `node:module` 钩子把 `@cloudflare/containers` 换成 `tests/fake-containers.mjs`） |
-| `tests/config.test.mjs` | `wrangler.jsonc`（standard-2、`max_instances` 1、`workers_dev` false、构建上下文 `..`、DO 绑定 + migration、限流 3 / 60 s）、`Dockerfile`（COPY 的文件都在 `apps/` 下、实网的 `build_real.py` + roads 三个 JSON 进镜像、`SUMO_ROADS_DIR` 指对、numpy / scipy 锁版本、ENV 和 `envVars` 一致、构建自检参数在公开范围内）、`package.json` / lock、site 的 `SUMO` 绑定名、`sumo` 不在 `DEPLOY_MODULES` |
-| `tests/client.test.mjs` | `public/js/sumo-client.js`（另见文件头） |
+1. Wait a few minutes after the first deploy: the Worker is live while the container is still provisioning, and `/api/sumo/v1/*` answers `503 sumo_starting` in the meantime (the page keeps using the pre-computed results).
+2. Then deploy the site (`bash scripts/deploy.sh all`); its `SUMO` service binding requires `hackathon-sumo` to exist.
+3. Smoke test (also a good way to warm the container before a demo; it stays awake for 12 h):
 
-改了 `Dockerfile` 或 `apps/web/tools/sumo/` 以后，再跑一次 `npx wrangler deploy --dry-run --outdir .wrangler/dry-run`（要 Docker）：它会真的构建镜像，构建时自带 `ldd` 缺库检查、SUMO 版本检查和一次最小的端到端运行。
+   ```bash
+   curl -s https://<site>/api/sumo/v1/health
+   curl -s -X POST -H 'content-type: application/json' --data '{"network":"real"}' https://<site>/api/sumo/v1/runs   # 202 + id
+   curl -s https://<site>/api/sumo/v1/runs/<id>             # queued → running → complete (a real-network run took about 40–60 s in the cloud)
+   curl -s https://<site>/api/sumo/v1/runs/<id>/index.json  # then <baseline|original|ai>/manifest.json and frames-NNN.json
+   ```
 
-## 对外接口（→ `docs/contract.md` §HTTP API `/api/sumo/v1/*`）
+Logs: `npx wrangler tail hackathon-sumo`, or Workers Logs in the Cloudflare dashboard (container start / stop and forwarding errors are logged).
 
-对外只有这些（别的一律 `404 not_found`，不唤醒容器）：
+The Worker name is `hackathon-sumo` in `wrangler.jsonc` and in the site's `services` binding; rename both together.
 
-| 方法 | 路径（前缀 `/api/sumo/v1`） | 缓存 |
+### Decommissioning (what was done)
+
+After the event the Worker and the container were deleted (`cd apps/sumo && npx wrangler delete` removes the Worker and its Durable Object; `npx wrangler containers delete <ID>` and `npx wrangler containers images delete <image>` remove the container application and image). The first step of the original kill switch, removing the `SUMO` binding from `apps/site/wrangler.jsonc` so `/api/sumo/*` answers `503 sumo_off`, was not done; see the redeploy hazard under [Post-event status](#post-event-status).
+
+## Testing
+
+```bash
+bash apps/sumo/test.sh      # last line "N passed, M failed"; no npm install, no Docker, no network
+```
+
+Plain Node ESM test files with a small `ok()` harness; `test.sh` runs each with a 60 s limit and sums the counts for `scripts/check.sh`.
+
+| File | Assertions | What it checks |
 |---|---|---|
-| GET / HEAD | `/health`（容器原样透传，一个字段都不加） | `no-store` |
-| POST | `/runs`（body ≤ 2048 字节；先按 IP 限流，再过忙闸） | `no-store` |
-| GET / HEAD | `/runs/<32 位小写 hex>`（状态；`result` 字段是容器内路径 `/sumo/v1/…`，拼地址请用 `id`） | `no-store` |
-| GET / HEAD | `/runs/<id>/index.json`、`/runs/<id>/<baseline\|closure\|guided\|footpath>/<manifest\|frames-NNN>.json`；实网运行是 `<baseline\|original\|ai>/…`（容器已认，Worker 白名单见 `src/proxy.js`） | 200 时 `public, max-age=86400, immutable` |
-| GET / HEAD | `/runs/<id>/frame?scenario=…&t=…`（只有它带查询串过去；只给 2×2，实网运行回 404） | `no-store` |
+| `tests/worker.test.mjs` | 153 | `proxy.js` / `worker.js` against a fake container and a fake rate limiter: whitelist rewrites, ~33 rejected paths that never reach the container, 405 + `Allow`, header stripping, cache headers, health passthrough, the POST pipeline (body cap including chunked uploads, rate limit keyed on `CF-Connecting-IP`, fail-open limiter, busy gate), 15 error-mapping cases without leaking internals, options-mode routes; `worker.js` exports only `default` and `SumoContainer` (`@cloudflare/containers` is swapped for `tests/fake-containers.mjs` through a `node:module` hook) |
+| `tests/config.test.mjs` | 41 | `wrangler.jsonc` (`standard-4`, `max_instances` 1, `workers_dev` / `preview_urls` false, build context `..`, DO binding + migration, rate limit 3 / 60 s), the `Dockerfile` (COPY sources exist, real-network inputs present, `SUMO_ROADS_DIR`, pinned numpy / scipy, ENV equals `CONTAINER_ENV`, build-time checks within the public parameter ranges), `package.json` / lock pins equal to the site's wrangler version, the site's `SUMO` binding, `sumo` absent from `DEPLOY_MODULES`, this README's owner line, the `apps/README.md` registry row and `CODEOWNERS` |
+| `tests/client.test.mjs` | 202 | `sumo-client.js` with a fake `fetch`: live path, every fallback reason, nearest-grid selection, SHA-256 checks (and graceful skip without WebCrypto), the never-label-baked-as-live rule, `runReal` / `loadReal` / `realManifest` / `realChunk`, `runOptions` (13 invalid inputs, 11 failure modes), bilingual labels |
 
-- 转发前删掉 `Origin`、`Cookie`、`Authorization`（容器的 `ALLOW_ORIGINS` 是空的，带 Origin 会 403）。
-- 错误一律 `{ ok:false, error, msg }`：
+Related tests outside this module: `python3 apps/web/tests/test_sumo_real.py` (shape, ranges and generator hash of `public/real/`), `python3 apps/web/tests/test_sumo_backend.py` (serve.py) and `bash apps/site/test.sh` (the `SUMO` binding and forwarding).
 
-| 状态 | `error` | 什么时候 |
-|---|---|---|
-| 404 | `not_found` | 不在白名单；或容器说没有这个运行（容器重启后旧 id 全部 404） |
-| 405 | `method_not_allowed` | 方法不对（带 `Allow` 头） |
-| 413 | `too_big` | POST 请求体 > 2048 字节 |
-| 429 | `sumo_rate` | 同一 IP 一分钟内第 4 次 POST（`Retry-After: 60`） |
-| 429 | `sumo_busy` | 容器里已有 ≥ 2 个任务（`Retry-After: 15`） |
-| 503 | `sumo_starting` | 容器还在供应 / 启动 / 端口没就绪（`Retry-After: 10`） |
-| 502 | `sumo_down` | 容器连不上、断线、抛错，或容器回了不是仓库格式的 5xx（serve.py 自己的 `500 sumo_error` 是仓库格式，按下一行原样给） |
-| 409 / 400 | `not_ready` / `bad_request` | 容器的旧格式报错按状态码翻译；serve.py 已经回 `{ ok:false, error, msg }` 的（如 `400 bad_config`、`500 sumo_error`，码表见 `apps/web/tools/sumo/README.md`）连状态码原样给 |
+## Design notes
 
-## 结构
+- `src/worker.js` exports nothing except `default` and `SumoContainer`; put any other function in `proxy.js`.
+- Always use the single instance `getContainer(env.SUMO_CONTAINER, 'main')`: a second instance could not see the first one's runs.
+- Change container environment variables in both `CONTAINER_ENV` (`src/proxy.js`) and the `ENV` line of the `Dockerfile`; `tests/config.test.mjs` checks they match.
+- 404 and 405 are answered before the container is fetched, so random paths never wake it.
+- Results are labelled by where they came from, never by what the page hoped for: `source` decides the label, and options mode has no fake fallback.
 
-| 文件 | 一句话 |
+## Project layout
+
+| Path | Role |
 |---|---|
-| `wrangler.jsonc` | Worker `hackathon-sumo`：容器（standard-2、最多 1 个实例、构建上下文 `..` = `apps/`）、DO 绑定 `SUMO_CONTAINER`、migration v1、限流 `SUMO_RL` |
-| `Dockerfile` | python:3.12-slim + `eclipse-sumo==1.27.1` + numpy / scipy + X11/GL/libatomic 运行库 + roads 的 network / signals / flows（`SUMO_ROADS_DIR`）；镜像里按仓库原样摆 `web/tools/sumo/`、`roads/public/cbd/`；构建时查缺库、版本、跑一次最小 2×2 仿真、查 build_real 能 import |
-| `src/worker.js` | 入口：`SumoContainer`（端口 8080、`sleepAfter` 12h、环境变量）+ `default.fetch` 把请求交给 `proxy.js` |
-| `src/proxy.js` | 白名单、删头、限流、忙闸、错误码、缓存头；不 import Cloudflare 模块，node 里能直接测 |
-| `tests/fake-containers.mjs` | 测试用的假 `@cloudflare/containers` |
-| `public/`、`tools/bake.py` | 兜底 C：预跑结果和网页客户端（见各自文件头） |
+| `src/worker.js` | Worker entry: `SumoContainer` (port 8080, `sleepAfter` 12 h, environment, ping on `/sumo/v1/health`) and `default.fetch`, which hands the request to `proxy.js` |
+| `src/proxy.js` | whitelist, method check, header stripping, streaming body cap, rate limit, busy gate, error normalisation, cache headers; no Cloudflare imports |
+| `public/js/sumo-client.js` | browser client with live / baked / none results, reason codes, timeouts, cancellation, SHA-256 chunk checks, bilingual labels |
+| `public/real/`, `public/baked/` | pre-computed replays (generated) |
+| `tools/bake.py` | re-bakes `public/baked/` through the HTTP API |
+| `Dockerfile` | container image with build-time verification |
+| `wrangler.jsonc` | Worker, container, Durable Object binding + migration, rate limit |
+| `package.json`, `package-lock.json` | pinned `wrangler` and `@cloudflare/containers`; `npm run dev` / `test` / `deploy` |
+| `test.sh`, `tests/` | offline test runner and tests; `tests/fake-containers.mjs` is the test double for `@cloudflare/containers` |
 
-## 本模块固定模式
+## Known limitations
 
-- `src/worker.js` 除了 `default` 和 `SumoContainer` 不许有别的 export（workerd 把每个具名导出都当入口）；别的函数放 `proxy.js`。
-- 永远只用 `getContainer(env.SUMO_CONTAINER, 'main')` 这一个实例：serve.py 的任务状态在内存和容器临时盘里，多实例查不到彼此的运行。
-- 容器环境变量改动要同时改 `proxy.js` 的 `CONTAINER_ENV` 和 `Dockerfile` 的 `ENV`（`tests/config.test.mjs` 查）。
-- 404 / 405 在取容器之前就回，乱敲的路径不会唤醒容器。
-
-## 已知问题
-
-- 容器的盘是临时的：睡眠（12 h 没请求）、Cloudflare 换机器、重新部署都会清空，旧运行 id 之后一律 404；页面要回预跑结果。
-- `SUMO_RL` 是每个 Cloudflare 机房各自计数、最终一致，不是精确限流；兜底是忙闸（同时 ≥ 2 个任务回 429）和 serve.py 自己的队列上限。
-- 用 `tools/bake.py` 对线上接口预跑 16 次（1 个预设 + 15 个格点）时会撞每分钟 3 次的限流，它会等一会儿重试，整批至少 5–6 分钟。
-- 本机 `wrangler dev` 里容器是 amd64 镜像在 Rosetta 下跑的，速度不代表线上（实测一次 4 情景约 15 s）。
-- 构建上下文是整个 `apps/`：BuildKit（buildx）只传 COPY 用到的文件；老的非 BuildKit 构建会把三个 `node_modules`（各约 200 MB）也打包进去，很慢但结果一样。
+- The container disk is ephemeral: sleep (12 h without requests), a Cloudflare host move or a redeploy wipes it, after which every old run id is a 404 and the page falls back to the pre-computed results.
+- `SUMO_RL` is counted per Cloudflare location and eventually consistent, not an exact limit; the busy gate and serve.py's queue limit back it up.
+- Re-baking `public/baked/` against a hosted endpoint takes 16 runs (1 preset + 15 grid points) and hits the 3-per-minute limit; `bake.py` waits and retries, so a full batch takes at least 5–6 minutes.
+- Under local `wrangler dev` the amd64 image runs through Rosetta, so timings are not representative (about 15 s for the four synthetic scenarios).
+- The build context is all of `apps/`. BuildKit sends only the files `COPY` uses; the legacy non-BuildKit builder also packs the three `node_modules` directories (about 200 MB each), which is slow but gives the same image.
+- The real-network model assumes signal timing and turn shares and simulates cars only; it is a cross-check of the engine, not a field measurement.

@@ -1,46 +1,48 @@
-// 网页调 SUMO 的唯一入口（T37，D-0930-1700，docs/contract.md §HTTP API /api/sumo/v1）
-// 先试云端（/api/sumo/v1 → hackathon-sumo → Cloudflare Container 里的 serve.py）；没开 / 连不上 / 在启动 / 限流 / 忙 /
-// 超时 / 运行失败 / 取消，一律改回预先跑好的结果（/sumo/public/baked/，apps/sumo/tools/bake.py 生成）
-// 返回值永远带 source：'live'（云端实时）| 'baked'（预先跑好）| 'none'（两边都拿不到）；页面只按它和 labels 选文案，
-// 预跑结果无论如何都不会标成 live（tests/client.test.mjs 反向断言）
+// The page's only entry point to SUMO (D-0930-1700; docs/reference/interfaces.md, HTTP API /api/sumo/v1)
+// Tries the cloud first (/api/sumo/v1 → hackathon-sumo → serve.py in a Cloudflare Container). When the cloud is off, unreachable,
+// starting, rate-limited, busy, timed out, failed or cancelled, each method falls back in its own way: run() to the synthetic 2×2
+// results in /sumo/public/baked/ (written by apps/sumo/tools/bake.py), runReal() to the real-network replay in /sumo/public/real/,
+// runOptions() to nothing (source 'none').
+// Every result carries source: 'live' (cloud run) | 'baked' (pre-computed) | 'none' (neither available); the page picks its copy from
+// that and from labels only. A pre-computed result is never labelled live (reverse-asserted in tests/client.test.mjs).
 //
-// 用法：
+// Usage:
 //   import { createSumoClient, labels, sourceLabel, reasonLabel } from '/sumo/public/js/sumo-client.js';
 //   const sumo = createSumoClient();
-//   const first = await sumo.bakedFor({});                          // 先立刻显示预设（有逐帧轨迹）
-//   const r = await sumo.run({ diversion_share: 0.3 }, { onStatus, signal });   // signal 取消 → 回预跑结果，reason 'cancelled'
-//   sourceLabel(r, 'zh') → 「云端实时运行 · 用时 12.3 s」或「预先跑好的 SUMO 结果」；r.reason 是改用预跑的原因短码
-//   const m = await sumo.manifest(r, 'closure'); const c = await sumo.chunk(r, 'closure', m.chunks[0]);  // 格点结果只有指标，没有轨迹
-// 真实 CBD 路网（contract v2，T40）：
-//   const real = await sumo.loadReal();                               // {source:'baked', network:'real', index}，/sumo/public/real/index.json
+//   const first = await sumo.bakedFor({});                          // show the preset immediately (it has per-frame trajectories)
+//   const r = await sumo.run({ diversion_share: 0.3 }, { onStatus, signal });   // aborting signal → pre-computed result, reason 'cancelled'
+//   sourceLabel(r, 'en') → 'Live cloud run · 12.3 s' or 'Pre-computed SUMO results'; r.reason is the short code for why it fell back
+//   const m = await sumo.manifest(r, 'closure'); const c = await sumo.chunk(r, 'closure', m.chunks[0]);  // grid points have metrics only, no trajectories
+// Real CBD network (contract v2):
+//   const real = await sumo.loadReal();                               // {source:'baked', network:'real', index}, /sumo/public/real/index.json
 //   const m = await sumo.realManifest(real, 'original'); const c = await sumo.realChunk(real, 'original', m.chunks[0]);
 //   const r = await sumo.runReal({ seed, p_original: 0.14, p_ai: 0.53 }, { onStatus, signal, timeoutMs: 180000 });
-//   // → {source:'live', runId, elapsedMs, index} 或 {source:'baked', reason, index}（reason：health_down / sumo_rate / sumo_busy / timeout / sumo_failed / network / not_found / cancelled …）
-//   sourceLabel(r, 'en') → 'Cloud · live · 31.4 s' | 'SUMO · pre-computed'；realLabels[lang].caveats 是必须同屏的说明
-// 任意方案的绕行比例（T49，同一路网、同一施工，只换 p）：没有预跑兜底，拿不到就 source:'none'，页面显示「—」+ reasonLabel(r.reason)
+//   // → {source:'live', runId, elapsedMs, index} or {source:'baked', reason, index} (reason: health_down / sumo_rate / sumo_busy / timeout / sumo_failed / network / not_found / cancelled …)
+//   sourceLabel(r, 'en') → 'Cloud · live · 31.4 s' | 'SUMO · pre-computed'; realLabels[lang].caveats must be shown alongside
+// Any set of plan diversion shares (same network, same works, only p changes): no pre-computed fallback; on failure source:'none' and the page shows '—' + reasonLabel(r.reason)
 //   const r = await sumo.runOptions([{ id: 'A', p: 0.14 }, { id: 'B', p: 0.14 }, { id: 'C', p: 0.607 }], { seed, onStatus, signal, timeoutMs: 180000 });
-//   // → {source:'live', network:'real', runId, elapsedMs, index} 或 {source:'none', network:'real', reason, index:null}
-//   // index.scenarios = baseline + opt-A / opt-B / opt-C（metrics 同 original / ai）；p 相同的方案只跑一次，后一个带 reused_from:'opt-A'；默认不写逐帧（manifest.chunks = []）
-// 浏览器和 node 都能跑（node 里传 fetch 和绝对地址）；不依赖任何库
+//   // → {source:'live', network:'real', runId, elapsedMs, index} or {source:'none', network:'real', reason, index:null}
+//   // index.scenarios = baseline + opt-A / opt-B / opt-C (metrics as for original / ai); options with the same p run once, later ones carry reused_from:'opt-A'; no per-frame output by default (manifest.chunks = [])
+// Runs in the browser and in Node (pass fetch and absolute URLs in Node); no dependencies
 
 export const SCENARIOS = Object.freeze(['baseline', 'closure', 'guided', 'footpath']);
 const FIELDS = ['seed', 'scenarios', 'demand_duration_s', 'clearance_s', 'demand_scale', 'diversion_share'];
-// 和 apps/web/tools/sumo/build_demo.py 的 DEFAULT_CONFIG 一致
+// Matches DEFAULT_CONFIG in apps/web/tools/sumo/build_demo.py
 export const DEFAULT_PARAMS = Object.freeze({ seed: 42, scenarios: SCENARIOS, demand_duration_s: 600, clearance_s: 1200, demand_scale: 1, diversion_share: 0.45 });
 const RUN_ID = /^[0-9a-f]{32}$/;
-const HEALTH_MS = 6000; // 查活最多等这么久，再久就先给预跑结果
-const REQ_MS = 10000;   // 单个接口请求（POST、轮询、index.json）
-const FILE_MS = 20000;  // manifest / frames 块 / 预跑文件（块最大约 0.5 MB）
-// Worker 自己的错误短码（apps/sumo/src/proxy.js、apps/site/src/worker.js）；容器原样转出的其它短码（bad_config / sumo_error / not_ready …）按状态码归类
+const HEALTH_MS = 6000; // longest wait for the health check before falling back to pre-computed results
+const REQ_MS = 10000;   // a single API request (POST, poll, index.json)
+const FILE_MS = 20000;  // manifest / frame chunk / pre-computed file (largest chunk ≈ 0.5 MB)
+// The Workers' own error codes (apps/sumo/src/proxy.js, apps/site/src/worker.js); other codes passed through from the container (bad_config / sumo_error / not_ready …) are classified by status
 const KNOWN = new Set(['sumo_off', 'sumo_down', 'sumo_starting', 'sumo_rate', 'sumo_busy', 'not_found', 'too_big']);
-// 真实路网（contract v2）：情景 id、默认绕行比例（引擎对「ROADWORK AHEAD」/「USE RUSSELL / SAVE 9 MIN」的读数）
+// Real network (contract v2): scenario ids and default diversion shares (the engine's readings of 'ROADWORK AHEAD' / 'USE RUSSELL / SAVE 9 MIN')
 export const REAL_SCENARIOS = Object.freeze(['baseline', 'original', 'ai']);
 export const REAL_DEFAULTS = Object.freeze({ p_original: 0.14, p_ai: 0.53 });
-export const REAL_TIMEOUT_MS = 180000; // 一次真实路网三情景（T48：整整 08:00–09:00 一小时）：云端约 40–60 s，再留冷启动和排队
-const REAL_HEALTH_MS = 12000;  // 用户点了「云端重跑」才查活，容器刚醒可以多等一会儿
-const LIVE = Symbol('live');   // drive() 成功的标记，和回退结果区分（回退结果是普通对象）
+export const REAL_TIMEOUT_MS = 180000; // one real-network run of three scenarios (the full 08:00–09:00 hour): about 40–60 s in the cloud, plus headroom for cold start and queueing
+const REAL_HEALTH_MS = 12000;  // real-network and options runs give a freshly woken container longer to answer the health check
+const LIVE = Symbol('live');   // marks a successful drive(), distinct from fallback results (plain objects)
 
-// 方案模式（T49）：方案 id、默认总时限（baseline + 最多 5 个方案，1 小时仿真也够）
+// Options mode: option ids and the default overall time limit (baseline + up to 5 options; enough for the one-hour simulation)
 export const OPTION_IDS = Object.freeze(['A', 'B', 'C', 'D', 'E']);
 const OPTIONS_TIMEOUT_MS = 180000;
 const isRealScenario = (s) => REAL_SCENARIOS.includes(s) || /^opt-[A-E]$/.test(s);
@@ -54,7 +56,7 @@ export class SumoError extends Error {
 
 const deepFreeze = (o) => { Object.values(o).forEach((v) => v && typeof v === 'object' && deepFreeze(v)); return Object.freeze(o); };
 
-// 三种状态 + 必须同屏出现的说明。{s} = 秒；页面不许另写「实时」类文案
+// Three states + the caveats that must appear alongside. {s} = seconds; the page must not write its own 'live'-style copy
 export const labels = deepFreeze({
   zh: {
     live: '云端实时运行 · 用时 {s} s',
@@ -88,7 +90,7 @@ export const labels = deepFreeze({
   },
 });
 
-// 真实 CBD 路网（contract v2）的状态条和说明：页面第 2 步 SUMO 模式用；{s} = 秒
+// Status line and caveats for the real CBD network (contract v2), used by step 2's SUMO mode; {s} = seconds
 export const realLabels = deepFreeze({
   zh: {
     live: '云端现场 · 用时 {s} s',
@@ -103,12 +105,12 @@ export const realLabels = deepFreeze({
     baked: 'SUMO · pre-computed',
     none: 'SUMO results unavailable',
     running: 'Re-running SUMO in the cloud · {s} s',
-    note: 'SUMO 1.27.1 · real CBD network (OSM) + SCATS 08:00 flows · signal timing and turn shares assumed',
-    caveats: ['Real Melbourne CBD street network from OpenStreetMap', 'Traffic volumes from SCATS weekday 08:00 counts', 'Signal timing and turn shares are assumed', "Diversion shares come from the engine's reading of the sign, not measured"],
+    note: 'SUMO 1.27.1 · real CBD network (OSM) + SCATS 08:00–09:00 flows · signal timing and turn shares assumed',
+    caveats: ['Real Melbourne CBD street network from OpenStreetMap', 'Traffic volumes from SCATS weekday 08:00–09:00 counts', 'Signal timing and turn shares are assumed', "Diversion shares come from the engine's reading of the sign, not measured"],
   },
 });
 
-// 真实路网的状态条：只有 source === 'live' 且有用时才会出现「云端现场」
+// Real-network status line: 'Cloud · live' appears only when source === 'live' and an elapsed time is present
 export function realSourceLabel(result, lang = 'zh') {
   const L = realLabels[lang] || realLabels.zh;
   if (result && result.source === 'live' && Number.isFinite(result.elapsedMs)) return L.live.replace('{s}', (result.elapsedMs / 1000).toFixed(1));
@@ -116,7 +118,7 @@ export function realSourceLabel(result, lang = 'zh') {
   return L.none;
 }
 
-// 状态条文案：只有 source === 'live' 才会出现「云端实时」；network === 'real' 的结果（runReal / loadReal）用真实路网文案
+// Status line copy: 'Live cloud run' appears only when source === 'live'; results with network === 'real' (runReal / loadReal) use the real-network copy
 export function sourceLabel(result, lang = 'zh') {
   if (result && result.network === 'real') return realSourceLabel(result, lang);
   const L = labels[lang] || labels.zh;
@@ -149,7 +151,7 @@ const sameRun = (a, b) => ['seed', 'demand_duration_s', 'clearance_s', 'demand_s
 function reasonOf(status, data) {
   const code = data && typeof data.error === 'string' ? data.error : '';
   if (KNOWN.has(code)) return code;
-  if (status === 429) return 'sumo_busy'; // 没带已知短码的 429 一律当忙
+  if (status === 429) return 'sumo_busy'; // a 429 without a known code counts as busy
   if (status === 404) return 'not_found';
   if (status === 400 || status === 413 || status === 415) return 'bad_params';
   if (status >= 500) return 'sumo_down';
@@ -177,12 +179,12 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
   const root = baked.replace(/\/+$/, '');
   const realRoot = real.replace(/\/+$/, '');
   let realP = null;
-  const doFetch = fetch; // 不当成方法调：浏览器里 obj.fetch() 会报 Illegal invocation
+  const doFetch = fetch; // not called as a method: obj.fetch() throws Illegal invocation in browsers
   const now = globalThis.performance && typeof performance.now === 'function' ? () => performance.now() : () => Date.now();
   let catalogP = null;
-  const files = new Map(); // 预跑 index 路径 → Promise（换参数来回点不重复下载）
+  const files = new Map(); // pre-computed index path → Promise (switching parameters back and forth does not re-download)
 
-  // → { status, data（JSON；不是 JSON 为 undefined）, text }；超时 / 取消 / 连不上抛 SumoError
+  // → { status, data (JSON; undefined if not JSON), text }; throws SumoError on timeout / cancel / network failure
   async function request(url, { method = 'GET', body, ms = REQ_MS, signal } = {}) {
     const ctl = new AbortController();
     let why = null;
@@ -197,7 +199,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
       try { data = text ? JSON.parse(text) : null; } catch { data = undefined; }
       return { status: res.status, data, text };
     } catch (e) {
-      throw new SumoError(why || 'network', why === 'timeout' ? `${Math.round(ms)} ms 内没有响应` : String((e && e.message) || e));
+      throw new SumoError(why || 'network', why === 'timeout' ? `no response within ${Math.round(ms)} ms` : String((e && e.message) || e));
     } finally {
       clearTimeout(timer);
       if (signal) signal.removeEventListener('abort', onAbort);
@@ -221,20 +223,20 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     if (!catalogP) {
       catalogP = (async () => {
         const r = await request(`${root}/baked.json`, { ms: FILE_MS });
-        if (r.status !== 200 || !r.data || r.data.version !== 1) throw new SumoError('baked_missing', `预跑目录 baked.json 取不到（${msgOf(r)}）`);
+        if (r.status !== 200 || !r.data || r.data.version !== 1) throw new SumoError('baked_missing', `could not load the pre-computed catalogue baked.json (${msgOf(r)})`);
         return r.data;
       })();
-      catalogP.catch(() => { catalogP = null; }); // 失败不缓存，下次再试
+      catalogP.catch(() => { catalogP = null; }); // failures are not cached; retry next time
     }
     return catalogP;
   }
 
-  // 预设 + complete 的格点里挑离请求最近的：绕行、流量各按格距归一再算距离；和预设同参数的点直接用预设（它有逐帧轨迹）
+  // Pick the nearest of the preset and the complete grid points: diversion and demand are each normalised by grid spacing before taking the distance; a point with the preset's parameters uses the preset (it has per-frame trajectories)
   function nearest(cat, want) {
     const cands = [];
     if (cat.preset && cat.preset.path) cands.push({ key: 'preset', params: cat.preset.params, path: cat.preset.path, preset: true });
     for (const g of cat.grid || []) if (g && g.status === 'complete' && g.path) cands.push({ key: g.key, params: g.params, path: g.path, preset: false });
-    if (!cands.length) throw new SumoError('baked_missing', '预跑结果里没有可用的点');
+    if (!cands.length) throw new SumoError('baked_missing', 'no usable point in the pre-computed results');
     const step = (k) => {
       const v = [...new Set(cands.map((c) => num(c.params[k], 0)))].sort((a, b) => a - b);
       let s = Infinity;
@@ -252,12 +254,12 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     const cat = await loadBaked();
     const want = normalize(params);
     let c = nearest(cat, want);
-    // 和预设参数完全相同的格点 → 用预设（同一批结果，多了轨迹）
+    // grid point with exactly the preset's parameters → use the preset (same results, plus trajectories)
     if (!c.preset && cat.preset && cat.preset.path && sameRun(c.params, cat.preset.params)) c = { key: 'preset', params: cat.preset.params, path: cat.preset.path, preset: true };
-    if (!/^(preset\/index|grid\/[\w.-]+)\.json$/.test(c.path)) throw new SumoError('baked_missing', `预跑路径不合规：${c.path}`);
+    if (!/^(preset\/index|grid\/[\w.-]+)\.json$/.test(c.path)) throw new SumoError('baked_missing', `invalid pre-computed path: ${c.path}`);
     if (!files.has(c.path)) {
       const p = request(`${root}/${c.path}`, { ms: FILE_MS }).then((r) => {
-        if (r.status !== 200 || !r.data || !Array.isArray(r.data.scenarios)) throw new SumoError('baked_missing', `${c.path} 取不到（${msgOf(r)}）`);
+        if (r.status !== 200 || !r.data || !Array.isArray(r.data.scenarios)) throw new SumoError('baked_missing', `could not load ${c.path} (${msgOf(r)})`);
         return r.data;
       });
       files.set(c.path, p);
@@ -270,7 +272,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
       engine: cat.engine, generatedAt: cat.generated_at, bakedOn: cat.source, generator: cat.generator_sha256,
       hasReplay: c.preset,
       ...(failed ? { failedExact: { key: failed.key, error: failed.error || '' } } : {}),
-      source: 'baked', // 放最后：文件里写了什么 source 都盖掉
+      source: 'baked', // last, so it overrides whatever source the file claims
     };
   }
 
@@ -282,12 +284,12 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     }
   }
 
-  // 云端一次运行：health → POST /runs → 每 pollMs 轮询 → complete 后取 index.json。
-  // 成功返回 { [LIVE]: true, runId, elapsedMs, data, h }；任何失败都交给 fb(reason, extra) 回预跑（它的返回值原样返回）
+  // One cloud run: health → POST /runs → poll every pollMs → fetch index.json once complete.
+  // Success returns { [LIVE]: true, runId, elapsedMs, data, h }; any failure goes to fb(reason, extra) for the fallback (its return value is returned as-is)
   async function drive(body, { onStatus, signal, limitMs, fb, healthMs = HEALTH_MS, healthReason = (h) => h.error, indexOk = (d) => Array.isArray(d.scenarios) }) {
     const t0 = now();
     const left = () => limitMs - (now() - t0);
-    const emit = (phase, extra) => { if (onStatus) try { onStatus({ phase, elapsedMs: now() - t0, ...extra }); } catch { /* 页面回调出错不影响运行 */ } };
+    const emit = (phase, extra) => { if (onStatus) try { onStatus({ phase, elapsedMs: now() - t0, ...extra }); } catch { /* an error in the page callback does not affect the run */ } };
     const back = (reason, extra = {}) => { emit('fallback', { reason }); return fb(reason, extra); };
     if (signal && signal.aborted) return back('cancelled');
 
@@ -295,7 +297,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     const h = await health({ signal, ms: healthMs, limitMs });
     if (!h.ok) {
       const reason = healthReason(h);
-      // 真实路网把查活失败统一叫 health_down，具体原因（sumo_starting / timeout / network …）留在 detail
+      // the real network reports every health failure as health_down; the specific cause (sumo_starting / timeout / network …) stays in detail
       return back(reason, { error: h.msg, status: h.status, ...(reason !== h.error ? { detail: h.error } : {}) });
     }
 
@@ -313,12 +315,12 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
       return back(e.code, { error: e.message });
     }
 
-    // 在跑的那次只作记录（liveRunId），不会让预跑结果带上 runId
+    // the in-flight run is only recorded (liveRunId); a pre-computed result never carries a runId
     let misses = 0;
     for (;;) {
-      if (left() <= 0) return back('timeout', { error: `${Math.round(limitMs / 1000)} s 内没跑完`, liveRunId: runId });
+      if (left() <= 0) return back('timeout', { error: `did not finish within ${Math.round(limitMs / 1000)} s`, liveRunId: runId });
       try { await sleep(Math.min(pollMs, left()), signal); } catch { return back('cancelled', { liveRunId: runId }); }
-      if (left() <= 0) return back('timeout', { error: `${Math.round(limitMs / 1000)} s 内没跑完`, liveRunId: runId });
+      if (left() <= 0) return back('timeout', { error: `did not finish within ${Math.round(limitMs / 1000)} s`, liveRunId: runId });
       let r;
       try {
         r = await request(`${api}/runs/${runId}`, { ms: Math.min(REQ_MS, left()), signal });
@@ -337,7 +339,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
       if (st === 'failed') return back('sumo_failed', { error: String(r.data.error || ''), liveRunId: runId });
       if (st !== 'complete') continue;
       try {
-        // 结果已经算完：取 index 至少给 5 s，别因为总时限刚好用完就丢掉
+        // the result is ready: allow at least 5 s to fetch the index rather than drop it because the overall limit just ran out
         const ix = await request(`${api}/runs/${runId}/index.json`, { ms: Math.min(REQ_MS, Math.max(left(), 5000)), signal });
         if (ix.status !== 200 || !ix.data || !indexOk(ix.data)) {
           return back(reasonOf(ix.status, ix.data), { error: msgOf(ix), status: ix.status, liveRunId: runId });
@@ -358,15 +360,15 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     return { runId: r.runId, elapsedMs: r.elapsedMs, index: r.data, engine: r.data.engine || r.h.engine, params: r.data.config || body, hasReplay: true, source: 'live' };
   }
 
-  // ---- 真实 CBD 路网（contract v2）----
+  // ---- Real CBD network (contract v2) ----
   const isRealIndex = (d) => !!d && d.version === 2 && d.network === 'real' && Array.isArray(d.scenarios);
 
-  // 预先跑好的真实路网结果：/sumo/public/real/index.json（只下载一次；失败不缓存）
+  // Pre-computed real-network results: /sumo/public/real/index.json (downloaded once; failures are not cached)
   function loadReal() {
     if (!realP) {
       realP = (async () => {
         const r = await request(`${realRoot}/index.json`, { ms: FILE_MS });
-        if (r.status !== 200 || !isRealIndex(r.data)) throw new SumoError('baked_missing', `真实路网预跑 index.json 取不到或格式不对（${msgOf(r)}）`);
+        if (r.status !== 200 || !isRealIndex(r.data)) throw new SumoError('baked_missing', `pre-computed real-network index.json missing or malformed (${msgOf(r)})`);
         return { network: 'real', index: r.data, engine: r.data.engine, generator: r.data.generator_sha256, source: 'baked' };
       })();
       realP.catch(() => { realP = null; });
@@ -382,7 +384,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     }
   }
 
-  // 真实路网的请求体：只带有限的数（和数组形式的 scenarios）；范围由 serve.py 的 validate_real 判，越界 → 400 → 回预跑 bad_params
+  // Real-network request body: finite numbers only (plus scenarios as an array); serve.py's validate_real checks ranges, out of range → 400 → fallback with bad_params
   function realBody(params = {}) {
     const out = { network: 'real' };
     for (const k of ['seed', 'p_original', 'p_ai']) if (typeof params[k] === 'number' && Number.isFinite(params[k])) out[k] = params[k];
@@ -390,7 +392,7 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     return out;
   }
 
-  // 云端重跑真实路网：成功 {source:'live', network:'real', runId, elapsedMs, index}；任何失败回预跑 {source:'baked', reason, index}
+  // Cloud re-run of the real network: success {source:'live', network:'real', runId, elapsedMs, index}; any failure falls back to {source:'baked', reason, index}
   async function runReal(params = {}, { onStatus, signal, timeoutMs: limitMs = REAL_TIMEOUT_MS } = {}) {
     const body = realBody(params);
     const r = await drive(body, {
@@ -404,26 +406,26 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
   function realBase(ref) {
     if (ref && ref.source === 'live' && RUN_ID.test(ref.runId || '')) return `${api}/runs/${ref.runId}`;
     if (ref && ref.source === 'baked') return realRoot;
-    throw new SumoError('no_replay', '没有可回放的真实路网结果（source 不是 live / baked）');
+    throw new SumoError('no_replay', 'no real-network result to replay (source is not live / baked)');
   }
 
   async function realManifest(ref, scenario, { signal } = {}) {
-    if (!isRealScenario(scenario)) throw new SumoError('bad_params', `未知情景：${scenario}`);
+    if (!isRealScenario(scenario)) throw new SumoError('bad_params', `unknown scenario: ${scenario}`);
     const r = await request(`${realBase(ref)}/${scenario}/manifest.json`, { ms: FILE_MS, signal });
     if (r.status !== 200 || !r.data || !Array.isArray(r.data.chunks)) throw new SumoError(reasonOf(r.status, r.data), msgOf(r));
     return r.data;
   }
 
-  // file 可以是文件名，也可以直接传 manifest.chunks[i]：带 sha256 且有 WebCrypto 时核对；没有 WebCrypto（http 页面等）就跳过，不让页面挂
+  // file may be a file name or manifest.chunks[i] itself: with a sha256 and WebCrypto it is verified; without WebCrypto (plain-http pages etc.) the check is skipped rather than breaking the page
   async function realChunk(ref, scenario, file, { signal } = {}) {
     const entry = file && typeof file === 'object' ? file : { file };
-    if (!isRealScenario(scenario) || !/^frames-\d{3}\.json$/.test(entry.file || '')) throw new SumoError('bad_params', `不认识的块：${scenario}/${entry.file}`);
+    if (!isRealScenario(scenario) || !/^frames-\d{3}\.json$/.test(entry.file || '')) throw new SumoError('bad_params', `unrecognised chunk: ${scenario}/${entry.file}`);
     const r = await request(`${realBase(ref)}/${scenario}/${entry.file}`, { ms: FILE_MS, signal });
     if (r.status !== 200 || !r.data || !Array.isArray(r.data.frames)) throw new SumoError(reasonOf(r.status, r.data), msgOf(r));
     if (entry.sha256) {
       let got = null;
       try { if (globalThis.crypto && globalThis.crypto.subtle) got = await sha256Hex(r.text); } catch { got = null; }
-      if (got !== null && got !== entry.sha256) throw new SumoError('bad_chunk', `${scenario}/${entry.file} 的 sha256 和 manifest 对不上`);
+      if (got !== null && got !== entry.sha256) throw new SumoError('bad_chunk', `${scenario}/${entry.file}: sha256 does not match the manifest`);
     }
     return r.data;
   }
@@ -431,30 +433,30 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
   function replayBase(ref) {
     if (ref && ref.source === 'live' && RUN_ID.test(ref.runId || '')) return `${api}/runs/${ref.runId}`;
     if (ref && ref.source === 'baked' && ref.hasReplay === true) return `${root}/preset`;
-    throw new SumoError('no_replay', '这个结果只有指标，没有逐帧轨迹（预跑格点只存了 index）');
+    throw new SumoError('no_replay', 'this result has metrics only, no per-frame trajectories (pre-computed grid points store only the index)');
   }
 
   async function manifest(ref, scenario, { signal } = {}) {
-    if (!SCENARIOS.includes(scenario)) throw new SumoError('bad_params', `未知情景：${scenario}`);
+    if (!SCENARIOS.includes(scenario)) throw new SumoError('bad_params', `unknown scenario: ${scenario}`);
     const r = await request(`${replayBase(ref)}/${scenario}/manifest.json`, { ms: FILE_MS, signal });
     if (r.status !== 200 || !r.data || !Array.isArray(r.data.chunks)) throw new SumoError(reasonOf(r.status, r.data), msgOf(r));
     return r.data;
   }
 
-  // file 可以是文件名，也可以直接传 manifest.chunks[i]：带 sha256 时在有 WebCrypto 的环境里核对
+  // file may be a file name or manifest.chunks[i] itself: a sha256 is verified wherever WebCrypto is available
   async function chunk(ref, scenario, file, { signal } = {}) {
     const entry = file && typeof file === 'object' ? file : { file };
-    if (!SCENARIOS.includes(scenario) || !/^frames-\d{3}\.json$/.test(entry.file || '')) throw new SumoError('bad_params', `不认识的块：${scenario}/${entry.file}`);
+    if (!SCENARIOS.includes(scenario) || !/^frames-\d{3}\.json$/.test(entry.file || '')) throw new SumoError('bad_params', `unrecognised chunk: ${scenario}/${entry.file}`);
     const r = await request(`${replayBase(ref)}/${scenario}/${entry.file}`, { ms: FILE_MS, signal });
     if (r.status !== 200 || !r.data || !Array.isArray(r.data.frames)) throw new SumoError(reasonOf(r.status, r.data), msgOf(r));
     if (entry.sha256 && globalThis.crypto && globalThis.crypto.subtle && (await sha256Hex(r.text)) !== entry.sha256) {
-      throw new SumoError('bad_chunk', `${scenario}/${entry.file} 的 sha256 和 manifest 对不上`);
+      throw new SumoError('bad_chunk', `${scenario}/${entry.file}: sha256 does not match the manifest`);
     }
     return r.data;
   }
 
-  // ---- 方案模式（T49）：baseline + 每个方案一个 opt-<id> 情景；没有预跑兜底 ----
-  // 请求体：options 1–5 个 {id: A–E 不重复, p: 0–1 的有限数}，不合规返回 null（不发请求）；seed 只带有限数，范围由 serve.py 判
+  // ---- Options mode: baseline + one opt-<id> scenario per option; no pre-computed fallback ----
+  // Request body: 1–5 options {id: unique A–E, p: finite number in 0–1}; returns null if invalid (no request sent); seed only if finite, serve.py checks its range
   function optionsBody(options, seed) {
     if (!Array.isArray(options) || options.length < 1 || options.length > OPTION_IDS.length) return null;
     const seen = new Set();
@@ -470,11 +472,11 @@ export function createSumoClient({ base = '/api/sumo/v1', baked = '/sumo/public/
     return body;
   }
 
-  // 成功 {source:'live', network:'real', runId, elapsedMs, index, engine, params}；任何失败 {source:'none', network:'real', reason, index:null, …}
+  // Success {source:'live', network:'real', runId, elapsedMs, index, engine, params}; any failure {source:'none', network:'real', reason, index:null, …}
   async function runOptions(options, { seed, onStatus, signal, timeoutMs: limitMs = OPTIONS_TIMEOUT_MS } = {}) {
     const none = (reason, extra = {}) => ({ network: 'real', reason, ...extra, index: null, source: 'none' });
     const body = optionsBody(options, seed);
-    if (!body) return none('bad_params', { error: 'options 要 1–5 个 {id: A–E 不重复, p: 0–1}' });
+    if (!body) return none('bad_params', { error: 'options must be 1–5 items {id: unique A–E, p: 0–1}' });
     const want = body.options.map((o) => `opt-${o.id}`);
     const r = await drive(body, {
       onStatus, signal, limitMs, fb: none, healthMs: REAL_HEALTH_MS,

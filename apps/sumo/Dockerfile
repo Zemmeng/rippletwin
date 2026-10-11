@@ -1,32 +1,33 @@
-# hackathon-sumo 的容器镜像：原生 SUMO 1.27.1 + apps/web/tools/sumo/serve.py（HTTP 接口 /sumo/v1/*）
-# 两种路网：2×2 合成（build_demo.py，原样）+ 真实 CBD 路网（build_real.py，contract v2，读 apps/roads 的 network / signals / flows）
-# 构建上下文 = apps/（wrangler.jsonc 的 image_build_context ".."），所以下面 COPY 的路径都相对 apps/；
-#   镜像里按仓库原样摆（/app/web/tools/sumo、/app/roads/public/cbd），脚本按 __file__ 找数据也对得上
-# 本地试构建（不推送）：docker build --platform linux/amd64 -f apps/sumo/Dockerfile apps
-#   Cloudflare 只跑 linux/amd64；wrangler deploy 自己会加 --platform linux/amd64，Apple 芯片上靠 colima 的 Rosetta 转译
-#   BuildKit 只传 COPY 用到的文件，apps/*/node_modules 不会进上下文
+# Container image for hackathon-sumo: native SUMO 1.27.1 + apps/web/tools/sumo/serve.py (HTTP API /sumo/v1/*)
+# Two networks: synthetic 2×2 (build_demo.py, unchanged) + the real CBD network (build_real.py, contract v2, reads network / signals / flows from apps/roads)
+# Build context = apps/ (image_build_context ".." in wrangler.jsonc), so every COPY path below is relative to apps/;
+#   the image mirrors the repo layout (/app/web/tools/sumo, /app/roads/public/cbd), so scripts that locate data via __file__ still work
+# Local test build (no push): docker build --platform linux/amd64 -f apps/sumo/Dockerfile apps
+#   Cloudflare runs linux/amd64 only; wrangler deploy adds --platform linux/amd64 itself, and Apple silicon relies on colima's Rosetta translation
+#   BuildKit sends only the files COPY uses, so apps/*/node_modules never enters the context
 FROM python:3.12-slim
 
-# eclipse-sumo 的 manylinux wheel 自带 FOX / xerces / proj 等，但不带 X11 / GL 客户端库和 libatomic（manylinux 白名单里的），
-# slim 镜像也没有；少一个 sumo 就起不来 —— 下面的 ldd 检查会让构建直接失败，而不是等上线才发现（libatomic1 就是这么查出来的）
+# The eclipse-sumo manylinux wheel bundles FOX / xerces / proj etc. but not the X11 / GL client libraries or libatomic (they are on the
+# manylinux allow-list), and the slim image lacks them too; sumo will not start if any is missing. The ldd check below fails the build
+# instead of letting this surface in production (that is how libatomic1 was found)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libx11-6 libxext6 libxrender1 libgl1 libsm6 libice6 libatomic1 \
  && rm -rf /var/lib/apt/lists/*
 
-# 运行时变量：serve.py 按 HOST / PORT 监听，结果写 SUMO_DATA_DIR，只留最新 SUMO_KEEP_RUNS 次运行
-# worker.js 的 SumoContainer.envVars 每次启动会再传一遍同样的值（两边一起改）
-# ALLOW_ORIGINS 故意不设：浏览器的 Origin 头在 Worker 里就删掉了，容器只收 Worker 转来的请求
-# LANG=C.UTF-8：build_demo.py 读 `sumo --version` 的第一行，locale 不对会读歪
+# Runtime variables: serve.py listens on HOST / PORT, writes results to SUMO_DATA_DIR and keeps only the newest SUMO_KEEP_RUNS runs
+# SumoContainer.envVars in worker.js passes the same values again on every start (change both together)
+# ALLOW_ORIGINS deliberately unset: the Worker already strips the browser's Origin header, and the container only receives requests forwarded by the Worker
+# LANG=C.UTF-8: build_demo.py reads the first line of `sumo --version`, which a wrong locale garbles
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
     LANG=C.UTF-8 LC_ALL=C.UTF-8 \
     HOST=0.0.0.0 PORT=8080 SUMO_DATA_DIR=/data SUMO_KEEP_RUNS=20 SUMO_REAL_JOBS=4
 
 WORKDIR /app
 COPY web/tools/sumo/requirements.txt web/tools/sumo/requirements.txt
-# numpy + scipy：实网的需求用 SUMO 自带的 tools/routeSampler.py 按 SCATS 计数抽样，它顶层 import numpy、--optimize 要 scipy
+# numpy + scipy: real-network demand is sampled from SCATS counts with SUMO's bundled tools/routeSampler.py, which imports numpy at top level and needs scipy for --optimize
 RUN pip install -r web/tools/sumo/requirements.txt numpy==2.2.6 scipy==1.15.3
 
-# 构建时就查：缺共享库、版本不对、routeSampler 的依赖缺了都让构建失败（别等部署到 Cloudflare 才报）
+# Check at build time: a missing shared library, a wrong version or missing routeSampler dependencies fail the build (rather than surfacing after deploying to Cloudflare)
 RUN SUMO_HOME=$(python -c 'import sumo; print(sumo.SUMO_HOME)') \
  && ! ldd "$SUMO_HOME/bin/sumo" "$SUMO_HOME/bin/netconvert" | grep 'not found' \
  && sumo --version | grep -q 'Eclipse SUMO sumo 1.27.1' \
@@ -34,34 +35,34 @@ RUN SUMO_HOME=$(python -c 'import sumo; print(sumo.SUMO_HOME)') \
  && test -f "$SUMO_HOME/tools/routeSampler.py" \
  && python -c 'import numpy, scipy.optimize'
 
-# 实网的输入：OSM 路网 + SCATS 路口 + SCATS 08:00 流量（只要这三个，别的 roads 数据不进镜像）
+# Real-network inputs: OSM network + SCATS junctions + SCATS 08:00–09:00 flows (only these three; no other roads data enters the image)
 COPY roads/public/cbd/network.json roads/public/cbd/signals.json roads/public/cbd/flows.json roads/public/cbd/
-# SUMO_REAL_CACHE：build_real.py 的路网 + routeSampler 需求缓存（按 build_real.py + 三个 JSON + SUMO 版本取键），下面构建时就建好
+# SUMO_REAL_CACHE: build_real.py's network + routeSampler demand cache (keyed on build_real.py + the three JSON files + SUMO version), built below at build time
 ENV SUMO_ROADS_DIR=/app/roads/public/cbd SUMO_REAL_CACHE=/app/real-cache
 
-# 保持 web/tools/sumo 这层目录：build_demo.py 用 Path(__file__).parents[2] 当跑 `sumo --version` 的工作目录
+# Keep the web/tools/sumo directory level: build_demo.py uses Path(__file__).parents[2] as the working directory for `sumo --version`
 COPY web/tools/sumo/build_demo.py web/tools/sumo/build_real.py web/tools/sumo/serve.py web/tools/sumo/smoke.py web/tools/sumo/
 
-# 构建时跑一次最小的端到端（真 netconvert + sumo + 回放导出，Apple M5 上约 1 s），通过就删掉
-# 参数要在公开范围内：clearance_s 600–2400（< 600 在短流量下会失败，实测）
+# Run one minimal end-to-end check at build time (real netconvert + sumo + replay export, about 1 s on an Apple M5), deleted once it passes
+# Parameters must be within the public ranges: clearance_s 600–2400 (< 600 fails with short demand, tested)
 RUN python web/tools/sumo/build_demo.py --scenarios closure --demand-duration-s 60 --clearance-s 600 \
       --output /tmp/check-out --work-dir /tmp/check-raw > /dev/null \
  && test -f /tmp/check-out/index.json \
  && rm -rf /tmp/check-out /tmp/check-raw
 
-# 实网：构建时就把缓存建好（真 netconvert 两张网 + randomTrips + routeSampler --optimize），线上每次运行只剩三个 sumo；
-# 顺带查 build_real 能 import、参数校验能用 —— numpy / scipy / roads 数据缺一样构建就失败
+# Real network: build the cache at build time (real netconvert for both networks + randomTrips + routeSampler --optimize), so each live run only runs sumo;
+# this also checks that build_real imports and its parameter validation works: missing numpy / scipy / roads data fails the build
 RUN cd web/tools/sumo && python -c "import build_real; build_real.validate_real({'seed': 1, 'scenarios': ['baseline']})" \
  && python build_real.py --prepare-only \
  && test -f "$(python build_real.py --prepare-only)/demand.json"
 
-# 用 root 跑：/data 是容器自己的临时盘（睡眠 / 重启就清空），不挂卷，也就没有权限问题
+# Runs as root: /data is the container's own ephemeral disk (wiped on sleep / restart), no volume is mounted, so there are no permission issues
 RUN mkdir -p /data
 EXPOSE 8080
 
-# Cloudflare 不看 HEALTHCHECK（它用 SumoContainer.pingEndpoint 探端口）；留着给本机 docker run 用
+# Cloudflare ignores HEALTHCHECK (it probes the port via SumoContainer.pingEndpoint); kept for local docker run
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/sumo/v1/health' % os.environ.get('PORT','8080'), timeout=4)"
 
-# serve.py 自己处理 SIGTERM（Cloudflare 睡眠 / 重启时发），跑着的那次让它跑完，排队的丢掉
+# serve.py handles SIGTERM itself (sent by Cloudflare on sleep / restart): the running job finishes, queued jobs are dropped
 CMD ["python", "web/tools/sumo/serve.py"]

@@ -1,5 +1,5 @@
-// 测试用的假 @cloudflare/containers（真包 import 'cloudflare:workers'，node 里加载不了）
-// tests/worker.test.mjs 用 node:module 的钩子把 '@cloudflare/containers' 指到这里；不是测试文件本身（不叫 *.test.mjs）
+// Fake @cloudflare/containers for tests (the real package imports 'cloudflare:workers', which Node cannot load)
+// tests/worker.test.mjs points '@cloudflare/containers' here through a node:module hook; this is not a test file itself (not named *.test.mjs)
 export const calls = [];
 
 export class Container {
@@ -9,7 +9,7 @@ export class Container {
   }
 }
 
-// 记下 worker.js 用什么参数取容器；binding.stub 是测试塞进去的假容器
+// Records the arguments worker.js uses to get the container; binding.stub is the fake container the test injects
 export function getContainer(binding, name) {
   calls.push({ binding, name });
   if (!binding) throw new TypeError("Cannot read properties of undefined (reading 'idFromName')");

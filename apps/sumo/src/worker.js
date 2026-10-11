@@ -1,22 +1,23 @@
-// hackathon-sumo（T37，D-0930-1700）：现场 SUMO = 这个 Worker + 一个 Cloudflare Container（apps/sumo/Dockerfile，跑 apps/web/tools/sumo/serve.py）。
-// 只由 site 经服务绑定 SUMO 转来 /api/sumo/v1/*（workers_dev 关着，没有自己的公网地址）；白名单、删头、限流、忙闸、错误码都在 proxy.js。
-// 容器只开 1 个实例（getContainer(…, 'main')）：serve.py 的任务状态在内存 + 临时盘里，多实例会查不到别的实例建的运行。
-// ⚠️ 除了 default 和 SumoContainer 不许有别的 export：workerd 把每个具名导出都当入口（Durable Object 类必须具名导出，这个可以）
+// hackathon-sumo (D-0930-1700): live SUMO = this Worker + one Cloudflare Container (apps/sumo/Dockerfile, running apps/web/tools/sumo/serve.py).
+// Only the site Worker reaches it, forwarding /api/sumo/v1/* over the SUMO service binding (workers_dev is off, so there is no public URL of its own).
+// Whitelist, header stripping, rate limit, busy gate and error codes all live in proxy.js.
+// One container instance only (getContainer(…, 'main')): serve.py keeps job state in memory and on ephemeral disk, so a second instance could not see runs created by the first.
+// ⚠️ No exports other than default and SumoContainer: workerd treats every named export as an entrypoint (a Durable Object class must be a named export, so that one is fine).
 import { Container, getContainer } from '@cloudflare/containers';
 import { handle, CONTAINER_ENV } from './proxy.js';
 
 export class SumoContainer extends Container {
-  defaultPort = 8080; // = CONTAINER_ENV.PORT = Dockerfile 的 PORT
-  sleepAfter = '12h'; // 评审期间别睡：一睡临时盘清空、下次冷启动要几秒；按醒着的时间计费（README §费用）
+  defaultPort = 8080; // = CONTAINER_ENV.PORT = PORT in the Dockerfile
+  sleepAfter = '12h'; // stay awake through judging: sleeping wipes the ephemeral disk and the next cold start takes a few seconds; billed while awake (README, cost)
   envVars = { ...CONTAINER_ENV };
-  pingEndpoint = 'container/sumo/v1/health'; // 启动时探这个路径（任何 HTTP 响应都算端口就绪），不探 serve.py 没有的 /
+  pingEndpoint = 'container/sumo/v1/health'; // probed at start-up (any HTTP response counts as the port being ready); not /, which serve.py does not serve
 
   onStart() {
-    console.log('SUMO 容器已启动');
+    console.log('SUMO container started');
   }
 
   onStop({ exitCode, reason } = {}) {
-    console.log('SUMO 容器已停止', exitCode, reason);
+    console.log('SUMO container stopped', exitCode, reason);
   }
 }
 

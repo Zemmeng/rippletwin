@@ -1,55 +1,74 @@
-# 四路口 SUMO 后端
+# SUMO tools: job API and network builders
 
-用户最终确认范围：**2×2 四路口；不能修改前端**。本目录提供原生 SUMO 计算、HTTP 接口、完整轨迹与诊断，不改 `src/`、`public/` 或现有 CBD 引擎契约。前端尚未接线，原网页行为保持原状。
+Native Eclipse SUMO 1.27.1 behind a small HTTP job API, plus the two scenario builders it runs.
 
-## 启动
+| File | What it does |
+|---|---|
+| `serve.py` | Threaded, standard-library HTTP job API `/sumo/v1/*`: health, submit, status, output files, single frame. Runs one job at a time. |
+| `build_demo.py` | Synthetic 2×2 grid of four junctions: `baseline` / `closure` / `guided` / `footpath`. |
+| `build_real.py` | Real Melbourne CBD network (contract v2): `baseline` / `original` / `ai`, plus options mode `opt-A` … `opt-E`. |
+| `smoke.py` | End-to-end check of a running `serve.py` on the synthetic network: submits a run, verifies every chunk and the `/frame` endpoint. |
+| `requirements.txt` | `eclipse-sumo==1.27.1`, `sumolib==1.27.1`. The real network also needs `numpy` and `scipy`. |
+| `examples/` | Metrics and one frame exported from the real API (synthetic network). Documentation samples, not a fallback. |
 
-从仓库根目录执行；Python ≥3.9。SUMO 依赖固定为 1.27.1，本机已在 macOS arm64 / Python 3.14 验证。
+Every job re-runs native SUMO; the browser never computes vehicle movement for these runs. The web page reaches this API only through `apps/sumo/public/js/sumo-client.js`, which drives steps 02 and 03 (real network) and step 04 (options mode) of the workbench. The synthetic backend started as a standalone backend by @jinmingq (PR #96); @Zemmeng added the cloud deployment, the real network and options mode.
+
+> **Post-event status.** During the hackathon this same `serve.py` ran in a Cloudflare Container behind the `hackathon-sumo` Worker (`apps/sumo`). Both were deleted after the event. The live site's `/api/sumo/v1/*` now answers `502 sumo_down`, and the page replays the pre-computed run in `apps/sumo/public/real/`. Everything below still runs locally.
+
+> **Provenance.** The SHA-256 of `build_real.py` is stamped into `apps/sumo/public/real/index.json` as `generator_sha256`, and `apps/web/tests/test_sumo_real.py` fails if the file changes without a re-bake. Do not edit it, not even its comments, unless you re-bake the replay (see [Re-baking the replay](#re-baking-the-replay)). The SHA-256 of `build_demo.py` is likewise recorded in the provenance of `apps/sumo/public/baked/`.
+
+## Running locally
+
+Run from the repo root with Python ≥ 3.9. SUMO is pinned to 1.27.1; verified on macOS arm64 with Python 3.14.
 
 ```bash
 python3 -m venv /tmp/rippletwin-sumo-venv
-/tmp/rippletwin-sumo-venv/bin/python -m pip install -r apps/web/tools/sumo/requirements.txt
+/tmp/rippletwin-sumo-venv/bin/python -m pip install -r apps/web/tools/sumo/requirements.txt numpy scipy
 /tmp/rippletwin-sumo-venv/bin/python apps/web/tools/sumo/serve.py \
   --data-dir /tmp/rippletwin-sumo-jobs --port 8021 \
   --allow-origin http://127.0.0.1:8001
 ```
 
-本机默认只监听 `127.0.0.1`。按实际前端地址设置 `--allow-origin`，可重复传入，带 `Origin` 头但不在名单里的请求一律 `403`。无需修改前端即可启动和测试后端。
+By default the server listens on `127.0.0.1` only. Set `--allow-origin` to the page's actual origin; it can be repeated. A request that carries an `Origin` header not on the list gets `403`.
 
-**云端（T37，D-0930-1700）**：同一份 `serve.py` 跑在 Cloudflare Container 里（`HOST=0.0.0.0 PORT=8080 SUMO_DATA_DIR=/data SUMO_KEEP_RUNS=20`，`ALLOW_ORIGINS` 留空），前面是 Worker `hackathon-sumo`（`apps/sumo`，只开 1 个实例，不开自己的 `workers.dev` 网址）。公网只能经网站的 `/api/sumo/v1/*` 进来：site 经服务绑定 `SUMO` 转给 `hackathon-sumo`，它只放行 §接口 v1 表里的路径，去掉 `Origin` / `Cookie` / `Authorization`，每个 IP 每分钟最多 3 次 POST，容器里同时 ≥ 2 个任务就回 `429`，再转进容器的 `/sumo/v1/*`。所以容器不开自己的 IP 限流（它看到的来源地址都是代理）。容器会休眠、重启，磁盘不持久：重启后旧的运行 id 一律 `404`，页面要回退到预先跑好的结果（`apps/sumo/public/baked/`，必须标「预先跑好」）。
-
-| 环境变量 | 命令行 | 默认 | 说明 |
+| Environment variable | Flag | Default | Notes |
 |---|---|---|---|
-| `HOST` | `--host` | `127.0.0.1` | 容器里是 `0.0.0.0` |
-| `PORT` | `--port` | `8021` | 容器里是 `8080` |
-| `SUMO_DATA_DIR` | `--data-dir` | 必填 | 容器里是 `/data` |
-| `ALLOW_ORIGINS` | `--allow-origin`（可重复） | 空 | 逗号分隔；命令行的追加在环境变量之后 |
-| `SUMO_KEEP_RUNS` | `--keep-runs` | `20` | 只留最新 N 次完成或失败的运行（默认一次约 21 MB 回放），启动时和每次运行结束后清理 |
-| `SUMO_POSTS_PER_MIN` | `--posts-per-min` | `0`（不限） | 每个来源 IP 每分钟最多几次 POST，超了 `429 sumo_rate`；只在服务直接对外时用 |
-| `SUMO_API_KEY` | 无（只认环境变量） | 空（不检查） | 设了以后除 `/health` 外都要带请求头 `X-Sumo-Key`，否则 `401`；此时 IP 限流改认调用方给的 `X-Client-IP`。云端方案不用它 |
+| `HOST` | `--host` | `127.0.0.1` | `0.0.0.0` in the container |
+| `PORT` | `--port` | `8021` | `8080` in the container |
+| `SUMO_DATA_DIR` | `--data-dir` | required | `/data` in the container |
+| `ALLOW_ORIGINS` | `--allow-origin` (repeatable) | empty | comma-separated; flags are appended after the environment value |
+| `SUMO_KEEP_RUNS` | `--keep-runs` | `20` | keep only the newest N complete or failed runs (about 21 MB of replay per default synthetic run); pruned at start-up and after each run |
+| `SUMO_POSTS_PER_MIN` | `--posts-per-min` | `0` (no limit) | maximum POSTs per client IP per minute, otherwise `429 sumo_rate`; only for a server exposed directly |
+| `SUMO_API_KEY` | none (environment only) | empty (not checked) | when set, every request except `/health` needs the header `X-Sumo-Key`, otherwise `401`; the IP rate limit then trusts the caller's `X-Client-IP`. Not used in the cloud set-up |
 
-容器平台用 `SIGTERM` 停服务：不再接新请求，排队的任务丢掉（下次启动标成失败），正在跑的那次跑完再退出。单个请求读写超过 30 秒没动静就断开。`sumo --version` 在不支持的 locale（例如 `LANG=xx_YY.UTF-8`）下第一行是 `Warning: Could not set locale`，版本检查按 `Eclipse SUMO` 开头的那一行认。
+`build_real.py` reads four more variables; see [Real CBD network](#real-cbd-network-contract-v2-build_realpy).
 
-离线批量运行（输出目录与审计目录必须为空）：
+The server stops on `SIGTERM`: it accepts no new requests, drops queued jobs (they are marked failed on the next start) and lets the running job finish before exiting. A request that is idle for more than 30 s while reading or writing is disconnected. Under an unsupported locale (for example `LANG=xx_YY.UTF-8`) the first line of `sumo --version` is `Warning: Could not set locale`, so the version check uses the line that starts with `Eclipse SUMO`.
+
+Offline batch run (the output and audit directories must be empty):
 
 ```bash
 /tmp/rippletwin-sumo-venv/bin/python apps/web/tools/sumo/build_demo.py \
   --seed 42 --output /tmp/sumo-output-42 --work-dir /tmp/sumo-raw-42
 ```
 
-## 接口 v1
+### In the cloud (during the hackathon)
 
-| 方法与路径 | 用途 |
+The same `serve.py` ran in a Cloudflare Container (`standard-4`, one instance) built from `apps/sumo/Dockerfile`, with `HOST=0.0.0.0 PORT=8080 SUMO_DATA_DIR=/data SUMO_KEEP_RUNS=20 SUMO_REAL_JOBS=4`, `SUMO_ROADS_DIR=/app/roads/public/cbd`, `SUMO_REAL_CACHE=/app/real-cache` and `ALLOW_ORIGINS` empty. In front of it sat the Worker `hackathon-sumo` (`apps/sumo`, no `workers.dev` URL of its own). The public could reach it only through the site's `/api/sumo/v1/*`: the site forwarded over the `SUMO` service binding to `hackathon-sumo`, which allowed only the paths in the [API table](#api-v1), stripped `Origin` / `Cookie` / `Authorization`, allowed at most 3 POSTs per IP per minute, answered `429` while the container already had 2 or more jobs, and only then forwarded to the container's `/sumo/v1/*`. The container therefore had no IP rate limit of its own (every request came from the proxy). Containers sleep and restart and the disk is not persistent: after a restart every old run id answers `404`, and the page falls back to the pre-computed results (always labelled as pre-computed). See `apps/sumo/README.md` for the Worker, the image and how to redeploy.
+
+## API v1
+
+| Method and path | Purpose |
 |---|---|
-| `GET /sumo/v1/health` | 已验证的 SUMO 版本、队列状态（`active_jobs` = 排队 + 正在跑）；不需要 `X-Sumo-Key` |
-| `POST /sumo/v1/runs` | 新建一次原生仿真，返回 `202` 和 `id` |
+| `GET /sumo/v1/health` | verified SUMO version, queue state (`active_jobs` = queued + running) and available `networks`; no `X-Sumo-Key` needed |
+| `POST /sumo/v1/runs` | start a native simulation; returns `202` and an `id` |
 | `GET /sumo/v1/runs/{id}` | `queued → running → complete / failed` |
-| `GET /sumo/v1/runs/{id}/index.json` | 全部情景的指标、参数与数据路径 |
-| `GET /sumo/v1/runs/{id}/{scenario}/manifest.json` | 路网几何、信号映射、主体目录、指标与分块索引 |
-| `GET /sumo/v1/runs/{id}/{scenario}/frames-NNN.json` | 完整的压缩轨迹分块，适合前端缓存回放 |
-| `GET /sumo/v1/runs/{id}/frame?scenario=closure&t=118.9` | 已转换为米和米/秒的快照，直接供界面使用 |
+| `GET /sumo/v1/runs/{id}/index.json` | metrics, parameters and data paths for every scenario |
+| `GET /sumo/v1/runs/{id}/{scenario}/manifest.json` | network geometry, signal mapping, agent catalogue, metrics and chunk index |
+| `GET /sumo/v1/runs/{id}/{scenario}/frames-NNN.json` | complete compressed trajectory chunk, suited to client-side cached replay |
+| `GET /sumo/v1/runs/{id}/frame?scenario=closure&t=118.9` | snapshot already converted to metres and m/s, ready for the UI (synthetic runs only) |
 
-请求示例：
+Example request (synthetic network):
 
 ```bash
 curl http://127.0.0.1:8021/sumo/v1/runs \
@@ -57,124 +76,126 @@ curl http://127.0.0.1:8021/sumo/v1/runs \
   -d '{"seed":42,"scenarios":["baseline","closure","guided","footpath"],"demand_duration_s":600,"clearance_s":1200,"demand_scale":1,"diversion_share":0.45}'
 ```
 
-字段全部可省略，默认如上；只接受白名单字段。`seed` 为 0–2147483647 整数；出行生成窗口为 10–600 秒整数；清空窗口为 600–2400 秒整数；流量倍率 0.1–1.2；绕行服从比例 0–1。上限按实测收紧（seed 42）：流量倍率 1.5 起每次都失败（碰撞或清不空），出行窗口 60 秒配清空 300 秒时行人清不空、配 600 秒就通过。`baseline` 自动加入，保证有对照。每个任务重跑 SUMO，浏览器没有自己计算交通运动。最多四个未完成任务、串行运行；超出返回 `429`。所有 GET 接口都支持 `HEAD`（只回响应头）。
+Every field is optional; the defaults are as above. Only whitelisted fields are accepted. `seed` is an integer in 0–2147483647; the demand window is an integer of 10–600 s; the clearance window is an integer of 600–2400 s; the demand scale is 0.1–1.2; the diversion compliance share is 0–1. The upper limits were tightened from testing (seed 42): a demand scale of 1.5 or more failed every time (collisions or the network not clearing), and a 60 s demand window with 300 s of clearance left pedestrians on the network, while 600 s passed. `baseline` is always added so there is a control. At most four unfinished jobs, run serially; beyond that the server returns `429`. Every GET endpoint also supports `HEAD` (headers only). Real-network and options-mode bodies are described below.
 
-轮询约每秒一次即可。运行失败不发布结果，读取未完成结果返回 `409`。`failed.error` 给出原因。运行成功后删掉 `data-dir/{id}/raw/`（默认一次约 300 MB 的 SUMO XML），只留 `output/`；失败时删掉 `output/` 和 `raw/` 里超过 1 MB 的 XML，保留日志、实际命令与同一批需求供排查。只保留最新 `SUMO_KEEP_RUNS` 次（默认 20）完成或失败的运行，更早的整个目录删除，再读返回 `404`。同一服务重启后可继续读取还留着的完成结果，未完成任务标记失败。大流量未能清空时，增加 `clearance_s` 后创建新任务，不能把未到达的人车当作消失。
+Polling about once a second is enough. A failed run publishes no results, and reading an unfinished result returns `409`; `failed.error` gives the reason. After a successful run `data-dir/{id}/raw/` is deleted (about 300 MB of SUMO XML for a default synthetic run) and only `output/` stays. After a failure `output/` and any XML over 1 MB in `raw/` are deleted, while the logs, the exact commands and the shared demand stay for diagnosis. Only the newest `SUMO_KEEP_RUNS` (default 20) complete or failed runs are kept; older run directories are deleted and then answer `404`. After a restart the same service can still serve the completed results that remain, and unfinished jobs are marked failed. If heavy demand fails to clear, create a new job with a larger `clearance_s`; vehicles or pedestrians that have not arrived must never be treated as gone.
 
-错误一律 `{ "ok": false, "error": "<短码>", "msg": "<中文说明>" }`（`docs/contract.md` §错误格式，Worker 原样转出）：`400 bad_request / bad_config / bad_json`、`401 bad_key`、`403 bad_origin`、`404 not_found`、`409 not_ready`、`413 too_big`、`415 bad_type`、`429 sumo_busy`（排队满）/ `sumo_rate`（IP 限流）、`500 sumo_error`。Worker 自己的 `sumo_off / sumo_down / sumo_starting` 等见 `docs/contract.md` §HTTP API。
+Every error is `{ "ok": false, "error": "<code>", "msg": "<explanation>" }` (see `docs/reference/interfaces.md`, error format; the Worker passes it through unchanged): `400 bad_request / bad_config / bad_json`, `401 bad_key`, `403 bad_origin`, `404 not_found`, `409 not_ready`, `413 too_big`, `415 bad_type`, `429 sumo_busy` (queue full) / `sumo_rate` (IP rate limit), `500 sumo_error`. The Workers' own codes (`sumo_off`, `sumo_down`, `sumo_starting` and so on) are listed in `apps/sumo/README.md`.
 
-## 前端对接数据
+## Synthetic 2×2 network (`build_demo.py`)
 
-推荐先取 `manifest.json` 建立场景，再加载轨迹分块；也可按需请求 `/frame`。接口独立于 DOM、Canvas 或其他渲染库。
+### Data for the front end
 
-- `/frame` 返回 `time_s`（实际采样时刻）、`requested_time_s`、`done`、`agents[]`、`signals`、`queues[]` 和 `counts`。118.9 秒返回 118 秒快照，不编造中间位置。结束后 `done=true`、主体为空。
-- 主体包含 `id / kind / x_m / y_m / angle_deg / speed_mps / length_m / width_m / lane_id`。种类为 `car / bus / ped`。坐标为局部米制，x 向东、y 向北；角度从正北顺时针。不是经纬度。**已将车辆前保险杠坐标转换成车身中心，前端不能再减半个车长**。
-- 四路口中心为 A(140,300)、B(340,300)、C(140,140)、D(340,140)，以 `geometry.junctions` 实际返回为准。`geometry.lanes` 包含 SUMO 折线、车道宽度、长度、种类、封闭状态；内部连接、斑马线、步行区域一并提供。
-- `signals` 为 SUMO 原始信号字符串。使用 `geometry.signals[].junction/index/lane` 映射到车道；`G/g` 允许通行（优先级不同）、`y` 黄灯、`r` 红灯。不要在前端另起配时。
-- `queues[]` 为每条车道的检测器最大连续排队长度，不是整条道路队列之和。`counts.running/waiting/ended/halting` 是机动车统计；行人从 `agents` 的 `kind` 区分。
-- 分块 `a` 每行为 `[agentIndex, x厘米, y厘米, 航向角, 速度厘米每秒, laneIndex]`；索引指向 manifest 的 `agents` 和 `geometry.lanes`；`-1` 为未知车道。`q` 是 `[laneIndex, 排队米]`。字段顺序也在 `agent_columns` 中提供。每个块都有 SHA-256，可检验完整性。
-- 几何、位置、尺寸使用同一比例；不要放大车身却保留原车距，也不要用直线插值穿过弯道。当前采样 1 秒，原生物理步长 0.2 秒；精确轨迹保留 SUMO 的规则，显示插值不能用来重新判定碰撞。
+Load `manifest.json` first to build the scene, then the trajectory chunks; `/frame` can also be requested on demand. The API is independent of the DOM, Canvas or any rendering library.
 
-`metrics.mean_journey_s` 包含车辆进入路网前的等待；`mean_extra_journey_s` 与无施工的同一批完整行程比较。`mean_ped_journey_s` 为行走行程时间；`sidewalk_users` 是整次运行中使用该通道的去重人数，**不是瞬时密度**。所有车辆、行人都完成后才发布指标。
+- `/frame` returns `time_s` (the actual sample time), `requested_time_s`, `done`, `agents[]`, `signals`, `queues[]` and `counts`. A request for 118.9 s returns the 118 s snapshot; intermediate positions are never invented. After the end, `done=true` and the agent list is empty.
+- An agent has `id / kind / x_m / y_m / angle_deg / speed_mps / length_m / width_m / lane_id`, with kind `car / bus / ped`. Coordinates are local metres, x east and y north; the angle is clockwise from north. They are not latitude and longitude. **Vehicle front-bumper positions are already converted to the body centre, so the front end must not subtract half a vehicle length again.**
+- The four junction centres are A(140,300), B(340,300), C(140,140) and D(340,140); the values returned in `geometry.junctions` are authoritative. `geometry.lanes` holds SUMO polylines, lane width, length, kind and closure state; internal connections, crossings and walking areas are included.
+- `signals` holds the raw SUMO signal strings. Map them to lanes with `geometry.signals[].junction/index/lane`: `G/g` = go (different priority), `y` = amber, `r` = red. Do not invent signal timing in the front end.
+- `queues[]` is the maximum continuous queue length per lane from the detectors, not the sum along a whole road. `counts.running/waiting/ended/halting` count motor vehicles; pedestrians are told apart by `kind` in `agents`.
+- Each chunk row `a` is `[agentIndex, x cm, y cm, heading, speed cm/s, laneIndex]`; the indices point into the manifest's `agents` and `geometry.lanes`, and `-1` means an unknown lane. `q` is `[laneIndex, queue metres]`. The field order is also given in `agent_columns`. Every chunk has a SHA-256 for integrity checks.
+- Geometry, positions and sizes share one scale: do not enlarge vehicles while keeping the original spacing, and do not interpolate in straight lines through curves. Sampling is currently 1 s with a native physics step of 0.2 s; the exact trajectories follow SUMO's rules, and display interpolation must not be used to re-judge collisions.
 
-## 情景与假设
+`metrics.mean_journey_s` includes waiting before a vehicle enters the network; `mean_extra_journey_s` compares the same complete trips with the no-works run. `mean_ped_journey_s` is the walking trip time; `sidewalk_users` is the number of distinct people who used that footpath during the whole run, **not an instantaneous density**. Metrics are published only after every vehicle and pedestrian has finished.
 
-四种情景共用期望出发时刻、主体 ID、车型和目的地：
+### Scenarios and assumptions
 
-- `baseline`：无施工。
-- `closure`：A → B 关闭内侧车道，保留另一车道。
-- `guided`：同样封道；符合条件的汽车按固定种子和 `diversion_share` 预先选择 A → C → D → B。公交保持直行。不是动态优化或 AI 预测。
-- `footpath`：同样封道，再关闭 A → B 人行道，由 SUMO 重新选择可步行路径。关闭人行道时重新构建步行网络，不能只改生成后的通行权限，否则 SUMO 的 walkingarea 连接会失效。
+The four scenarios share desired departure times, agent ids, vehicle types and destinations:
 
-街区尺寸 200×160 米、外接路段 140 米、每方向两条 3.2 米车道、人行道 2.4 米、40 km/h 限速、自动生成固定配时，均为**模型假设**。默认车流主方向 1150 辆/小时，其他方向 300–580 辆/小时；公交 60 秒一班；行人三组 720/500/360 人/小时。泊松生成汽车和行人需求；默认 seed 42 实际生成 483 辆车和 276 位行人。没有引用实测车流，不能把结果称为墨尔本现实预测。
+- `baseline`: no works.
+- `closure`: the inner lane of A → B is closed; the other lane stays open.
+- `guided`: the same closure; eligible cars pre-select A → C → D → B according to a fixed seed and `diversion_share`. Buses go straight. This is not dynamic optimisation or an AI prediction.
+- `footpath`: the same closure, plus the A → B footpath closed, so SUMO re-plans walkable routes. Closing a footpath rebuilds the pedestrian network; changing permissions after generation is not enough, because SUMO's walking-area connections would break.
 
-本次接入包括跟驰、车道选择、路权、信号、有限车道空间造成的排队与回溢、行人对向交互和合法绕行。没有接入自行车、电车、天气、VMS 文本理解或现场校准。默认 `Krauss` 跟驰及 `striping` 行人模型；车辆瞬移关闭，行人强行脱困时间远大于运行窗口，启用路口碰撞检查。碰撞、瞬移、急停、紧急制动、行人卡死或未清空都会使任务失败，错误保留在审计日志，不伪造成功结果。零碰撞只说明本次模型检查通过。
+Block size 200 × 160 m, 140 m approach links, two 3.2 m lanes per direction, 2.4 m footpaths, a 40 km/h speed limit and automatically generated fixed signal plans are all **model assumptions**. Default flows are 1,150 veh/h on the main direction and 300–580 veh/h elsewhere; a bus every 60 s; three pedestrian groups of 720 / 500 / 360 people per hour. Car and pedestrian demand are generated as Poisson processes; the default seed 42 produces 483 vehicles and 276 pedestrians. No measured traffic counts are used, so the results must not be called a prediction for real Melbourne.
 
-原理和输出依据：[SUMO 安全检查](https://sumo.dlr.de/docs/Simulation/Safety.html)、[路口与路权](https://sumo.dlr.de/docs/Simulation/Intersections.html)、[行人模型](https://sumo.dlr.de/docs/Simulation/Pedestrians.html)、[FCD 轨迹坐标](https://sumo.dlr.de/docs/Simulation/Output/FCDOutput.html)、[行程指标](https://sumo.dlr.de/docs/Simulation/Output/TripInfo.html)、[E2 排队检测](https://sumo.dlr.de/docs/Simulation/Output/Lanearea_Detectors_%28E2%29.html)。
+The model covers car following, lane choice, right of way, signals, queueing and spill-back caused by finite lane space, pedestrian counter-flow interaction and legal detours. It does not cover bicycles, trams, weather, understanding VMS text or field calibration. It uses the default `Krauss` car-following and `striping` pedestrian models; vehicle teleporting is off, the pedestrian forced-escape time is far longer than the run, and junction collision checks are on. A collision, teleport, emergency stop, emergency braking, stuck pedestrian or failure to clear fails the job; the error stays in the audit log and no successful result is faked. Zero collisions only means this model run passed its checks.
 
-## 真实 CBD 路网（contract v2，`build_real.py`）
+Background and output references: [SUMO safety checks](https://sumo.dlr.de/docs/Simulation/Safety.html), [junctions and right of way](https://sumo.dlr.de/docs/Simulation/Intersections.html), [pedestrian models](https://sumo.dlr.de/docs/Simulation/Pedestrians.html), [FCD trajectory coordinates](https://sumo.dlr.de/docs/Simulation/Output/FCDOutput.html), [trip metrics](https://sumo.dlr.de/docs/Simulation/Output/TripInfo.html), [E2 queue detectors](https://sumo.dlr.de/docs/Simulation/Output/Lanearea_Detectors_%28E2%29.html).
 
-第 2 步地图上的车改由 SUMO 在**真实路网**上算：`build_real.py` 读 `apps/roads/public/cbd/` 的 `network.json`（OSM 路段）、`signals.json`（SCATS 路口）、`flows.json`（工作日 08:00–09:00 各路段车流）。**T48（lead 定的方案 B）**：SUMO 跑满 **08:00–09:00 一整小时**，自己算 09:00 的排队；施工段的放行能力对上引擎的假设，好跟引擎的「排队 918 m」公平比。
+## Real CBD network (contract v2, `build_real.py`)
 
-- **路网**：Elizabeth–Spring × Bourke–La Trobe（外扩 35 m，含 16 个 SCATS 路口和施工点人行灯 2935），再给排队留地方：Russell St 以东到 `network.json` 的东边界（Spring 以东的 Albert St 到 Gisborne St、Nicholson St、Victoria Pde），南到 Collins St，北过 La Trobe 约 170 m（`AREA_BOXES`；197 个节点 / 356 条路段）。施工段上游的 Lonsdale → Albert St 西行链 849 m（Spring 在 437 m 处）。试过只切 Albert St 一条走廊、不要东北角那几个 OSM 合并大路口：routeSampler 换了一套路线，Russell 南行在 Russell × Lonsdale 右转锁死，无施工时 09:00 就有近 200 辆要过施工段的车等着进路网——更糟，所以留着东北角。
-- **时间**：07:57:00 空网起步、用 08:00 的车流、**还没施工**，预热 180 s 不展示；**08:00:00 整封道**（`works.add.xml`：rerouter 的 `closingLaneReroute` 封中央侧车道 + 限速牌把剩下那条改 30 km/h），展示和统计 08:00–09:00（`clock0_s = 0`、`duration_s = 3600`、`sample_s = 2`）。
-- **通行能力**：2935 给 Lonsdale 车流的绿 + 黄 **50%**（42 s 绿 / 3 s 黄 / 45 s 红）。这样两车道约 1 800 辆/小时、封一条后约 800，对上引擎的 1 800 × ½ × 0.9 = **810 辆/小时**；实放多少写在 `metrics.works_throughput_vph`（烘焙副本：原方案 805、AI 方案 788、无施工 1 161 = 需求）。
-- **堵车和死锁**：车不会被删。`--ignore-junction-blocker 60`（堵在路口里 60 s 的车，横向车流不再让它）+ `--time-to-teleport 300`（SUMO 默认：整整 300 s 一动不动才沿路线挪到前面）。完全关掉瞬移试过：无施工情景 07:03 起 Little Bourke × Swanston 一辆右转车等不到下游空位，Swanston / La Trobe / Elizabeth 一圈锁死，09:00 有 500 多辆车原地不动——那是 SUMO 路口模型的死锁，不是施工。施工排队里的车每个 90 s 周期都往前挪，不会被瞬移；每次瞬移都记数、记位置（`teleports_in_hour`、`teleports_works_bound`、`teleport_edges`；烘焙副本 0–2 次，都不在施工路线上）。
-- **回放**：只写 `original` / `ai` 两个情景的帧（`baseline` 的 `chunks: []`、`agents: []`，只有指标，页面不播），只写页面视野里的车：`VIEW_BOX` = 16 个路口外扩 12 m、往东（朝 Spring）140 m。每 2 s 一帧，每块 60 帧（2 分钟），共 30 块。
+The vehicles on the step 02 map are computed by SUMO on the **real network**. `build_real.py` reads `network.json` (OSM links), `signals.json` (SCATS junctions) and `flows.json` (weekday 08:00–09:00 flows per link) from `apps/roads/public/cbd/`. SUMO runs the **whole 08:00–09:00 hour** and computes the 09:00 queue itself; the works link's discharge capacity matches the engine's assumption, so the result can be compared fairly with the engine's 918 m queue.
 
-| id | 施工 | 绕行比例 | 说明 |
+- **Network**: Elizabeth–Spring × Bourke–La Trobe (+35 m margin, covering 16 SCATS junctions and pedestrian signal 2935 at the works), plus room for the queue: east of Russell St to the eastern edge of `network.json` (Albert St east of Spring, to Gisborne St, Nicholson St and Victoria Pde), south to Collins St, and about 170 m north of La Trobe (`AREA_BOXES`; 197 nodes / 356 links). The westbound Lonsdale → Albert St chain upstream of the works is 849 m long (Spring St at 437 m). Cutting only the Albert St corridor and dropping the large merged OSM junctions in the north-east corner was tried: routeSampler then chose a different route set, southbound Russell St locked up turning right at Russell × Lonsdale, and even without works nearly 200 vehicles bound through the works were waiting to enter the network at 09:00. That was worse, so the north-east corner stays.
+- **Time**: the network starts empty at 07:57:00 with 08:00 demand and **no works yet**; the 180 s warm-up is not shown. **The lane closes at 08:00:00** (`works.add.xml`: a rerouter `closingLaneReroute` closes the median-side lane and a speed sign sets the remaining lane to 30 km/h). Shown and measured: 08:00–09:00 (`clock0_s = 0`, `duration_s = 3600`, `sample_s = 2`).
+- **Capacity**: signal 2935 gives Lonsdale traffic **50%** green + amber (42 s green / 3 s amber / 45 s red). That gives about 1,800 veh/h on two lanes and about 800 with one closed, matching the engine's 1,800 × ½ × 0.9 = **810 veh/h**. The discharge SUMO actually achieves is reported as `metrics.works_throughput_vph` (baked copy: original 805, AI plan 788, no works 1,161 = demand).
+- **Jams and deadlocks**: vehicles are never deleted. `--ignore-junction-blocker 60` (crossing traffic stops yielding to a vehicle that has blocked a junction for 60 s) + `--time-to-teleport 300` (SUMO's default: only a vehicle that has not moved at all for 300 s is moved ahead along its route). Turning teleporting off entirely was tried: in the no-works scenario, from 07:03 a right-turning vehicle at Little Bourke × Swanston could not find space downstream, a loop of Swanston / La Trobe / Elizabeth locked up, and more than 500 vehicles were stationary at 09:00. That is a deadlock of SUMO's junction model, not an effect of the works. Vehicles queued behind the works move up every 90 s cycle and are never teleported; every teleport is counted and located (`teleports_in_hour`, `teleports_works_bound`, `teleport_edges`; 0–2 in the baked copy, none on the works route).
+- **Replay**: frames are written only for `original` / `ai` (`baseline` has `chunks: []` and `agents: []`: metrics only, not played by the page), and only for vehicles inside the page's view: `VIEW_BOX` = the 16 junctions + 12 m, extended 140 m east towards Spring St. One frame every 2 s, 60 frames (2 minutes) per chunk, 30 chunks.
+
+| id | Works | Diversion share | Notes |
 |---|---|---|---|
-| `baseline` | 无 | 0 | 对照（只出指标） |
-| `original` | 08:00 起 Lonsdale 西行 `l595594354_9756035316`（42 m）封右侧车道，剩一条限速 30 km/h | `p_original`，默认 0.14 | 引擎对「ROADWORK AHEAD」的读法 |
-| `ai` | 同上 | `p_ai`，默认 0.53 | 引擎对「USE RUSSELL / SAVE 9 MIN」的读法 |
+| `baseline` | none | 0 | control (metrics only) |
+| `original` | from 08:00 the right lane of Lonsdale St westbound `l595594354_9756035316` (42 m) is closed; the remaining lane runs at 30 km/h | `p_original`, default 0.14 | the engine's reading of "ROADWORK AHEAD" |
+| `ai` | as above | `p_ai`, default 0.53 | the engine's reading of "USE RUSSELL / SAVE 9 MIN" |
 
-目录格式（烘焙副本和在线运行的输出一样）：`index.json` + `<id>/manifest.json` + `<id>/frames-NNN.json`，字段见 `docs/contract.md` 的 contract v2。要点：位置是**车身中心**（已从 FCD 的车头换算）、经纬度 ×1e6 取整；`angle_deg` 是 SUMO 约定（0 = 北、顺时针，取整到 1°），页面坐标（x 东、y 北）里朝向 = `[sin a, cos a]`；每帧 `tls` 是视野里有信号头的那些控制器（19 个）的原始灯色串，信号头 `signal_heads[].idx` 指向串里的位置（有 `G/g` 算绿，否则有 `y/Y` 算黄，否则红）；`q` 是施工段起点往上游、断档 ≤ 60 m 的连续排队米数（车速 < 1.5 m/s）。`index.params` 新增 `hour_window: [8, 9]`、`green_2935`、`network_extent`（中文 `network_extent_zh`）、`sim_s`（3 780）、`warmup_s`（180，在 08:00 之前）、`sample_s`、`chain_m`、`engine_capacity_vph`、`time_to_teleport_s`、`ignore_junction_blocker_s`。
+Directory format (identical for the baked copy and live runs): `index.json` + `<id>/manifest.json` + `<id>/frames-NNN.json`; the fields are documented under contract v2 in `docs/reference/interfaces.md`. Key points: positions are the **vehicle centre** (converted from FCD's front bumper), with longitude and latitude × 1e6 rounded to integers. `angle_deg` follows the SUMO convention (0 = north, clockwise, rounded to 1°); in page coordinates (x east, y north) the heading is `[sin a, cos a]`. Each frame's `tls` holds the raw signal strings of the controllers with signal heads in view (19), and `signal_heads[].idx` points into the string (any `G/g` = green, otherwise any `y/Y` = amber, otherwise red). `q` is the continuous queue in metres upstream of the start of the works with gaps ≤ 60 m (vehicles slower than 1.5 m/s). `index.params` adds `hour_window: [8, 9]`, `green_2935`, `network_extent` (Chinese text in `network_extent_zh`), `sim_s` (3,780), `warmup_s` (180, before 08:00), `sample_s`, `chain_m`, `engine_capacity_vph`, `time_to_teleport_s` and `ignore_junction_blocker_s`.
+
+### Re-baking the replay
 
 ```bash
-# 烘焙副本必须用云端同一个镜像（linux/amd64）跑：routeSampler 在 macOS 和 Linux 上挑的需求不一样
+# The baked copy must be produced in the same linux/amd64 image as the cloud: routeSampler picks different demand on macOS and Linux
 docker build --platform linux/amd64 -f apps/sumo/Dockerfile -t hackathon-sumo:hour apps
-mkdir -p ~/.cache/t48bake && rm -rf ~/.cache/t48bake/bake42   # colima 只挂载家目录，/tmp 不行
+mkdir -p ~/.cache/t48bake && rm -rf ~/.cache/t48bake/bake42   # colima mounts only the home directory, not /tmp
 docker run --rm --platform linux/amd64 --cpus 4 -e SUMO_REAL_SOURCE=docker-linux-amd64 -v ~/.cache/t48bake:/bake hackathon-sumo:hour \
   python web/tools/sumo/build_real.py --seed 42 --output /bake/bake42 --work-dir /bake/bake42-raw
 rm -rf apps/sumo/public/real && cp -R ~/.cache/t48bake/bake42 apps/sumo/public/real
-# 本机试跑（结果和 Linux 不同，只看形状 / 耗时）；只建缓存（路网 + 需求），镜像构建时预热用
+# Local trial run (results differ from Linux; only for shape / timing); cache-only build (network + demand), used to warm the image at build time
 /tmp/rippletwin-sumo-venv/bin/python apps/web/tools/sumo/build_real.py --seed 42 --output /tmp/sumo-real-42 --work-dir /tmp/sumo-real-raw-42
 /tmp/rippletwin-sumo-venv/bin/python apps/web/tools/sumo/build_real.py --prepare-only
 ```
 
-`requirements.txt` 之外第一次建缓存还要 `numpy scipy`（SUMO 自带的 `routeSampler.py` 要）。Python 接口：`build_real.build(args)`（`args.seed / p_original / p_ai / scenarios / output / work_dir`，失败抛异常）和 `build_real.validate_real(payload)`（白名单 `seed` 0–2147483647 整数、`p_original` / `p_ai` 0–1、`scenarios` ⊆ `baseline / original / ai` 非空不重复；可带 `"network": "real"`；其他字段一律 `ValueError`）。`build()` 每个情景起一个子进程（`build_real.py --job`，SUMO 和读 FCD 都在里面），几个情景真并行。改了 `build_real.py` 就要重烘，`test_sumo_real.py` 会对 `generator_sha256`。
+Beyond `requirements.txt`, the first cache build also needs `numpy scipy` (for SUMO's bundled `routeSampler.py`). Python interface: `build_real.build(args)` (`args.seed / p_original / p_ai / scenarios / output / work_dir`; raises on failure) and `build_real.validate_real(payload)` (whitelist: `seed` an integer in 0–2147483647, `p_original` / `p_ai` in 0–1, `scenarios` a non-empty subset of `baseline / original / ai` without duplicates; may carry `"network": "real"`; any other field raises `ValueError`). `build()` starts one subprocess per scenario (`build_real.py --job`, which runs SUMO and parses the FCD), so the scenarios run truly in parallel. Any change to `build_real.py` requires a re-bake; `test_sumo_real.py` checks `generator_sha256`.
 
-| 环境变量 | 默认 | 说明 |
+| Environment variable | Default | Notes |
 |---|---|---|
-| `SUMO_ROADS_DIR` | 仓库的 `apps/roads/public/cbd` | 容器里是 `/app/roads/public/cbd` |
-| `SUMO_REAL_CACHE` | 系统临时目录下 `rippletwin-sumo-real-cache/` | 按「本脚本 + SUMO 版本 + 三个输入文件 + 2935 绿信比」的哈希分目录，原子改名，多进程安全 |
-| `SUMO_REAL_JOBS` | `min(3, CPU 数)` | 三个情景同时跑几个 |
-| `SUMO_REAL_SOURCE` | macOS arm64 上是 `local-macos-arm64`，否则 `<平台>-<架构>` | 写进 `index.params.source`；烘焙副本是 `docker-linux-amd64` |
+| `SUMO_ROADS_DIR` | the repo's `apps/roads/public/cbd` | `/app/roads/public/cbd` in the container |
+| `SUMO_REAL_CACHE` | `rippletwin-sumo-real-cache/` in the system temp directory | one subdirectory per hash of "this script + SUMO version + the three input files + 2935 green share"; atomic rename, safe across processes |
+| `SUMO_REAL_JOBS` | `min(3, CPU count)` | how many scenarios run at once (`4` in the container) |
+| `SUMO_REAL_SOURCE` | `local-macos-arm64` on macOS arm64, otherwise `<platform>-<arch>` | written to `index.params.source`; the baked copy says `docker-linux-amd64` |
 
-**实测耗时**（seed 42，三个情景，缓存热）：Apple 芯片本机 32–35 s（每个情景 SUMO 20–27 s + 读 FCD 6–8 s，3 个并行）；colima linux/amd64（Rosetta 转译）`--cpus 4` 50 s、`--cpus 1` 99 s。云端是 1 vCPU、原生 amd64（不用转译），页面等 180 s。缓存冷另加约 6 s（镜像构建时已经建好）。回放：原方案 15.1 MB、AI 方案 16.1 MB（各 30 块，最大一块 0.58 MB），baseline 只有 11 KB 的 manifest。
+**Measured run time** (seed 42, three scenarios, warm cache): 32–35 s locally on Apple silicon (per scenario SUMO 20–27 s + FCD parsing 6–8 s, 3 in parallel); colima linux/amd64 (Rosetta) 50 s with `--cpus 4` and 99 s with `--cpus 1`. The committed bake records its wall time in `timing.total_s` of `index.json` (about 27–32 s). The cloud container was a `standard-4` instance (4 vCPU, native amd64, no translation), and the page waits up to 180 s. A cold cache adds about 6 s (the image already contains it). Replay size: original 15.1 MB, AI plan 16.1 MB (30 chunks each, largest 0.58 MB); `baseline` is an 11 KB manifest only.
 
-**需求**：207 条路段都有 SCATS 计数（97 条实测，其余插值），routeSampler 选出约 150 条路线、约 15 700 辆/小时，其中穿过施工段 1 143 辆/小时（SCATS 计数 1 144）。每个 seed 按泊松到达重新抽出发时刻（三个情景同一批车、同一个绕行抽签数）。只有小汽车。注意：SCATS 在施工段是 1 144 辆/小时，Russell 路口的 Lonsdale 西行只有 513——中间多出来的车，routeSampler 一部分让它们从 Russell St 转进来，一部分直接从 Russell 两侧的 Lonsdale 路段中间出发（相当于停车场 / 小巷出来的车）；排队堵到那里时这些车进不了路网，算在「还没能进路网」里。东北角（Nicholson / Victoria Pde）和 Swanston St 北段的入口在 netconvert 默认配时下无施工也进不去车（09:00 积压约 900 辆），跟施工无关，报在 `insertion_backlog_end`，也把三个情景的 `mean_timeloss_s` 一起抬高（`mean_extra_s` 是同一批车相减，抵掉了）。**安全**：车道上的碰撞直接失败；路口内部的「碰撞」（OSM 合并出来的大路口内部车道几何重叠 + ignore-junction-blocker 放行的车）以 `warn` 记录、不改动力学，单独报在 `metrics.junction_collisions`（烘焙副本 66–67 次）。
+**Demand**: all 207 links have SCATS counts (97 measured, the rest interpolated). routeSampler picks about 150 routes and about 15,700 veh/h, of which 1,143 veh/h pass through the works (SCATS count 1,144). Each seed redraws departure times as Poisson arrivals (the three scenarios share the same vehicles and the same diversion draw). Cars only. Note that SCATS shows 1,144 veh/h at the works but only 513 on westbound Lonsdale St at Russell St. routeSampler brings part of the difference in from Russell St and lets part depart mid-link from the Lonsdale links either side of Russell (equivalent to traffic leaving car parks or laneways); once the queue reaches them, these vehicles cannot enter the network and count as "waiting to enter". Entries in the north-east corner (Nicholson St / Victoria Pde) and northern Swanston St cannot insert vehicles under netconvert's default signal plans even without works (a backlog of about 900 at 09:00). This is unrelated to the works; it is reported as `insertion_backlog_end` and raises `mean_timeloss_s` equally in all three scenarios (`mean_extra_s` subtracts the same vehicles, so it cancels out). **Safety**: a collision on a lane fails the run. "Collisions" inside junctions (overlapping internal lane geometry of large merged OSM junctions, plus vehicles released by ignore-junction-blocker) are logged as `warn` without changing the dynamics and reported separately as `metrics.junction_collisions` (66–67 in the baked copy).
 
-**指标**（旧的都留着）：`mean_timeloss_s` = 08:00–09:00 出发的同一批车到 09:00 累计的损失时间（含等着进路网）；`mean_extra_s` = 同一批车比 `baseline` 多出的；`works_traffic_extra_s` = 其中原路线穿过施工段的车；`detour_vehicles` / `eligible_vehicles` = 这一小时实际绕行的 / 有资格绕行的；`per_minute.halting` / `harsh` = 视野里每分钟平均停着的车数 / 急刹次数（每 2 s 采样）。T48 新增：
+**Metrics** (all earlier ones are kept): `mean_timeloss_s` = time loss accumulated by 09:00 by the cohort departing 08:00–09:00 (including waiting to enter); `mean_extra_s` = the same vehicles' excess over `baseline`; `works_traffic_extra_s` = the same for vehicles whose original route passes through the works; `detour_vehicles` / `eligible_vehicles` = vehicles that actually detoured / were eligible to detour during the hour; `per_minute.halting` / `harsh` = mean number of stopped vehicles in view / harsh-braking events per minute (sampled every 2 s). Added for the full-hour run:
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `works_queue_end_m` | 09:00 的**实际排队**：Lonsdale / Albert St 西行链上停着的车（< 1.5 m/s、断档 ≤ 60 m）从施工段往上游排到哪，取最后一个 90 s 周期里最长的 |
-| `works_queue_equiv_end_m` | 09:00 的**引擎算法**：要穿过施工段、排在它后面的车（沿各自路线到施工段的距离，断档 ≤ 60 m 连成一串，含回溢到 Russell / Exhibition / Spring St 上的）+ 还没能进路网的，取最后一个周期的平均车数 × 7 m ÷ 2 |
-| `works_queue_equiv_end_vehicles` | 上面那个车数拆开：`lonsdale_albert` / `side_streets` / `waiting_to_enter` |
-| `queue_series` | `[[分钟, 实际排队 m, 引擎算法 m], …]`，0–60 每分钟一项，规则同上 |
-| `works_queue_vs_baseline_end_m` | 对照组算法（同一次也跑了 `baseline` 才有）：同一批车无施工时 09:00 前已经过了施工点、有施工时还没过的车数 × 3.5 m，就是 D/D/1 的排队车数 |
-| `works_throughput_vph` / `works_demand_vph` | 这一小时施工段末端线圈实际通过的车数 / 这一小时出发、路线穿过施工段（没绕行）的车数 |
-| `works_capacity_assumption_vph` | 810（引擎的假设，不是 SUMO 的输入；SUMO 实放多少看上一行） |
-| `insertion_backlog_end`、`teleports_in_hour`、`teleports_works_bound`、`teleport_edges`、`works_queue_equiv_max_m` | 见上 |
+| `works_queue_end_m` | **physical queue** at 09:00: how far upstream of the works the stopped vehicles (< 1.5 m/s, gaps ≤ 60 m) reach on the westbound Lonsdale / Albert St chain; the longest over the last 90 s cycle |
+| `works_queue_equiv_end_m` | **engine method** at 09:00: vehicles bound through the works that are queued behind it (distance to the works along each route, gaps ≤ 60 m joined into one queue, including spill-back onto Russell / Exhibition / Spring St) + those still waiting to enter; mean vehicle count over the last cycle × 7 m ÷ 2 |
+| `works_queue_equiv_end_vehicles` | that vehicle count split into `lonsdale_albert` / `side_streets` / `waiting_to_enter` |
+| `queue_series` | `[[minute, physical queue m, engine method m], …]`, one entry per minute from 0 to 60, same rules as above |
+| `works_queue_vs_baseline_end_m` | baseline-comparison method (only when the same run also ran `baseline`): vehicles of the same cohort that had passed the works by 09:00 without works but had not with works, × 3.5 m, i.e. the D/D/1 queue count |
+| `works_throughput_vph` / `works_demand_vph` | vehicles actually passing the detector at the end of the works during the hour / vehicles departing during the hour whose route passes through the works (not detoured) |
+| `works_capacity_assumption_vph` | 810 (the engine's assumption, not a SUMO input; see the previous row for what SUMO actually discharges) |
+| `insertion_backlog_end`, `teleports_in_hour`, `teleports_works_bound`, `teleport_edges`, `works_queue_equiv_max_m` | see above |
 
-**烘焙副本（linux/amd64，seed 42）**：
+**Baked copy (linux/amd64, seed 42)**:
 
-| | 实际排队 09:00 / 最长 | 引擎算法 09:00 | 对照组算法 | 放行 辆/小时 | 需求 辆/小时 | 09:00 那些车在哪（链上 / 横街 / 没进路网） | 绕行 | 瞬移 |
+| | Physical queue 09:00 / max | Engine method 09:00 | Baseline-comparison method | Discharge veh/h | Demand veh/h | Where those vehicles are at 09:00 (chain / side streets / not yet entered) | Detoured | Teleports |
 |---|---|---|---|---|---|---|---|---|
-| 无施工 | 23 / 152 m | 15 m | — | 1 161 | 1 173 | 3.5 / 0 / 0.8 | 0 | 1 |
-| 原方案 | 246 / 373 m | **973 m** | 991 m | 805 | 1 100 | 22 / 15 / 241 | 73 / 538 | 0 |
-| AI 方案 | 260 / 278 m | **305 m** | 312 m | 788 | 886 | 8 / 1 / 78 | 287 / 538 | 2 |
+| No works | 23 / 152 m | 15 m | — | 1,161 | 1,173 | 3.5 / 0 / 0.8 | 0 | 1 |
+| Original plan | 246 / 373 m | **973 m** | 991 m | 805 | 1,100 | 22 / 15 / 241 | 73 / 538 | 0 |
+| AI plan | 260 / 278 m | **305 m** | 312 m | 788 | 886 | 8 / 1 / 78 | 287 / 538 | 2 |
 
-跟引擎的 918 m 比：引擎 = 需求 1 144 − 513 × 0.14 = 1 072 辆/小时、能力 810 → 每小时多 262 辆 → 918 m。SUMO 用同一个能力假设（实放 805），这一抽的需求略高（1 100：泊松抽样，绕行 73 辆），多 295 辆 → 引擎算法 973 m、对照组算法 991 m，比 918 m 长 6–8%，差在需求抽样上。但**停在路上的**排队只有约 250 m（最长 373 m，到 Exhibition 前），不是引擎地图上那样沿 Lonsdale 一直排到 Spring：Russell 到施工段只有约 100 m，上游路段装不下；被耽误的车大多是本该从 Russell 两侧的 Lonsdale 路段中间进来（SCATS 513 → 1 144）、被排队挡在外面的，少数回溢到 Russell St 上。本机（macOS）同一 seed 的需求抽样不同：原方案 1 065 m、AI 方案 394 m。这是模型之间的交叉检验，不是实测。
+Compared with the engine's 918 m: engine demand = 1,144 − 513 × 0.14 = 1,072 veh/h against a capacity of 810, so 262 extra vehicles per hour → 918 m. SUMO uses the same capacity assumption (discharging 805); this draw has slightly higher demand (1,100, from Poisson sampling, with 73 vehicles detoured), so 295 extra vehicles → 973 m by the engine method and 991 m by the baseline-comparison method, 6–8% longer than 918 m. The difference comes from demand sampling. But the queue **standing on the road** is only about 250 m (longest 373 m, short of Exhibition St), not a queue all the way along Lonsdale St to Spring St as on the engine's map: Russell St is only about 100 m from the works and the upstream links cannot hold it. Most of the delayed vehicles should have entered mid-link from the Lonsdale links either side of Russell St (SCATS 513 → 1,144) and are held out by the queue; a few spill back onto Russell St. On macOS the same seed samples different demand: original 1,065 m, AI plan 394 m. This is a cross-check between models, not a measurement.
 
-### 方案模式（T49，`options`）
+### Options mode (`options`)
 
-同一路网、同一施工（封一条车道），每个方案只换绕行比例 p：`POST /sumo/v1/runs` 带 `{"network":"real","seed":42,"options":[{"id":"A","p":0.14},{"id":"B","p":0.14},{"id":"C","p":0.607}]}`（`options` 1–5 个，`id` ∈ A–E 不重复，`p` 0–1；可选 `"frames":true`，默认 `false`；不能和 `p_original` / `p_ai` / `scenarios` 混用，否则 400 `bad_config`）→ 一个任务跑 `baseline` + `opt-A` / `opt-B` / `opt-C`（T48 的一小时：08:00 封道、跑到 09:00），目录还是 contract v2（`index.json` + `<id>/manifest.json`，指标字段同 `original` / `ai`，含 `works_queue_equiv_end_m` / `works_queue_end_m` / `queue_series` / `works_throughput_vph` / `works_traffic_extra_s` / `detour_vehicles` 等全部 T48 指标；`label` = `Option A` / `方案 A`）。`frames:true` 只给 `opt-<id>` 写帧，`baseline` 照旧只出指标。p 相同的方案（同一 seed、同一批车、同一个抽签数，结果本来一样）只跑一次，后面的照抄 manifest 并带 `reused_from: "opt-A"`（`index.timing.sumo_s` 里没有它）；`frames:false` 时 `chunks: []`、不写 `frames-NNN.json`。命令行：`build_real.py --options A=0.14 B=0.14 C=0.607 [--frames] --output …`。p = 0.14 的方案和 `original` 指标逐项相同（`test_sumo_real.py` 真跑对过）。
+Same network, same works (one lane closed); each option changes only the diversion share p. `POST /sumo/v1/runs` with `{"network":"real","seed":42,"options":[{"id":"A","p":0.14},{"id":"B","p":0.14},{"id":"C","p":0.607}]}` (1–5 `options`, unique `id` in A–E, `p` in 0–1; optional `"frames":true`, default `false`; cannot be combined with `p_original` / `p_ai` / `scenarios`, otherwise 400 `bad_config`). One job runs `baseline` + `opt-A` / `opt-B` / `opt-C` over the full hour (lane closed at 08:00, run to 09:00). The directory is still contract v2 (`index.json` + `<id>/manifest.json`), with the same metric fields as `original` / `ai`, including every full-hour metric such as `works_queue_equiv_end_m`, `works_queue_end_m`, `queue_series`, `works_throughput_vph`, `works_traffic_extra_s` and `detour_vehicles`; `label` is bilingual (`Option A` in English). `frames:true` writes frames only for `opt-<id>`; `baseline` stays metrics-only. Options with the same p (same seed, same vehicles, same draw, so identical results) run once; later ones copy the manifest and carry `reused_from: "opt-A"` (they are absent from `index.timing.sumo_s`). With `frames:false` the manifest has `chunks: []` and no `frames-NNN.json` is written. Command line: `build_real.py --options A=0.14 B=0.14 C=0.607 [--frames] --output …`. An option with p = 0.14 matches `original` metric for metric (`test_sumo_real.py` checks this with a real run).
 
-实测（T48 一小时版，Apple 芯片 10 核，seed 42，A 0.14 / B 0.14 / C 0.605 + baseline，只写指标，实际跑 3 个 SUMO）：3 个并行 16.6–18.3 s（缓存冷 18.3 s，建缓存约 3 s）；`SUMO_REAL_JOBS=1` 一个一个跑（约等于单核）35.4 s。原三情景同一台机器 16.9–17.9 s。没有预跑兜底：`sumo-client.js` 的 `runOptions(options, {seed, onStatus, signal, timeoutMs = 180000})` 成功回 `{source:'live', runId, index}`，失败回 `{source:'none', reason}`。
+Measured (one-hour version, 10-core Apple silicon, seed 42, A 0.14 / B 0.14 / C 0.605 + baseline, metrics only, 3 SUMO processes actually run): 16.6–18.3 s with 3 in parallel (18.3 s with a cold cache; building the cache takes about 3 s); 35.4 s one at a time with `SUMO_REAL_JOBS=1` (roughly single-core). The original three scenarios take 16.9–17.9 s on the same machine. There is no pre-computed fallback: `runOptions(options, {seed, onStatus, signal, timeoutMs = 180000})` in `sumo-client.js` returns `{source:'live', runId, index}` on success and `{source:'none', reason}` on failure. The web's step 04 sends plans A (no VMS), B (two VMS showing the delay) and C (one VMS naming the detour) with p taken from the engine's sign readings.
 
-## 验证
+## Verification
 
 ```bash
-python3 apps/web/tests/test_sumo_real.py   # 烘焙副本的形状 / 哈希 / 范围 / 排队指标；设 SUMO_PY=<venv 的 python> 再真跑查可复现（约 1–2 分钟）
+python3 apps/web/tests/test_sumo_real.py   # shape / hash / ranges / queue metrics of the baked copy; set SUMO_PY=<venv python> to re-run SUMO and check reproducibility (about 1–2 minutes)
 python3 apps/web/tests/test_sumo_backend.py
-# 服务启动后：提交真实任务并检验所有轨迹块和接口
+# With the server running: submit a new synthetic-network job and check every trajectory chunk and endpoint
 python3 apps/web/tools/sumo/smoke.py
-# 也可验证已有任务，避免重复计算
+# Or verify an existing job to avoid recomputing
 python3 apps/web/tools/sumo/smoke.py --run-id RUN_ID
-# 云端：经网站同一条路径验证（Worker 限流，一分钟内别连跑 3 次以上）
-python3 apps/web/tools/sumo/smoke.py --base https://<站点>/api/sumo/v1
+# Through a deployed site (Worker rate limit: no more than 3 runs a minute); the hackathon deployment is offline, so this now fails with 502
+python3 apps/web/tools/sumo/smoke.py --base https://<site>/api/sumo/v1
 ```
-
-`examples/` 是从真实 API 导出的指标与一帧数据样本，不是供接口兜底的预设结果。每次 POST 都运行原生 SUMO。前端接线需由前端负责人完成；本任务没有更改页面。
