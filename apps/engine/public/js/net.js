@@ -1,28 +1,28 @@
-// net.js —— 路网索引、最短路、路段通行时间（BPR + 确定性排队）。纯函数，浏览器和 node 都能直接 import。
-// 用法：const net = loadNetwork(network); shortestPath(net, 'n0_8', 'n0_3', { banned });
+// net.js — network index, shortest paths and link travel time (BPR + deterministic queueing). Pure functions; imports directly in the browser and in Node.
+// Usage: const net = loadNetwork(network); shortestPath(net, 'n0_8', 'n0_3', { banned });
 
-export const BPR = { alpha: 0.15, beta: 4 }; // 美国公路局（BPR）容量函数的常用参数
-export const PERIOD_S = 3600; // 按一小时算
-export const VEH_GAP_M = 7; // 排队时每辆车占的长度（车长 + 间距）
+export const BPR = { alpha: 0.15, beta: 4 }; // common parameters of the US Bureau of Public Roads (BPR) volume-delay function
+export const PERIOD_S = 3600; // one-hour period
+export const VEH_GAP_M = 7; // queue length per vehicle (vehicle length + gap)
 
 export function loadNetwork(network) {
-  if (!network || !Array.isArray(network.nodes) || !Array.isArray(network.links)) throw new Error('network 要有 nodes[] 和 links[]');
+  if (!network || !Array.isArray(network.nodes) || !Array.isArray(network.links)) throw new Error('network must have nodes[] and links[]');
   const nodes = new Map(network.nodes.map(n => [n.id, n]));
   const links = new Map();
   const out = new Map(), inn = new Map();
   for (const l of network.links) {
     for (const k of ['id', 'from', 'to', 'len_m', 'lanes', 'speed_kmh', 'cap_vph', 't0_s']) {
-      if (l[k] == null) throw new Error(`路段 ${l.id ?? '?'} 缺字段 ${k}`);
+      if (l[k] == null) throw new Error(`link ${l.id ?? '?'} is missing field ${k}`);
     }
-    if (!('name' in l)) throw new Error(`路段 ${l.id} 缺字段 name（没路名就写 null）`);
-    if (!nodes.has(l.from) || !nodes.has(l.to)) throw new Error(`路段 ${l.id} 的端点不在 nodes 里`);
+    if (!('name' in l)) throw new Error(`link ${l.id} is missing field name (use null if unnamed)`);
+    if (!nodes.has(l.from) || !nodes.has(l.to)) throw new Error(`link ${l.id} has an endpoint not in nodes`);
     links.set(l.id, l);
     if (!out.has(l.from)) out.set(l.from, []);
     out.get(l.from).push(l);
     if (!inn.has(l.to)) inn.set(l.to, []);
     inn.get(l.to).push(l);
   }
-  for (const m of [out, inn]) for (const arr of m.values()) arr.sort((a, b) => (a.id < b.id ? -1 : 1)); // 遍历顺序固定 → 结果确定
+  for (const m of [out, inn]) for (const arr of m.values()) arr.sort((a, b) => (a.id < b.id ? -1 : 1)); // fixed traversal order → deterministic results
   return { nodes, links, out, inn, raw: network };
 }
 
@@ -30,7 +30,7 @@ export function isNet(x) {
   return x && x.links instanceof Map && x.out instanceof Map;
 }
 
-// 路段方向：N / E / S / W（按经纬度算方位角）
+// link direction: N / E / S / W (bearing from lat/lon)
 export function bearing(net, link) {
   const a = net.nodes.get(link.from), b = net.nodes.get(link.to);
   const dy = b.lat - a.lat, dx = (b.lon - a.lon) * Math.cos((a.lat * Math.PI) / 180);
@@ -38,7 +38,7 @@ export function bearing(net, link) {
   return ['N', 'E', 'S', 'W'][Math.round(deg / 90) % 4];
 }
 
-// 两条路段的朝向夹角余弦（判断「同一条街往前接着走」）
+// cosine of the angle between two links' headings (to tell "continues along the same street")
 export function headingDot(net, a, b) {
   const v = l => {
     const p = net.nodes.get(l.from), q = net.nodes.get(l.to);
@@ -49,8 +49,8 @@ export function headingDot(net, a, b) {
   return ax * bx + ay * by;
 }
 
-// 确定性排队（D/D/1）：一小时里到达 v、放行 c，排队线性变长；t 时刻到的车要等 (v−c)t/c，
-// 这一小时到达的车平均多等 (v−c)·T/(2c) 秒（含一小时末还没放完的那些车的清空时间）
+// Deterministic queueing (D/D/1): arrivals v and discharge c over one hour, the queue grows linearly; a vehicle arriving at time t waits (v−c)t/c,
+// so vehicles arriving this hour wait (v−c)·T/(2c) s on average (including the clearance time of those still queued at the end of the hour)
 export function queueDelayS(v, c, T = PERIOD_S) {
   return v > c && c > 0 ? ((v - c) * T) / (2 * c) : 0;
 }
@@ -58,14 +58,14 @@ export function queueVeh(v, c, T = PERIOD_S) {
   return v > c ? ((v - c) * T) / 3600 : 0;
 }
 
-// 路段通行时间（秒）：没饱和用 BPR；超过通行能力的部分按确定性排队加时间
+// link travel time (s): BPR below capacity; the over-capacity part adds deterministic queueing delay
 export function linkTime(t0, v, c) {
   if (!(c > 0)) return v > 0 ? Infinity : t0;
   const x = v / c;
   return t0 * (1 + BPR.alpha * Math.pow(Math.min(x, 1), BPR.beta)) + queueDelayS(v, c);
 }
 
-// 小顶堆（按 [cost, 次序] 比较，同价时先进先出 → 结果确定）
+// min-heap (compares [cost, insertion order]; FIFO on ties → deterministic results)
 class Heap {
   constructor() { this.a = []; this.n = 0; }
   push(cost, item) { this.a.push([cost, this.n++, item]); this.up(this.a.length - 1); }
@@ -90,7 +90,7 @@ class Heap {
   }
 }
 
-// Dijkstra。cost(link) 默认 t0_s；banned = 不许走的路段 id 集合；bannedNodes = 不许经过的节点
+// Dijkstra. cost(link) defaults to t0_s; banned = set of link ids that may not be used; bannedNodes = nodes that may not be passed
 export function shortestPath(net, from, to, { cost = l => l.t0_s, banned = new Set(), bannedNodes = new Set(), linkOk = () => true } = {}) {
   if (from === to) return { links: [], cost: 0 };
   const dist = new Map([[from, 0]]), prev = new Map();
@@ -115,8 +115,8 @@ export function shortestPath(net, from, to, { cost = l => l.t0_s, banned = new S
   return { links, cost: dist.get(to) };
 }
 
-// 单源 Dijkstra：从 from 到所有走得到的节点（公交绕行、补线路缺口用，transit.js）。参数同 shortestPath；
-// bannedNodes 里的节点一律不进；maxCost = 超过这个代价就不再往外扩。→ { dist: 节点 → 代价, prev: 节点 → 进来的那个路段 }
+// Single-source Dijkstra: from `from` to every reachable node (used by transit.js for bus detours and route gap filling). Same options as shortestPath;
+// nodes in bannedNodes are never entered; maxCost = stop expanding beyond this cost. → { dist: node → cost, prev: node → incoming link }
 export function dijkstra(net, from, { cost = l => l.t0_s, banned = new Set(), bannedNodes = new Set(), linkOk = () => true, maxCost = Infinity } = {}) {
   const dist = new Map([[from, 0]]), prev = new Map();
   const h = new Heap();
@@ -136,7 +136,7 @@ export function dijkstra(net, from, { cost = l => l.t0_s, banned = new Set(), ba
   return { dist, prev };
 }
 
-// dijkstra() 的结果 → from 到 to 的路段 id 列表（走不到 = null）
+// dijkstra() result → list of link ids from `from` to `to` (null if unreachable)
 export function treePath(tree, from, to) {
   if (!tree.dist.has(to)) return null;
   const links = [];

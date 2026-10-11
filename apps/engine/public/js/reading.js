@@ -1,34 +1,34 @@
-// reading.js —— 第 ② 步的产物改成 D-0929-1435 的「读数请求」：引擎把每类人路上看到的标志交给 T5 的 readSigns()，
-// T5 只回读数（看到没、看懂没、叫走哪条 / 别走哪条、说省或堵几分钟、信不信），格式见 docs/contract.md §路人读数。
-// 每类人每段 approach 要两种请求：
-//   full   —— 这段路上所有标志（按经过顺序）：定「被说动的比例」和原路的建议
-//   prefix —— 某条绕行路线拐口之前能看到的那几块（sign.m ≥ turn_m）：屏要在拐口之前才算点名了这条路
-// 请求只取决于「字 + 人」（不含耗时和排队），所以同一句话每类人只问一次，缓存一直有效。
+// reading.js — step 2 produces the "reading requests" of D-0929-1435: the engine hands the signs each persona passes to the injected readSigns()
+// (apps/api reader.js), which returns only a reading (noticed, understood, which road to use / avoid, minutes saved or delay quoted, trust); format in docs/reference/interfaces.md (Sign reading).
+// Each persona needs two kinds of request per approach:
+//   full   — every sign on this approach (in driving order): sets the persuaded share and any advice about the stay route
+//   prefix — the signs visible before a detour's turn (sign.m ≥ turn_m): a sign only names a road if it comes before the turn
+// A request depends only on "text + persona" (no travel times or queues), so each wording is asked once per persona and the cache stays valid.
 
 import { canon } from './canon.js';
 import { readSeconds, cleanName } from './cards.js';
 
 export function signsOn(ap, ws) {
   return (ws.equipment || [])
-    // at_m < 0 = 施工起点下游（如施工段末端的 END ROADWORK）：开到那里已经没法改道，不交给读屏，也不占 6 块的名额
+    // at_m < 0 = downstream of the works start (e.g. END ROADWORK at the end of the works): too late to divert, so not sent for reading and not counted in the 6-sign limit
     .filter(e => (e.type === 'vms' || e.type === 'sign' || e.type === 'arrow') && (!e.dir || e.dir === ap.dir) && (Number(e.at_m) || 0) >= 0)
     .map(e => ({ m: Number(e.at_m) || 0, kind: e.type, ...(e.type === 'vms' ? { frames: e.frames } : { text: e.text }), read_s: readSeconds(ap.kmh, e.type === 'vms' ? e.char_mm : 200) }))
     .sort((a, b) => b.m - a.m)
-    .slice(-6); // T5 的请求最多收 6 块：多的只留离施工最近的 6 块
+    .slice(-6); // the reader accepts at most 6 signs per request: keep the 6 nearest the works
 }
 
 export function request(persona, ap, signs) {
   return {
     persona,
     kmh: ap.kmh,
-    signs: signs.map(({ m, ...s }) => s), // 读数只看「字 + 人」：位置不交出去，引擎自己用
+    signs: signs.map(({ m, ...s }) => s), // a reading depends only on text + persona: positions stay inside the engine
     roads: [ap.street, ...ap.alts.map(r => r.name)].map(cleanName),
   };
 }
 
 export const requestKey = req => canon(req);
 
-// 一段 approach 需要的全部请求：{ full: {persona: req}, prefix: {persona: {routeId: req | null}} }
+// every request an approach needs: { full: {persona: req}, prefix: {persona: {routeId: req | null}} }
 export function requestsFor(ap, ws, types) {
   const signs = signsOn(ap, ws);
   const out = { signs, full: {}, prefix: {} };
@@ -43,7 +43,7 @@ export function requestsFor(ap, ws, types) {
   return out;
 }
 
-// ---------- MOCK 读数器：T5 的 readSigns() 到之前，演示和测试用它（只认关键词，读不懂意思；界面标「估算」）----------
+// ---------- Mock reader: keyword rules used as the fallback and in tests (matches keywords only, no real understanding; the UI labels it an estimate) ----------
 const NOTICE = { commuter: 0.85, local: 0.55, tourist: 0.8, delivery: 0.8 };
 const UNDERSTAND = { commuter: 0.9, local: 0.9, tourist: 0.75, delivery: 0.9 };
 const TRUST = { commuter: 0.8, local: 0.5, tourist: 0.9, delivery: 0.7 };

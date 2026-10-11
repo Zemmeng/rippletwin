@@ -1,10 +1,10 @@
-// pipeline.js —— 引擎对外的唯一入口（D-0929-1435）：createEngine({ network, flows, readSigns }) →
-//   await engine.prepare(方案)                先把要问的「读数」都问好（T5 的 readSigns，异步；同一句话每类人只问一次，一直缓存）
-//   engine.evaluate(方案, { seed })           同步、纯计算：同样的输入（方案 + 已缓存的读数）同样的结果，可以反复跑
-//   engine.window(worksites, whens)           一段时间的总延误；engine.conflict(a, b)：第 ⑥ 步冲突成本
-// 方案 = { when: { date, hour, day? }, worksites: [施工方案] }，格式见 docs/contract.md §施工方案、§evaluate。
-// 第 ①② 步 routes.js / reading.js，第 ④ 步 choice.js + calibrate.js，第 ⑤ 步 assign.js。
-// 排队变长 → 引擎自己按「看得到的排队」重算选择（逐次平均 MSA），不再问大模型（读数只取决于字 + 人）。
+// pipeline.js — the engine core's entry point (D-0929-1435): createEngine({ network, flows, readSigns }) →
+//   await engine.prepare(plan)                fetch every reading needed first (injected readSigns, async; each wording asked once per persona, cached for good)
+//   engine.evaluate(plan, { seed })           synchronous, pure computation: same input (plan + cached readings) gives the same result, safe to re-run
+//   engine.window(worksites, whens)           total delay over a period; engine.conflict(a, b): step 6 clash cost
+// plan = { when: { date, hour, day? }, worksites: [worksite] }; format in docs/reference/interfaces.md (Worksite plan, Engine API).
+// Steps 1–2 routes.js / reading.js, step 4 choice.js + calibrate.js, step 5 assign.js.
+// As queues grow the engine re-runs route choice on the visible queue itself (method of successive averages, MSA) without asking the LLM again (readings depend only on text + persona).
 
 import { loadNetwork, isNet } from './net.js';
 import { isActive, capFactors, overlaps, windowWhens, dayType } from './worksite.js';
@@ -17,13 +17,13 @@ import { applyParams, isApplied } from './params.js';
 import { requestsFor, requestKey } from './reading.js';
 import { evaluate as assign, pathNow, maxQueue } from './assign.js';
 
-export const MSA_ITERS = 6; // 排队反馈迭代次数（逐次平均）
-export const OCCUPANCY = 1; // 每辆车算 1 个人（公交电车乘客还没建模）
+export const MSA_ITERS = 6; // queue-feedback iterations (successive averages)
+export const OCCUPANCY = 1; // 1 person per vehicle (the core counts car drivers only; tram and bus riders are modelled separately in transit.js)
 
 const r3 = x => Math.round(x * 1000) / 1000;
 
-// params：loadParams() / applyParams() 的结果（或者直接传 params.json 的内容），不传就全用假设值；
-// 显式传的 personas / mix 优先于 params
+// params: the result of loadParams() / applyParams() (or raw params.json content); omitted = all assumed values;
+// explicitly passed personas / mix take precedence over params
 export function createEngine({ network, flows, readSigns, params, personas, mix } = {}) {
   const P = isApplied(params) ? params : applyParams(params ?? null);
   personas = personas || P.personas;
@@ -36,7 +36,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     override: [personas !== P.personas && 'personas', mix !== P.mix && 'mix'].filter(Boolean),
   };
   const net = isNet(network) ? network : loadNetwork(network);
-  const readings = new Map(); // requestKey → 读数
+  const readings = new Map(); // requestKey → reading
   const structCache = new Map();
   const baseCache = new Map();
   let calib = { ...DEFAULT_AB, method: 'default', ok: false };
@@ -67,7 +67,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     return { active, aps };
   }
 
-  // 某段 approach、某类人：屏上说了什么（点名只对「拐口之前能看到」的屏算数）+ 被说动的比例
+  // for one approach and persona: what the signs say (a named road counts only on signs visible before the turn) + the persuaded share
   function signFor(t, ap, reqs) {
     const full = get(reqs.full[t]);
     const street = cleanName(ap.street);
@@ -106,7 +106,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
       if (!readings.has(requestKey(req))) need.set(requestKey(req), req);
     }
     for (const when of [plan.when, ...(whens || [])].filter(Boolean)) missingFor({ ...plan, when }, need);
-    if (need.size && typeof readSigns !== 'function') throw new Error('prepare 需要 readSigns（浏览器里传 T5 的 readSigns；没有就传 mockReadSigns）');
+    if (need.size && typeof readSigns !== 'function') throw new Error('prepare needs readSigns (in the browser pass readSigns from apps/api reader.js; otherwise pass mockReadSigns)');
     const got = await Promise.all([...need].map(async ([k, req]) => {
       try { return [k, await readSigns(req)]; } catch { return [k, null]; }
     }));
@@ -122,7 +122,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     return o;
   }
 
-  // seed：现在没有随机数，先留着（契约要求同样输入同样结果）
+  // seed: there is no randomness yet; kept because the interface requires same input → same result
   function evaluate(plan, { seed = 0 } = {}) { // eslint-disable-line no-unused-vars
     const when = plan.when;
     const b = base(when);
@@ -140,7 +140,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
       return { ap, ws, reqs, routes, per };
     });
 
-    // 排队反馈：看得到的排队 → 选择 → 分流 → 新的排队 …… 各轮比例取平均（MSA）
+    // queue feedback: visible queue → choice → assignment → new queue …, averaging the shares over iterations (MSA)
     let q = ctx.map(() => 0);
     let avg = ctx.map(() => null);
     let ev = b;
@@ -158,19 +158,19 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
       });
       const splits = ctx.map((c, i) => ({ ap: c.ap, share: avg[i] ? overall(avg[i]) : { stay: 1 } }));
       ev = assign(net, flows, when, active, splits);
-      q = ctx.map(c => maxQueue(ev, c.ap.chain) / 2); // 司机平均看到的排队 ≈ 一小时末排队的一半
+      q = ctx.map(c => maxQueue(ev, c.ap.chain) / 2); // the queue drivers see on average ≈ half the end-of-hour queue
     }
 
     const typeTot = Object.fromEntries(TYPES.map(t => [t, { delay_min: 0, vehicles: 0 }]));
-    let credit = 0; // veh·s：绕行平时就比原路快的那部分「省下的时间」，从总延误里退回去（见下）
+    let credit = 0; // veh·s: the "time saved" on detours that are usually faster than the stay route, added back to total delay (see below)
     const approaches = ctx.map((c, i) => {
       const F = ev.used?.[i] ?? c.ap.volume;
       const stayBase = c.ap.stayLinks.reduce((s, id) => s + b.links.get(id).t, 0);
       const byT = avg[i] || Object.fromEntries(TYPES.map(t => [t, { stay: 1 }]));
       const share = overall(byT);
-      // 绕行平时就比原路快（小街 20 km/h、平行大街 40 km/h；flows.json 是计数不是均衡）：平时不走它，说明原路对这些车
-      // 有引擎没建模的好处（起终点就在这条街上、停车、送货）。多花的时间从「原路 / 这条绕行平时」两者快的那个算起 →
-      // 封路不会让绕行的车反而省时间（T21：Little Bourke St 单独全封算出 −65 车·分钟）
+      // A detour can be faster than the stay route in normal conditions (a 20 km/h side street vs a 40 km/h parallel street; flows.json is counts, not an equilibrium): if drivers do not normally
+      // take it, the stay route has benefits the engine does not model (origin or destination on this street, parking, deliveries). Extra time is measured from the faster of
+      // "stay route / this detour, in normal conditions" → a closure never makes diverted vehicles save time (a full closure of Little Bourke St alone used to give −65 veh·min)
       const routes = c.routes.map(r => {
         const now = pathNow(ev, r.links);
         const floor = Math.min(stayBase, pathNow(b, r.links));
@@ -210,8 +210,8 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     const hot = [];
     for (const [id, x] of ev.links) {
       const l = net.links.get(id), bx = b.links.get(id);
-      // extra_min（T28）：这一段比同一小时不施工时多出的车·分钟，可 < 0（车绕走了）。delay_s 是和自由流比的，
-      // 早高峰本来就堵的路（Flinders / King St）也很大；页面画「施工造成的变慢」要用 extra_min
+      // extra_min: extra veh·min on this link versus the same hour with no works, can be < 0 (vehicles diverted away). delay_s is versus free flow,
+      // so it is large on streets that are congested at peak anyway (Flinders / King St); the page draws "slowdown caused by the works" from extra_min
       const extra = (x.v * x.t - bx.v * bx.t) / 60;
       links.push({ id, v: Math.round(x.v), cap: Math.round(x.cap), delay_s: round1(x.t - l.t0_s), queue_m: Math.round(x.queue_m), extra_min: round1(extra) });
       if (extra > 0.5) hot.push({ id, name: l.name, extra_min: Math.round(extra), v: Math.round(x.v), cap: Math.round(x.cap), queue_m: Math.round(x.queue_m) });
@@ -227,7 +227,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     }
     return {
       when, delay_min: delay, tt_base_min: round1(b.tt_s / 60), blocked_vph: Math.round(ev.blocked_vph),
-      by_type, others_min: Math.round(delay - typed), // 没受影响、但被绕行车流拖慢的背景车流
+      by_type, others_min: Math.round(delay - typed), // background traffic not on the works approach but slowed by diverted traffic
       approaches, hot: hot.slice(0, 5), links, active: active.map(w => w.id), calib: { ...calib }, missing,
     };
   }
@@ -239,7 +239,7 @@ export function createEngine({ network, flows, readSigns, params, personas, mix 
     return { delay_min: total, per };
   }
 
-  // 第 ⑥ 步：冲突成本 = D(A+B) − D(A) − D(B)。时段不重叠时每个时刻只有一个在施工，正好是 0
+  // step 6: clash cost = D(A+B) − D(A) − D(B). If the times never overlap, only one is active at any moment, so it is exactly 0
   function conflict(a, b, { whens, hours } = {}) {
     const W = whens || windowWhens([a, b], hours);
     const A = window([a], W), B = window([b], W), AB = window([a, b], W);

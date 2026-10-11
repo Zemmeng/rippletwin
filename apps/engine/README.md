@@ -1,171 +1,233 @@
-# engine —— 施工影响引擎：读数 + 每类人参数 → 各条路走多少人、哪里堵、堵多久、多个施工叠加的冲突成本
-Owner: @Zemmeng（lead 暂管；T4 认领后改成认领人）
+# engine — traffic-impact engine
+Owner: @Zemmeng
 
-按 `docs/arch/4-ai-flow.md` 和 D-0929-1435：大模型（T5 的 `readSigns()`）只「读懂」屏上的字，比例、分钟数、排队全由这里算。
-纯 JS，不碰 DOM，浏览器和 node 都能直接 import；同样输入同样结果，真路网上单次 `evaluate` 约 7 毫秒。
+Given a works plan (closed lanes and footpaths, signs and VMS text, dates and hours) and each road-user type's reading of the signs, the engine works out how many drivers take each route, where queues form, how long the delay is, the knock-on effect on trams, buses and pedestrians, and the extra cost when two worksites overlap. It also builds three inventory-constrained equipment kits and re-scores the rule-based advisor's suggestions.
 
-## 怎么跑
+Following [`docs/hackathon/specs/ai-flow.md`](../../docs/hackathon/specs/ai-flow.md) and decision D-0929-1435 in [`docs/decisions.md`](../../docs/decisions.md): the LLM only *reads* the sign text; every share, minute and queue length is computed here.
 
-- 演示三幕：`node apps/engine/tools/demo.mjs`（方格路网）；加 `--real` 另在 T3 真路网上跑第一幕（Bourke Street 东行）
-- 浏览器里（要经 http 打开，ES module 不能 file://；网页、引擎、路网数据要同源）：
+Plain ES modules with no dependencies and no DOM access, imported directly in the browser and in Node. Deterministic: the same input always gives the same output. A single `evaluate` on the real 1,513-link CBD network takes about 1–5 ms on a laptop (first call ≈ 4 ms, warm median ≈ 1 ms); the automated gate in `tests/e2e.test.mjs` is < 100 ms.
+
+## Role in RippleTwin
+
+- **The LLM reads the signs; the engine does the arithmetic** (D-0929-1435). The reader returns only noticed / understood / trust / which road to use or avoid / quoted minutes. Route shares come from an explicit per-persona logit, calibrated at two points.
+- **On the plan SUMO covers** (the Lonsdale St westbound demo works with one lane closed, link `l595594354_9756035316`), the web page shows SUMO's numbers, not the engine's (D-1001-0045). There the engine only supplies the AI sign reading and the detour share *p* = 1 − stay share, which is SUMO's input (`apps/web/src/js/6e-sumo3.js`, `5-app.js`, `8-compare.js`). On every other street or closure the page shows the engine's numbers.
+- **After the event** the SUMO container and the LLM key were retired. The engine itself is unaffected: it is static JavaScript served by the `hackathon-site` Worker at `/engine/public/js/*`, so every engine number is still computed live. Sign reading falls back to the 92 precomputed readings in `apps/api/public/answers/demo.json` or to keyword rules, and every reading records its true source.
+
+## How to run
+
+- Demo of the three acts: `node apps/engine/tools/demo.mjs` (toy Hoddle Grid network). Add `--real` to also run act 1 on the real CBD network (Bourke Street eastbound) and print the time per `evaluate`; add `--params apps/params/public/params.json` to use the parameter file.
+- In the browser (serve over http, since ES modules do not load from `file://`; the page, engine and data must share an origin): `cd apps/site && npm ci && npm run dev`, then open <http://localhost:8790/web/public/>. The wiring layer is what the page uses:
+
+```js
+const be = await (await import('/engine/public/js/backend.js')).connect();
+const s = await be.run(be.demo('lonsdale'));   // s.queue_m, s.mean_delay_s, s.routes, s.by_type, s.transit, s.peds, s.flags …
+```
+
+- The core on its own:
 
 ```js
 import { createEngine, mockReadSigns, loadParams } from '/engine/public/js/index.js';
 const [network, flows] = await Promise.all(['network', 'flows'].map(f => fetch(`/roads/public/cbd/${f}.json`).then(r => r.json())));
-const params = await loadParams();                         // T12 的 /params/public/params.json；读不到就用假设值，不抛错
-const engine = createEngine({ network, flows, readSigns: mockReadSigns, params }); // T5 的 readSigns 到了换掉
-const plan = { when: { date: '2026-10-06', hour: 17 }, worksites: [施工方案] };
+const params = await loadParams();                   // /params/public/params.json; falls back to assumed values, never throws
+const engine = createEngine({ network, flows, readSigns: mockReadSigns, params });   // or readSigns from /api/public/js/reader.js
+const plan = { when: { date: '2026-10-06', hour: 17 }, worksites: [/* worksite */] };
 await engine.prepare(plan);
 const result = engine.evaluate(plan);
 ```
 
-## 怎么测
+- In Node without a server, import `connect` from `public/js/backend.js` and pass `{ fetch, importer }` backed by local files, as the tests do (`tests/backend.test.mjs`).
 
-`bash apps/engine/test.sh`（2026-09-29 T16 电车公交 + T17 行人合并后实跑，数字见集成 PR）。
+## How to test
 
-| 文件 | 测什么 |
+`bash apps/engine/test.sh` (Node ≥ 18, no `npm install`). Each `tests/*.test.mjs` runs on its own with a 90 s limit and prints `N passed, M failed`; the script prints the total on its last line, which `scripts/check.sh` parses. Any single file also runs standalone, e.g. `node apps/engine/tests/engine.test.mjs`. There are 11 test files and 419 assertions, all passing. The harness is the tiny `tests/_t.mjs` (`ok` / `t` / `done`), with no framework.
+
+The tests read real data from other modules: `apps/roads/public/cbd/*.json`, `apps/params/public/params.json`, and `apps/api/public/js/{reader,check,worksites-seed}.js`. They fail loudly if `network.json` is missing. No network access or API key is needed: fetches and dynamic imports are injected.
+
+| File | What it checks |
 |---|---|
-| `tests/engine.test.mjs` | 路网、最短路、BPR、施工时段、绕行路线、读数请求、选择模型、两点校准（正好 3% / 20%）、evaluate（确定性、缺读数、全封卡住、同路段两施工不重复算、readSigns 全挂不崩）、冲突成本、顾问 |
-| `tests/params.test.mjs` | 参数入口：合格的数照用、缺的逐项回退、不合格整组回退并报错、`sign_trust` 换算、读不到不抛错、校准目标跟着变；反向断言：塞不进第 5 类人、`__proto__` 不污染、默认值不被改 |
-| `tests/backend.test.mjs` | 接线层：兜底（T5、参数加载不上照样出数；路网取不到要抛）、用仓库里 T5 真的读屏和规范检查、summary 口径（每车延误只算受影响的车）、屏上文字不合规范报错；审查确认的 7 条（全封时封闭路段上的车全部改道、多个施工时 why 和排队取同一段、前后对比按同一段路、不施工时段标出来、没日期的施工顾问按一小时比、顾问报读数失败、没有 crypto.subtle 时退回规则）；反向断言：读屏抛错、全封无路可绕都必须在 `flags` 里报出来 |
-| `tests/peds.test.mjs` | T17 封人行道：主演示 Lonsdale 西行 8 点封左侧 → 人/小时、每人多走几米、多花几人·分钟、过几次马路；左 / 右（双幅路找对面那幅，按并排长度选）/ 两侧；校验 `closes.footpath`（`bad_plan`）；没路可绕记 `blocked`、死胡同 / 小孤岛记 `dead_end`（小图）；过马路按过几条街数（La Trobe = 4）；计数器要在同一侧；直街不拆段；反向断言：没封 / 不在时段全 0、绕行不经过也不贴着封闭段走、walk / peds 拿不到或还没到时 `src = null` 而不是假装 0、找不到人行道报 `unmatched`、connect 不等行人数据、封人行道不改车的数字 |
-| `tests/e2e.test.mjs` | MOCK 读数跑演示三幕（8 点、17 点）、屏的位置（摆在拐口之后不算）、顾问改法重算；T3 真路网：加载、单次 < 100 毫秒、第一幕方向成立 |
-| `tests/transit.test.mjs` | 电车公交（T16，真 transit.json）：Lonsdale 8 点 15 条公交跟着堵、每趟多的秒数 ≈ 留在 Lonsdale 的车（差 ≤ 25%）、车次 / 人数 / 乘客·分钟口径；La Trobe 全封 30 路电车停；Lonsdale 全封公交就近绕（只走主干道）；路口短路段补缺口；周末 / 平峰；前后对比 delta；transit.json 拿不到、这一块算挂了都照样出数。反向断言：不施工时段全是 0、比的是「没施工」不是自由流（本来就堵的路段不算）、封部分车道不列电车 |
-| `tests/ailog.test.mjs` | AI 调用日志（假读屏：file / llm / kv / 普通错 → 规则兜底）：条数 = 调用次数、字段齐、src 照实记、同一方案再跑不多记；`readingsOf` 主路段、屏按经过顺序、why 和 summary 同一句、返回拷贝；环形上限、订阅 / 退订、回调抛错不影响读数；反向断言：不多发请求、规则兜底不冒充大模型、`SignError` 记 `error` |
-| `tests/options.test.mjs` | T22 按库存出 3 套方案（真路网 + 真 equipment.json）：三档形状、护栏件数 = ⌈封闭长度 ÷ 每节长⌉、租金 = 件数 × 日租 × 天数、报价行和方案设备对得上、单条施工 / when / n / worksite、全封、两侧人行道；反向断言：每种设备不超库存（库存很少时照样不超、缺口进 `stock.short`）、租金必须标 `assumed`、引导档 VMS 文字合规范（含 T5 checkSigns）、同样输入逐字同样输出、不改输入、库存取不到抛 `no_inventory`。哪套更少堵只记录，不断言 |
+| `tests/engine.test.mjs` | Network, shortest paths, BPR, works hours, detours, reading requests, choice model, two-point calibration (exactly 3% / 20%), `evaluate` (determinism, missing readings, full closure with no detour leaves vehicles stuck, two worksites on one link are not double counted, `readSigns` failing entirely does not crash), clash cost, advisor pieces, reading cache |
+| `tests/e2e.test.mjs` | The three demo acts with mock readings (08:00 and 17:00); sign position (a sign after the turn has no effect); advisor suggestions re-run. Real network: loads, a single `evaluate` < 100 ms, act 1 goes the right way, detours avoid laneways |
+| `tests/backend.test.mjs` | Wiring layer: fallbacks (numbers still come out when the reader or params fail to load; a missing network throws); the real `apps/api` reader and rule check; summary definitions (seconds per vehicle count only affected vehicles); invalid sign text reported; 7 confirmed review findings (a full closure reroutes every vehicle on the closed link, `why` and queue come from the same approach, before / after compares the same stretch, inactive hours flagged, the advisor compares one hour for undated works, the advisor reports reading failures, no `crypto.subtle` falls back to rules). Negative tests: reader errors and full closures with no detour must show in `flags` |
+| `tests/params.test.mjs` | Parameter entry: valid values used, missing ones fall back item by item, invalid groups fall back with an error, `sign_trust` conversion, unreadable file never throws, calibration targets follow `params.json`. Negative tests: no fifth persona can be injected, `__proto__` does not pollute, defaults are never modified |
+| `tests/peds.test.mjs` | Footpath closures: the main demo (Lonsdale westbound, 08:00, left side) → pedestrians per hour, extra metres per person, extra person-minutes, road crossings; left / right (finding the opposite carriageway on a dual carriageway by parallel overlap) / both; `closes.footpath` validation (`bad_plan`); `blocked` when there is no way round and `dead_end` for dead ends / small islands (small graphs); crossings counted per street (La Trobe = 4); counters must be on the same side; straight streets are not split. Negative tests: no closure / outside hours gives all zeros, the detour neither uses nor runs alongside the closure, missing or late walk / peds data gives `src = null` rather than a pretend 0, no footpath found gives `unmatched`, `connect` does not wait for pedestrian data, footpath closures do not change vehicle numbers |
+| `tests/transit.test.mjs` | Trams and buses on the real `transit.json`: Lonsdale at 08:00 delays 15 bus routes, with the extra seconds per trip ≈ those of cars staying on Lonsdale (within 25%); trips / riders / rider-minute definitions; a La Trobe full closure stops tram route 30; a Lonsdale full closure sends buses on the nearest detour (main roads only); junction gaps filled; weekend / off-peak; before / after delta; a missing `transit.json` or a failing transit calculation still gives vehicle numbers. Negative tests: all zeros outside works hours, delay is versus no works rather than free flow, a partial lane closure lists no trams; every bus link fully closed in turn on real data checks detour times, no negative delay and the network-edge rule |
+| `tests/ailog.test.mjs` | AI call log (fake reader: file / llm / kv / plain error → rule fallback): entries = calls, all fields present, `src` recorded truthfully, re-running a plan adds no entries; `readingsOf` returns the main approach, signs in driving order, the same `why` as the summary, and copies; ring-buffer limit, subscribe / unsubscribe, callback errors do not affect readings. Negative tests: no extra requests, a rule fallback never passes as the LLM, `SignError` is logged as `error` |
+| `tests/options.test.mjs` | Three inventory-constrained kits (real network + real `equipment.json`): tier shapes (Minimum: no VMS; Standard: arrow board + two VMS reporting delay; Guided: one VMS naming the fastest detour), barrier count = ⌈closed length ÷ section length⌉, hire = quantity × day rate × days, quote lines match the kit, single worksite / `when` / `n` / `worksite` inputs, full closure, both footpaths, hire order Minimum < Guided < Standard and detour share Minimum < Standard < Guided with the `apps/api` reader. Negative tests: never over stock (even with very little stock; shortfalls go into `stock.short`), hire always marked `assumed`, VMS text passes `apps/api` `checkSigns`, byte-identical output for the same input, the input is not modified, a missing inventory throws `no_inventory`. Each kit's queue and delay are recorded, not asserted |
+| `tests/clash.test.mjs` | `be.clash()` / `be.stagger()` on the Lonsdale demo + the register's Little Bourke St full closure: overlap window (3 days × peak hours 8 and 17), clash cost = D(A+B) − D(A) − D(B) and equal to `engine.conflict()`, stagger stops at the first zero, `back: true` order. Negative tests: Flinders St (baseline over capacity) gives `negative_delay` and `reliable = false` with display fields never negative; same-corridor substitutes give `substitutes` and stay reliable; unreliable stagger attempts never count as best; reader failures make the result unreliable; invalid input throws; deterministic |
+| `tests/conflict.test.mjs` | Regression: a single full closure never makes network delay negative — Little Bourke St at 08:00 and 17:00, every "Little … St" / Flinders Lane link with traffic at 08:00 closed in turn, and the components of `conflict(lonsdale, Little Bourke)` |
+| `tests/extra.test.mjs` | `links[].extra_min` is versus the same hour with no works: positive on the works links, near zero on Flinders / King St links that queue at the morning peak anyway, negative values kept, and `hot` agrees with `links` |
 
-## 对外接口（→ docs/contract.md §施工方案、§evaluate、§路人读数）
+## Pipeline
 
-| 导出 | 用法 |
+A longer write-up of the model is in [`docs/architecture/engine.md`](../../docs/architecture/engine.md).
+
+```mermaid
+flowchart LR
+  P["Works plan"] --> R["① routes.js<br/>affected approaches,<br/>stay route + up to 3 detours"]
+  R --> Q["② reading.js<br/>reading requests<br/>(sign text + persona only)"]
+  Q --> S[("③ readSigns (injected)<br/>apps/api reader or<br/>mockReadSigns rules")]
+  S --> C["④ choice.js<br/>two-group persona logit;<br/>A, B from calibrate.js"]
+  C --> A["⑤ assign.js<br/>BPR + D/D/1 queues"]
+  A -- "queue feedback, MSA × 6" --> C
+  A --> O["Result: delay, queues,<br/>shares, per-link extra_min"]
+```
+
+- **① Routes** (`routes.js`): the works links are chained along the street; the approach runs about 400 m upstream (`UP_M`) and 300 m downstream (`DOWN_M`). Detours turn off at each junction before the works and take the shortest path to the downstream end; they are named after the street they turn into, avoid laneways (`NO_DETOUR`), are dropped if more than 3× slower than usual (`MAX_RATIO`), and at most 3 are kept (`MAX_ALTS`).
+- **② Reading requests** (`reading.js`): per persona, one *full* request with every sign on the approach (at most the 6 nearest the works, `at_m ≥ 0`) and one *prefix* request per detour with only the signs before its turn — a sign only names a road if the driver sees it before the turn. Requests carry only text and persona, never positions or queues, so `prepare()` asks each wording once and caches it (`canon.js`); `evaluate()` is then synchronous.
+- **③ Sign reading**: injected `readSigns(request)` → `{ notice, understand, trust, advice: { road: use | avoid }, saving_min, delay_min, why, src, model }`.
+- **④ Choice** (`choice.js`): each persona splits into a persuaded share *I* = notice × understand × trust (× persona trust) and the rest. Utility = −β × hurry × minutes, plus the visible queue on the stay route; detours carry inertia −A and ln(familiarity); a road the sign names gets +B plus the minutes it says you save. `calibrate.js` solves A, then B, by bisection so the La Trobe reference scene diverts 3% under ROADWORK AHEAD and 20% under USE RUSSELL ST.
+- **⑤ Assignment** (`assign.js`): diverted vehicles move from the stay links to the detour links; link time = BPR (α 0.15, β 4) + deterministic D/D/1 queueing; queue length = (v − c) × 7 m ÷ lanes at the end of the hour. Six iterations of the method of successive averages feed the queue drivers see (half the end-of-hour queue) back into route choice.
+- **Output**: network delay in vehicle-minutes versus the same hour with no works (a `credit` term stops a closure from ever showing a time saving), per-persona delay, per-link `extra_min`, the 5 hottest links, and missing / blocked flags. `engine.window()` sums delay over sampled hours; `engine.conflict()` returns D(A+B) − D(A) − D(B) (step ⑥). Step ⑦, the advisor, re-runs each suggestion through ⑤.
+
+## Interfaces (→ [`docs/reference/interfaces.md`](../../docs/reference/interfaces.md): Worksite plan, Engine API, Sign reading)
+
+| Export | Use |
 |---|---|
-| `createEngine({ network, flows, readSigns, params? })` | → `{ prepare(方案), evaluate(方案, { seed }), window(worksites, whens), conflict(a, b, opts), calib, params }`；`engine.params` 报每项参数用的是 params.json 还是假设值 |
-| `backend.js` 的 `connect()`（**网页只用这个**，D-0929-1540） | 一次装好路网 + 车流 + 公交电车 + 参数 + T5 读屏 + 引擎 → `{ run(方案), compare(前, 后), advise(方案), check(方案), validate(方案), demo(名), status(), pedsReady() }`（行人数据后台取，`pedsReady()` 等它取完）；`run` 回能直接显示的 summary（`queue_m mean_delay_s routes by_type hot flags` …，原始结果在 `.raw`）。T5、参数加载不上有兜底，`status()` / `flags` 里报。用法和字段见 `docs/arch/T13-web-wiring-PRD.md` |
-| `be.aiLog()` · `be.onAiLog(fn)` · `be.readingsOf(summary)` · `be.lastReadings()` | AI 调用日志：每次读屏调用一条 `{ seq, t, persona, signs, roads, kmh, read_s, src, model, ms, reading, fallback?, error? }`（`src` 照实记 `file / kv / llm / rule`，规则兜底带 `fallback`，`SignError` 记 `error`），内存里环形 200 条（`AI_LOG_MAX`，`connect({ aiLogMax })` 可改）；`readingsOf(s)` = 那次 `run()` 主路段每类人读到的屏（按经过顺序）和读数；不多发请求。见 contract §evaluate v3.10；网页 `apps/web/src/js/9-ai.js` |
-| `transitImpact(net, flows, transit, 方案, 结果)` | 电车公交受影响多少（T16）→ `summary.transit`：每条受影响线路的车次、每趟多几秒、乘客·分钟、绕行 / 停运；`PAX_PER_TRIP` 每趟人数（假设值）；`routePaths(net, transit)` 每条线路补过缺口的路段序列（测试核对绕行全程用） |
-| `pedImpact(walk, peds, 方案, { net? })`（T17） | 封人行道（`closes.footpath` ∈ `left / right / both`）→ `{ src, footpath, active, day, hour, closed, closed_m, ped_h, detour_m, extra_min, crossings, blocked, blocked_ped_h, dead_end, unmatched, unmatched_sides, note, note_zh, step_free: null, measured, method, sensor, detour, stretches, assumed }`（`footpathActive(方案)` = 这个小时有没有在封人行道）；`backend.run` 把它放在 `summary.peds`，字段表见 `docs/contract.md` §evaluate「行人」。`validatePlan(方案)` / `validateWorksite(施工)` → 错误列表 |
-| `loadParams({ url?, fetch? })` / `applyParams(json)` | 读 T12 的 `params.json` → `{ mix, personas, anchors, used }`；读不到、不合格逐项回退到假设值，不抛错 |
-| `advise(engine, 方案, { askAdvisor })` | 第 ⑦ 步：拿 ≤ 3 个改法（改字 · 挪设备 · 错开），每个都重算、标 `better` |
-| `be.clash(a, b, { hours?, when? })` · `be.stagger(a, b, { maxDays = 7, back? })`（T21） | 叠加冲突：两处施工重叠的那几天 × 早晚高峰，`engine.conflict()` 算 D(A)、D(B)、D(A+B)、冲突成本（车·分钟）；显示字段永远 ≥ 0：D 有负的（Flinders St 基线超通行能力）→ `flags.negative_delay`、`reliable = false`；只有冲突成本 < 0（同一走廊互相替代）→ `flags.substitutes`、显示 0、仍可信；读屏失败 → `reliable = false`。`stagger` 把 b 逐天往后挪到冲突成本 0 为止（`best` 先取可信的尝试），带挪前 / 挪后同一段时间的全网总延误。见 contract §evaluate v3.8；测试 `tests/clash.test.mjs` |
-| `be.options(施工 \| 方案, { n = 3, when?, worksite? })`（T22） | 按 RPM Hire 库存出 最省 / 标准 / 引导 3 套交通管理方案，每套用引擎跑同一个小时，带租金（假设值）和库存检查 → `{ worksite, when, days, site, inventory, options: [{ id, label, plan, hire, stock, result, flags, vs, guide? }] }`；见下面「按库存出方案」和 contract §施工方案 v3.7 |
-| `options.js` 的 `tierNeeds` `resolveNeeds` `hireOf` `stockOf` `vmsTextOk` `daysOf` | 上面那个的纯函数零件：摆什么、对库存（不超）、算租金、查 VMS 文字 |
-| `mockReadSigns` / `mockAdvise` | 关键词规则版读数器 / 顾问，T5 和大模型顾问到之前演示、测试用 |
-| `makeGrid()` | 测试用的 5 × 9 方格路网（Hoddle Grid 街名、假设车流） |
-| `PERSONAS` `MIX` `chooseShares` `calibrate` … | 选择模型和校准的零件（见 `index.js`） |
+| `createEngine({ network, flows, readSigns, params? })` | → `{ prepare(plan), evaluate(plan, { seed }), window(worksites, whens), conflict(a, b, opts), calib, params }`; `engine.params` reports, item by item, whether each parameter came from `params.json` or an assumed value |
+| `connect()` in `backend.js` (**the web page's main entry**, D-0929-1540) | Loads network + flows + transit + params + the `apps/api` reader and rule check in one go and builds the engine → `{ run(plan), compare(before, after), advise(plan), options(…), clash(a, b), stagger(a, b), check(plan), validate(plan), demo(name), status(), pedsReady(), aiLog(), onAiLog(fn), readingsOf(summary), lastReadings() }`. Pedestrian data loads in the background and `pedsReady()` resolves when it is done. `run` returns a display-ready summary (`queue_m mean_delay_s routes by_type hot transit peds flags` …, raw result in `.raw`). Reader and params failures fall back and are reported in `status()` / `flags`. Usage and fields: [`docs/hackathon/specs/T13-web-wiring-PRD.md`](../../docs/hackathon/specs/T13-web-wiring-PRD.md) |
+| `be.aiLog()` · `be.onAiLog(fn)` · `be.readingsOf(summary)` · `be.lastReadings()` | AI call log: one record per reader call `{ seq, t, persona, signs, roads, kmh, read_s, src, model, ms, reading, fallback?, error? }` (`src` is the true source `file / kv / llm / rule`; rule fallbacks carry `fallback`; `SignError` is logged as `error`), kept in memory as a 200-entry ring buffer (`AI_LOG_MAX`, configurable with `connect({ aiLogMax })`). `readingsOf(s)` = the signs each persona read on that `run()`'s main approach (in driving order) and their readings, without sending any request. Used by `apps/web/src/js/9-ai.js` |
+| `transitImpact(net, flows, transit, plan, result)` | Tram and bus impact → `summary.transit`: per affected route the trips, extra seconds per trip, rider-minutes, detour / stoppage; `PAX_PER_TRIP` riders per trip (assumed); `routePaths(net, transit)` gives each route's gap-filled link sequence (used by tests to check whole-trip detours) |
+| `pedImpact(walk, peds, plan, { net? })` | Footpath closure (`closes.footpath` ∈ `left / right / both`) → `{ src, footpath, active, day, hour, closed, closed_m, ped_h, detour_m, extra_min, crossings, blocked, blocked_ped_h, dead_end, unmatched, unmatched_sides, note, note_zh, step_free: null, measured, method, sensor, detour, stretches, assumed }` (`footpathActive(plan)` = is a footpath closed this hour). `backend.run` puts it in `summary.peds`. `validatePlan(plan)` / `validateWorksite(worksite)` → list of errors |
+| `loadParams({ url?, fetch? })` / `applyParams(json)` | Read `params.json` → `{ mix, personas, anchors, used }`; anything unreadable or invalid falls back item by item to assumed values, never throws |
+| `advise(engine, plan, { askAdvisor })` | Step ⑦: get up to 3 suggestions (reword · move equipment · stagger), re-run each and mark it `better` |
+| `be.clash(a, b, { hours?, when? })` · `be.stagger(a, b, { maxDays = 7, back? })` | Overlapping works: over the days both are active × peak hours, `engine.conflict()` gives D(A), D(B), D(A+B) and the clash cost (veh·min). Display fields are never negative: a negative D (Flinders St, where the baseline exceeds capacity) → `flags.negative_delay`, `reliable = false`; only the clash cost < 0 (substitutes on one corridor) → `flags.substitutes`, shown as 0, still reliable; reader failures → `reliable = false`. `stagger` shifts b one day at a time until the clash cost is 0 (`best` prefers reliable attempts), and reports network delay before / after over the same period |
+| `be.options(worksite \| plan, { n = 3, when?, worksite? })` | Builds Minimum / Standard / Guided traffic-management kits from the RPM Hire inventory, runs each for the same hour, with hire cost (assumed) and a stock check → `{ worksite, when, days, site, inventory, options: [{ id, label, label_zh, plan, hire, stock, result, flags, vs, guide? \| delay? }] }`; see "Inventory-constrained options" below |
+| `options.js`: `TIERS` `tierNeeds` `resolveNeeds` `hireOf` `stockOf` `vmsTextOk` `guidedFrames` `delayFrames` `vms2At` `daysOf` `siteOf` `timeErrors` `whenErrors` | The pure building blocks behind `be.options()`: what to place, checking stock (never over), hire cost, VMS text rules |
+| `mockReadSigns` / `mockAdvise` | Keyword-rule reader and rule-based advisor (`src: 'rule'`). `mockReadSigns` is the fallback when the `apps/api` reader is unavailable, and a test double. `mockAdvise` is the advisor in use: no LLM advisor was built |
+| `makeGrid()` | 5 × 9 toy network for tests and the demo (Hoddle Grid street names, assumed flows) |
+| `PERSONAS` `MIX` `chooseShares` `calibrate` … | Choice-model and calibration building blocks (see `index.js`) |
 
-## 参数（T12 @Unzzip 的 `apps/params/public/params.json`）
+## Parameters (`apps/params/public/params.json`, from @Unzzip)
 
-格式照 `docs/arch/T12-params-PRD.md` 第 4 节：每个数写成 `{ value, range, source, confidence }`（直接写数也认），`value: null` = 没找到 → 用假设值、不算错。**引擎认的字段以这张表为准**：
+Format per [`docs/hackathon/specs/T12-params-PRD.md`](../../docs/hackathon/specs/T12-params-PRD.md) §4: each value is `{ value, range, source, confidence }` (a bare number is accepted too); `value: null` = not found → assumed value, not an error. **This table defines the fields the engine accepts.**
 
-| 字段 | 引擎怎么用 | 不合格时 |
+| Field | How the engine uses it | If invalid |
 |---|---|---|
-| `mix.commuter / local / tourist / delivery` | 4 类人占车流的比例，加起来 1 ± 0.02（会归一） | 整组用假设值 50 / 25 / 10 / 15 |
-| `anchors.generic_warning_divert` | 两点校准低点：只写 ROADWORK / AHEAD 时全体车辆的绕行比例 | 两个都要合格（0–1、低 < 高），否则都用 3% / 20% |
-| `anchors.named_route_divert` | 两点校准高点：写 USE / RUSSELL ST 时的绕行比例 | 同上 |
-| `persona.<类型>.hurry` | 赶不赶时间，乘在每分钟的效用上（平均 ≈ 1，0.05–5） | 这一项用假设值 |
-| `persona.<类型>.familiar`（或 `route_familiarity`，T12 #31 的叫法） | 熟不熟路：知道 / 会自己想到这条绕行的比例（0.01–1，进 `ln()`）；两个都给用 `familiar` | 同上 |
-| `persona.<类型>.trust` | 信不信屏：乘在读数的 `trust` 上的**相对倍数**（平均的人 = 1，0–3） | 同上 |
-| `persona.<类型>.sign_trust` | 照屏上说的走的比例（0–1）。没给 `trust` 的类型用它换算：`sign_trust ÷ 给了数的几类人按占比加权的平均`；至少 2 类有数才换算，超过 3 截到 3 | 只有 1 类有数：报一条错，trust 用假设值 |
-| `persona.<类型>.queue_averse` | 怕不怕堵：乘在「看到的排队」上（0–5） | 这一项用假设值 |
-| `persona.<类型>.truck_only` | 只能走货车路（布尔） | 这一项用假设值 |
+| `mix.commuter / local / tourist / delivery` | Share of traffic for each of the 4 personas, summing to 1 ± 0.02 (normalised) | Whole group uses the assumed 50 / 25 / 10 / 15 |
+| `anchors.generic_warning_divert` | Low calibration point: diversion of all vehicles when the sign says only ROADWORK / AHEAD | Both must be valid (0–1, low < high), otherwise both use 3% / 20% |
+| `anchors.named_route_divert` | High calibration point: diversion when the sign says USE / RUSSELL ST | As above |
+| `persona.<type>.hurry` | Time pressure, multiplies the per-minute utility (average ≈ 1, 0.05–5) | This item uses the assumed value |
+| `persona.<type>.familiar` (alias `route_familiarity`, the name in an early draft of the T12 parameter spec) | Familiarity: the share who know of / would think of this detour (0.02–1, goes into `ln()`; lower bound `FAMILIAR_MIN` in `choice.js`); `familiar` wins if both are given | As above |
+| `persona.<type>.trust` | Trust in signs: a **relative multiplier** on the reading's `trust` (average driver = 1, 0–3) | As above |
+| `persona.<type>.sign_trust` | Share who follow what the sign says (0–1). For personas without `trust` it converts to `sign_trust ÷ the mix-weighted mean over personas that have a value`; needs at least 2 personas with a value; values above 3 are clipped to 3 | Only 1 persona with a value: one error, `trust` uses the assumed value |
+| `persona.<type>.queue_averse` | Queue aversion: multiplies the visible queue (0–5) | This item uses the assumed value |
+| `persona.<type>.truck_only` | Restricted to truck routes (boolean) | This item uses the assumed value |
 
-- 值写成字符串、布尔（`"0.05"`、`"3%"`）→ 报「不是数」并用假设值；`value: null` = 没找到，不报错
-- **收下但还没用**（列在 `engine.params.ignored`，带完整路径，嵌套的也列，如 `anchors.stated_to_actual`、`persona.commuter.xxx`）：`anchors.stated_to_actual`（D-0929-1435 后大模型不回比例，用不上问卷→实际的换算）、`value_of_time`、`vms`。要让它们进模型，先在这里加一行再改代码
-- 绝对的「信不信」由两点校准的推荐力度 B 吸收，所以 `trust` / `sign_trust` 只有**各类人之间的相对高低**会改结果
+- Values written as strings or booleans (`"0.05"`, `"3%"`) → reported as "is not a number" and the assumed value is used; `value: null` = not found, no error.
+- **Accepted but unused** (listed in `engine.params.ignored` with the full path, nested ones too, e.g. `anchors.stated_to_actual`, `persona.commuter.xxx`): `anchors.stated_to_actual` (since D-0929-1435 the LLM no longer returns shares, so the stated → actual conversion is not needed), `value_of_time`, `vms`. To feed one into the model, add a row to this table first, then change the code.
+- The absolute level of trust is absorbed by calibration strength B, so only the **relative differences between personas** in `trust` / `sign_trust` change the results.
+- Current file: `mix`, both anchors and `familiar` for all four personas come from `params.json`. `named_route_divert` = 0.2 is cited to Erke, Sagberg & Hagman (2007) with high confidence; `generic_warning_divert` = 0.03 is a working assumption with low confidence. The other persona fields are null and use the defaults in `choice.js`.
 
-## 外部 API
+## External services and data
 
-不联网、不要 key。读数从注入的 `readSigns`（T5）拿；路网、车流、公交电车是 T3 的 `/roads/public/cbd/network.json`、`flows.json`、`transit.json`（PTV GTFS，CC BY 4.0）；行人（T17）是 T3 的 `walk.json`、`peds.json`（1.7 MB + 1.8 MB，`connect()` 在后台取、**不等**它们，`run()` 只在这个小时封了人行道时才等，最多 8 秒；取不到不抛）。
+The engine core makes no network calls and needs no key: readings come from the injected `readSigns`. The wiring layer (`backend.js`) fetches everything from the same origin:
 
-## 电车公交（T16，`public/js/transit.js`）
+- Road network, flows and transit from `apps/roads`: `/roads/public/cbd/network.json`, `flows.json`, `transit.json` (PTV GTFS, CC BY 4.0). Pedestrian data `walk.json` and `peds.json` (1.7 MB + 1.8 MB) load in the background; `connect()` does **not** wait for them, and `run()` waits (at most 8 s) only when a footpath is closed that hour; failure never throws. `equipment.json` is fetched on the first `be.options()` call.
+- Parameters from `/params/public/params.json`.
+- The sign reader `/api/public/js/reader.js` and rule check `/api/public/js/check.js`, imported dynamically. The reader looks up precomputed answers in `apps/api/public/answers/demo.json` first and otherwise POSTs to `/api/read` on the `hackathon-api` Worker (which had an LLM behind it during the event and now answers with rules), falling back to its own keyword rules.
 
-`backend.js` 的 `run()` 算完车以后调 `transitImpact()`，结果在 `summary.transit`（字段见 `docs/contract.md` §evaluate）。模型和假设：
+## Trams and buses (`public/js/transit.js`)
 
-| 什么 | 怎么算 | 出处 |
+After the vehicle numbers, `run()` in `backend.js` calls `transitImpact()`; the result is `summary.transit` (fields in [`docs/reference/interfaces.md`](../../docs/reference/interfaces.md), "Trams and buses: `s.transit`"). Model and assumptions:
+
+| What | How | Source |
 |---|---|---|
-| 列哪些线路 | 这个方向经过的路段被全封，或整趟比没施工时慢 > 0.1 秒（别的路段车少了反而快，加起来不慢的不列）；这个小时有车次 | 引擎 |
-| 车次 | `trips[wd/we][小时]`，工作日 / 周末用引擎的 `dayType` | GTFS（T3） |
-| 公交每趟多几秒 | 线路上每个路段（方案下的 `linkTime` − 同一小时没施工的 `linkTime`）之和；不能直接加 `links[].delay_s`（那是比自由流多的） | 引擎 |
-| 公交遇到全封 | 封闭段前后 400 米内就近绕（最短路，按方案下的通行时间；先只走 trunk / primary / secondary / tertiary，绕不过去再放开到小街，小巷始终不走）；从哪拐出、在哪回来按「走到拐出点 + 绕行 + 回来后的线路」全程挑最快的；多的秒数 = 绕完全程 − 平时全程，最少记 0（跳过线路上的一圈不算变快，按时刻表跑早到要等）；绕不过去 = `blocked` | 工程假设 |
-| 公交全封在路网边上 | transit.json 的线路只截到 CBD 路网里：全封离线路进 / 出路网 < 400 米、路网里绕不过去 → 公交在路网外就换路了，`edge: true`、分钟数 `null`，不算停运（另计 `edge_routes`）。8 点把公交用到的 233 个路段逐一全封，原来判「停运」的 56 次全是这种 | 工程假设 |
-| 电车 | CBD 电车走自己的车道：封部分车道不耽误（不列）；全封 = `blocked`，只报停掉的车次和乘客，分钟数 `null` | 工程假设 |
-| 每趟载客人数 | 工作日 7–9、16–18 点：电车 60、公交 25；其余：电车 30、公交 12（区间见 `PAX_RANGE`） | **假设值**，没有 PTV 分线路载客数据［待核］ |
-| 线路路段缺口 | transit.json 按 10 米采样匹配，路口里很短的路段常缺：相邻两段接不上时 60 米内的最短路补上（电车只走有轨道的路段） | 工程假设 |
+| Which routes are listed | A link the route uses in this direction is fully closed, or the whole trip is > 0.1 s slower than with no works (routes whose trip is not slower overall, because other links got faster, are not listed); and the route has trips this hour | Engine |
+| Trips | `trips[wd/we][hour]`, weekday / weekend from the engine's `dayType` | GTFS (apps/roads) |
+| Extra seconds per bus trip | Sum over the route's links of (`linkTime` under the plan − `linkTime` in the same hour with no works); `links[].delay_s` cannot be summed directly (it is versus free flow) | Engine |
+| Bus meets a full closure | Nearest detour within 400 m before / after the closure (shortest path by travel time under the plan; trunk / primary / secondary / tertiary first, side streets only if needed, laneways never). The turn-off and rejoin points are chosen by the fastest whole trip "route to the turn-off + detour + route after rejoining"; extra seconds = detoured trip − usual trip, never below 0 (skipping a loop of the route does not make the bus faster: an early timetabled bus waits); no detour = `blocked` | Engineering assumption |
+| Full closure at the network edge | `transit.json` routes are cut to the CBD network: a full closure within 400 m of where the route enters / leaves the network with no detour inside it → the bus reroutes outside the network, `edge: true`, minutes `null`, not a cancellation (counted in `edge_routes`). Closing each of the 233 bus links at 08:00 in turn, all 56 cases previously judged "cancelled" were of this kind | Engineering assumption |
+| Trams | CBD trams run in their own lanes: a partial lane closure does not delay them (not listed); a full closure = `blocked`, reporting only the lost trips and riders, minutes `null` | Engineering assumption |
+| Riders per trip | Weekdays 7–9 and 16–18: tram 60, bus 25; otherwise tram 30, bus 12 (ranges in `PAX_RANGE`) | **Assumed**: no per-route PTV loading data |
+| Gaps in route links | `transit.json` was matched by 10 m sampling, so short links inside junctions are often missing: where two consecutive links do not connect, the shortest path within 60 m fills the gap (trams only on tracked links) | Engineering assumption |
 
-2026-09-29 17:50 实测（`tests/transit.test.mjs`，T12 参数 + 规则读屏）：Lonsdale 演示 8 点封 1 条道，15 条公交每趟多约 356 秒（留在 Lonsdale 的车多约 360 秒），77 趟 / 1925 人每小时，约 1.1 万乘客·分钟；同一段全封，公交从 Exhibition St 拐出、经 Victoria St → Elizabeth St 绕回，每趟多约 76 秒（2026-09-29 修正：原来绕行算法把跳过的那段线路又算了一遍、还偏向晚拐，报约 91 秒）；La Trobe 演示全封，30 路电车每小时停 6 趟 / 360 人。单次 < 10 毫秒。
+Measured on the current code and data (engine rule reader, `params.json`): the Lonsdale demo at 08:00 with one lane closed delays 15 bus routes by about 356 s per trip (cars staying on Lonsdale lose about 360 s), 77 trips and 1,925 riders per hour, about 11,400 rider-minutes. With the same link fully closed, buses turn off at Exhibition St and return via Victoria St → Elizabeth St, about 76 s extra per trip. A full closure of the La Trobe demo link stops tram route 30: 6 trips and 360 riders per hour. `transitImpact` takes about 3–5 ms for a full closure and under 1 ms for a one-lane closure on a laptop; no test gates its speed.
 
-## 行人模型（T17，`public/js/peds.js`）
+## Pedestrians (`public/js/peds.js`)
 
-| 步 | 怎么算 | 假设 |
+| Step | How | Assumption |
 |---|---|---|
-| 封哪几段 | `walk.json` 里 `road_link` = 施工路段、`side` 对得上、`kind` 是 `sidewalk / other / path` 的人行道；右侧还要找对面那幅路（同名、方向相反、≤ 40 米）挂着的 `left`，只取和施工路段并排（夹角 < 45°、横向 ≤ 65 米）走了 ≥ min(5 米, 自身长度一半) 的 | 过街（`crossing`）和步行街（`mall`）不封；5 米［假设值］ |
-| 分段 | 施工 × 哪一侧 × 一串首尾相接、方向差 < 60° 的施工路段（直街跨 45° 方位不会被拆成两段、人数不会算两遍） | — |
-| 起点、终点 | 这一段封掉的人行道里离得最远、避开封闭段还能走到 ≥ min(60, 节点数一半) 个节点的两个节点；这样的节点不到 2 个 = 死胡同（`dead_end`，不算绕行，不算 `blocked`） | 60 个节点［假设值：CBD 一个街区四周约 20–40 个］ |
-| 多走几米 | 人行道路网（不分方向）上避开所有封闭段的最短路 − 平时最短路 | 走最短路 |
-| 多少人 | 这一段封掉的人行道里这个小时人最多的那条（`peds.json`），两侧都封加起来 | 数到的人都走完整段（上限） |
-| 多花几分钟 | `ped_h × detour_m ÷ (1.3 m/s × 60)` | 步速 1.3 m/s［假设值］；等红灯没算 |
-| 没路可绕 | `blocked = true`，人数进 `blocked_ped_h`，不算进 `extra_min`（全网扫一遍只有 St Kilda Rd 桥两侧都封这 3 处） | — |
-| 过几次马路 | 绕行路线上连着的过街段算一次（安全岛切开的），不同名字的街分开算 | — |
-| 最近的计数器 | 先认装在封掉的人行道上的；否则 ≤ 40 米、而且在施工路段中心线同一侧 | 马路对面的计数器数的是另一拨人 |
-| 找不到人行道 | `unmatched = true` + `note`（全网单侧封约 1/3 的路段会这样：`walk.json` 没画那一侧） | 不等于「人行道照常通行」 |
-| 无障碍 | `step_free` 一律 `null` | `walk.json` 没有台阶 / 坡道数据 |
+| Which footpaths close | Footpaths in `walk.json` with `road_link` = a works link, matching `side`, and `kind` ∈ `sidewalk / other / path`. For the right side, also the opposite carriageway (same name, opposite direction, ≤ 40 m away) and its `left` footpaths, taking only those that run alongside the works link (angle < 45°, ≤ 65 m laterally) for ≥ min(5 m, half their own length) | Crossings and malls never close; 5 m [assumed] |
+| Stretches | Worksite × side × a chain of end-to-end works links whose headings differ by < 60° (a straight street crossing a 45° bearing is not split in two, so pedestrians are not counted twice) | — |
+| Origin, destination | The two farthest-apart nodes of the closed footpaths that can still reach ≥ min(60, half the node count) nodes avoiding the closure; fewer than 2 such nodes = dead end (`dead_end`, no detour, not `blocked`) | 60 nodes [assumed: a CBD block perimeter has about 20–40] |
+| Extra metres | Shortest path on the (undirected) footpath network avoiding every closure − usual shortest path | Pedestrians take the shortest path |
+| Pedestrians | The busiest closed footpath in the stretch this hour (`peds.json`); both sides closed = the two added | Everyone counted walks the full stretch (upper bound) |
+| Extra minutes | `ped_h × detour_m ÷ (1.3 m/s × 60)` | Walking speed 1.3 m/s [assumed]; waiting at signals not included |
+| No way round | `blocked = true`, pedestrians go into `blocked_ped_h`, not `extra_min` (a scan of the whole network found only 3 such cases, all with both sides of the St Kilda Rd bridge closed) | — |
+| Crossings | Consecutive crossing segments on the detour count once (refuge islands split crossings); different street names count separately | — |
+| Nearest counter | A counter on a closed footpath first; otherwise ≤ 40 m away and on the same side of the works link centreline | A counter across the road counts different people |
+| No footpath found | `unmatched = true` + `note` (about 1/3 of links across the network, for one-side closures: `walk.json` has no footpath mapped on that side) | Not the same as "footpath open as usual" |
+| Accessibility | `step_free` is always `null` | `walk.json` has no step / kerb-ramp data |
 
-实测（2026-09-29 复审修完，真数据）：Lonsdale 西行 8 点封左侧 47 米 → 185 人/小时、每人多走 176 米、过 2 次马路、417 人·分钟；封右侧（对面那幅路的北侧人行道 102 米）→ 185 人/小时、多走 67 米、158 人·分钟；两侧都封 → 370 人/小时、1125 人·分钟。La Trobe 西行 17 点封左 / 右 → 818 人/小时、过 4 次马路、约 1020 / 1070 人·分钟。
+Measured on the current code and data: Lonsdale westbound at 08:00, left side closed (47 m) → 185 pedestrians per hour, 176 m extra each, 2 road crossings, 417 person-minutes; right side closed (the opposite carriageway's north footpath, 102 m) → 185 per hour, 67 m extra, 158 person-minutes; both sides → 370 per hour, 1,125 person-minutes. La Trobe westbound at 17:00, left / right closed → 818 per hour, 4 crossings, about 1,020 / 1,070 person-minutes.
 
-## 按库存出方案（T22，`public/js/options.js` + `be.options()`）
+## Inventory-constrained options (`public/js/options.js` + `be.options()`)
 
-D-0929-2011 ③。给一处施工配 3 套方案，**数字全由引擎算**（每套都 `run()` 同一个小时）。`options()` 本身不调大模型；每套的读数走 `run()` 同一条读屏链（T5 答案文件 → `/api/read` → 规则），读数一样时逐字同样输出。演示前要把它生成的屏上文字预算进 T5 答案文件（下面的实测是规则读数）。
+Decision D-0929-2011 item 3: three kits for one worksite, with **every number computed by the engine** (each kit is a `run()` for the same hour). `options()` itself never calls the LLM; each kit's readings go through the same reader chain as `run()` (answers file → `/api/read` → rules), so identical readings give byte-identical output. Before a live demo, the sign texts it generates should be precomputed into the answers file.
 
-| 档 | 摆什么 | 为什么这么分 |
+| Tier | What it places | Why |
 |---|---|---|
-| `o1` Minimum | 护栏（水马 `barrier_water`，件数 = ⌈封闭长度 ÷ 2 米⌉）+ ROADWORK AHEAD + LEFT/RIGHT LANE CLOSED（全封换 DETOUR AHEAD）+ END ROADWORK（摆在施工段末端，`at_m` 为负；`signsOn()` 只收 `at_m ≥ 0` 的牌，它不进读数请求、不占 T5 最多 6 块的名额） | 合规最低配 |
-| `o2` Standard | o1 + 箭头板 + **两块** VMS 报延误、不点名路线（`delayFrames()`：EXPECT / DELAYS ▸ N MIN，N = o1 走原路每车多等的整分钟，≥ 1；不到 1 分钟写 ROADWORK / AHEAD、`flags.no_delay_min`） | 常见做法，三档里最贵（T50） |
-| `o3` Guided | o1 + 箭头板 + **一块** VMS 点名最快绕行和省几分钟（`mockAdvise` 的写法，如 USE / RUSSELL ▸ SAVE / 9 MIN） | 比 o2 少租一块 VMS，只靠写对屏上的字（T50） |
+| `o1` Minimum | Barriers (water-filled `barrier_water`, count = ⌈closed length ÷ 2 m⌉) + ROADWORK AHEAD + LEFT/RIGHT LANE CLOSED (DETOUR AHEAD for a full closure) + END ROADWORK (at the end of the works, negative `at_m`; `signsOn()` only takes signs with `at_m ≥ 0`, so it is not in the reading request and does not use one of the reader's 6 sign slots) | Minimum compliant set |
+| `o2` Standard | o1 + arrow board + **two** VMS reporting delay without naming a road (`delayFrames()`: EXPECT / DELAYS ▸ N MIN, N = whole extra minutes per vehicle on o1's stay route, ≥ 1; under 1 minute → ROADWORK / AHEAD and `flags.no_delay_min`) | Common practice; the most expensive tier |
+| `o3` Guided | o1 + arrow board + **one** VMS naming the fastest detour and the minutes saved (the `mockAdvise` wording, e.g. USE / RUSSELL ▸ SAVE / 9 MIN) | One VMS fewer than Standard; relies on the wording alone |
 
-- VMS 位置：先跑 o1，按规则顾问找最快绕行，摆在它拐口上游 +100 米（取整 50）；o2 的 VMS-1 和 o3 的 VMS 同位置。o2 的 VMS-2 再往上游（`vms2At()`：最远 500 米，引擎模拟的上游路段不够长就收在它起点之内、取整 50；Lonsdale 是 400 米，在 Exhibition St 拐口之前）。没有更快的绕行 → o3 写 ROADWORK / AHEAD、`flags.no_faster_detour`。两侧人行道都封时 o2 上游 7 块牌，VMS-2 被 T5 的 6 块上限挤掉 → `flags.vms_read = false`
-- 封人行道（`closes.footpath`）：每侧一排能封人行道的护栏 + 一块 FOOTPATH CLOSED
-- 库存：按优先顺序挑剩余库存够的条目（水马 → 塑料隔板 → 钢护栏；VMS A 类 → C 类）；都不够就只摆剩下的件数、缺口进 `stock.short`，**方案里每种设备件数永远 ≤ 库存**。整份方案里时间重叠的其他施工带的设备（`equipment[].item / qty`）先从库存里扣（`stock.shared_with`）。先配可选条目少的（人行道只能用水马），车道护栏再挑剩下的，免得误报缺货
-- 输入挡板（都抛 `bad_plan`）：有路段不在路网、`time` 日期不存在或 `from` 晚于 `to`、`hours` 不是 `[开始, 结束)`、`when` 不合格。施工在 `when` 那个小时不施工 → `flags.inactive`、`flags.ok = false`；VMS 没进读数请求 → `flags.vms_read = false`
-- 租金 = 件数 × `day_rate_aud` × 天数（`time.from`–`time.to` 日历天数含两头）。**库存件数和日租价都是假设值**（equipment.json 官网没价），`hire.assumed = true`、`flags.assumed`，界面标「假设值」（D-0929-1536）
-- 设备条目都带 `item`（equipment.json 的 id）和 `qty`，和 contract `equipment[].item / qty` 同口径，pack.js 能按同一份方案报价
-- 2026-09-29 实测 Lonsdale 西行 8 点（引擎规则读数）：o1 排队 918 米 / 全网 10493 车·分 / A$515；o2 一样 918 / 10493 / A$1765（箭头板和「前方施工」在引擎里不改路线选择）；o3 276 / 2800 / A$1765。La Trobe 17 点三套都几乎不堵，o3 没有更快的绕行
-- 2026-10-01 T50 改档后实测 Lonsdale 西行 8 点，绕行比例（1 − 原路份额）/ 租金：T5 读屏（答案文件没有的走 T5 规则）o1 0.14 / A$515 · o2 0.492 / A$2515 · o3 0.605 / A$1765；引擎自带规则读不出「DELAYS / 10 MIN」的分钟数，o2 = o1 = 0.14
+- VMS position: run o1 first, take the fastest detour from the rule-based advisor, and place the VMS 100 m upstream of its turn (rounded to 50); Standard's VMS-1 and Guided's VMS share that position. Standard's VMS-2 goes further upstream (`vms2At()`: at most 500 m; if the modelled upstream stretch is shorter, inside its start, rounded to 50; on Lonsdale 400 m, before the Exhibition St turn). No faster detour → Guided shows ROADWORK / AHEAD and sets `flags.no_faster_detour`. With both footpaths closed, Standard has 7 upstream signs and VMS-2 is pushed out by the reader's 6-sign limit → `flags.vms_read = false`.
+- Footpath closures (`closes.footpath`): per side, a row of footpath-capable barriers + one FOOTPATH CLOSED.
+- Stock: for each need, the first item in order of preference with enough stock left (water-filled → plastic → steel barriers; VMS type A → type C); if none has enough, only what is left is placed and the shortfall goes into `stock.short`. **No item quantity in a kit ever exceeds stock.** Equipment already held by time-overlapping worksites in the same plan (`equipment[].item / qty`) is subtracted first (`stock.shared_with`). Needs with fewer candidate items are served first (footpaths can only use water-filled barriers), so lane barriers do not cause false shortfalls.
+- Input checks (all throw `bad_plan`): links not in the network, a non-existent date or `from` after `to` in `time`, `hours` not `[start, end)`, an invalid `when`. Works inactive at `when` → `flags.inactive`, `flags.ok = false`; a VMS left out of the reading request → `flags.vms_read = false`.
+- Hire = quantity × `day_rate_aud` × days (calendar days from `time.from` to `time.to`, inclusive). **Stock quantities and day rates are assumed values** (RPM Hire publishes no prices): `hire.assumed = true`, `flags.assumed`, and the UI labels them as assumptions (D-0929-1536).
+- Every equipment entry carries `item` (the `equipment.json` id) and `qty`, matching `equipment[].item / qty` in the interface spec, so `apps/api` `pack.js` can quote the same plan.
+- Measured on the current code and data, Lonsdale westbound at 08:00 (queue / network delay / detour share 1 − stay share / hire):
 
-## 结构
+| Reader | o1 Minimum | o2 Standard | o3 Guided |
+|---|---|---|---|
+| `apps/api` reader (answers file, else its keyword rules) | 918 m / 10,493 veh·min / 0.14 / A$515 | 286 m / 2,927 veh·min / 0.492 / A$2,515 | 82 m / 966 veh·min / 0.605 / A$1,765 |
+| Engine's own rules (`mockReadSigns`) | 918 m / 10,493 veh·min / 0.14 / A$515 | 918 m / 10,493 veh·min / 0.14 / A$2,515 | 276 m / 2,800 veh·min / 0.497 / A$1,765 |
 
-| 文件 | 一句话 |
+The engine's own rules cannot read the minutes in "EXPECT DELAYS / 10 MIN", so with them o2 equals o1. On the La Trobe demo at 17:00 none of the three kits queues, and o3 finds no faster detour.
+
+## Determinism and performance
+
+- No randomness and no clock in the numerics (wall-clock time appears only in AI-log metadata). Adjacency lists are sorted by id, the Dijkstra heap breaks ties first-in first-out, cache keys are canonical JSON, and sorts break ties by name. Tests assert byte-identical JSON for `evaluate`, `options()`, `clash()` / `stagger()`, `transitImpact` and `pedImpact`.
+- Measured on a laptop for the Lonsdale demo on the 1,513-link network: `evaluate` first call ≈ 4 ms, warm median ≈ 1 ms; `backend.run()` warm median ≈ 3 ms including transit and the sign check; `options()` for three kits ≈ 7–10 ms. The only automated gate is < 100 ms per `evaluate` (`tests/e2e.test.mjs`). Costs are kept down by the memoised route structure, a cached no-works baseline per day type and hour, and WeakMap-cached transit, footpath and laneway indexes.
+
+## Structure
+
+| File | Role |
 |---|---|
-| `public/js/index.js` | 引擎核心的全部导出 |
-| `public/js/backend.js` | 后端接线层：给网页的一站式入口（按 URL 动态加载 T5 的 reader.js / check.js，其余从 index.js 来） |
-| `public/js/pipeline.js` | `createEngine`：prepare / evaluate / window / conflict，排队反馈的逐次平均 |
-| `public/js/choice.js` | 第 ④ 步选择模型：每类人参数（赶时间 · 熟路 · 信屏 · 怕堵 · 只能走货车路）+ 被说动的比例 → 各路线比例 |
-| `public/js/calibrate.js` | 两点校准：在参考场景上解出绕行惯性 A、推荐力度 B |
-| `public/js/params.js` | 读 T12 的 `params.json`，逐项校验、回退，报每项用的是哪个 |
-| `public/js/reading.js` | 第 ② 步读数请求（全部标志 + 每条绕行拐口前的标志）、MOCK 读数器 |
-| `public/js/routes.js` | 第 ① 步：受影响的车、原路、最多 3 条绕行（上游约 400 米、下游约 300 米） |
-| `public/js/assign.js` | 第 ⑤ 步：分流，BPR + D/D/1 排队，全网总行程时间 |
-| `public/js/net.js` · `worksite.js` · `cards.js` · `canon.js` | 路网索引和最短路 · 施工时段和通行能力 · 读屏秒数和路名清洗 · 稳定 JSON |
-| `public/js/advisor.js` | 第 ⑦ 步的引擎这一半 + MOCK 顾问 |
-| `public/js/transit.js` | 电车公交（T16）：线路 → 路段序列（补缺口）、公交延误和绕行、电车停运、乘客·分钟 |
-| `public/js/peds.js` | T17 封人行道 → 行人绕行（人行道路网最短路、每小时人数、过几次马路） |
-| `public/js/grid.js` | 方格路网 |
-| `tools/demo.mjs` · `tests/` · `test.sh` | 演示 · 测试 |
+| `public/js/index.js` | Every export of the engine core |
+| `public/js/backend.js` | Wiring layer: the web page's one-stop entry (dynamically imports `apps/api` `reader.js` / `check.js` by URL; everything else comes from `index.js`) |
+| `public/js/pipeline.js` | `createEngine`: prepare / evaluate / window / conflict, successive averages for queue feedback |
+| `public/js/choice.js` | Step ④ choice model: per-persona parameters (hurry · familiarity · trust in signs · queue aversion · truck-only) + persuaded share → route shares |
+| `public/js/calibrate.js` | Two-point calibration: solves detour inertia A and recommendation strength B on the reference scene |
+| `public/js/params.js` | Reads `params.json`, validating and falling back item by item, and reports the source of each item |
+| `public/js/reading.js` | Step ② reading requests (all signs + the signs before each detour's turn) and the mock rule reader |
+| `public/js/routes.js` | Step ①: affected vehicles, stay route, up to 3 detours (about 400 m upstream, 300 m downstream) |
+| `public/js/assign.js` | Step ⑤: assignment, BPR + D/D/1 queues, network total travel time |
+| `public/js/options.js` | Inventory-constrained kits: tier needs, stock resolution (never over stock), hire cost, VMS text rules, delay / guidance frames |
+| `public/js/net.js` · `worksite.js` · `cards.js` · `canon.js` | Network index and shortest paths · works hours and capacity · sign read time and road-name cleaning · canonical JSON |
+| `public/js/advisor.js` | The engine half of step ⑦ + the rule-based advisor |
+| `public/js/transit.js` | Trams and buses: route → link sequence (gaps filled), bus delay and detours, tram stoppages, rider-minutes |
+| `public/js/peds.js` | Footpath closure → pedestrian detour (shortest path on the footpath network, pedestrians per hour, road crossings) |
+| `public/js/grid.js` | Toy grid network |
+| `tools/demo.mjs` · `tests/` · `test.sh` | Demo · tests · test runner |
 
-## 本模块固定模式
+## Conventions
 
-- 🔒 引擎核心不 import api 模块：`readSigns` / `askAdvisor` 由调用方注入；只有接线层 `backend.js` 按 URL 动态加载 T5 的文件
-- 🔒 大模型只给读数和改法，所有数字引擎算；排队变长引擎自己重算，不再问大模型
-- `evaluate` 同步、确定：要的读数先 `prepare`；缺的按「没人被说动」算并报 `missing`
-- 读数请求只含「字 + 人」（不含位置、耗时、排队），同一句话每类人只问一次；屏的位置由引擎用 `turn_m` 判断
-- 改了选择模型参数就重跑 `node tools/demo.mjs` 看三幕方向还对不对
+- The engine core never imports the api module: `readSigns` / `askAdvisor` are injected by the caller; only the wiring layer `backend.js` loads `apps/api` files by URL.
+- The LLM only supplies readings; every number comes from the engine. When queues grow, the engine re-runs route choice itself without asking the LLM again.
+- `evaluate` is synchronous and deterministic: `prepare` the readings it needs first; missing ones count as "nobody persuaded" and are reported in `missing`.
+- A reading request holds only text + persona (no position, travel time or queue), so each wording is asked once per persona; the engine decides from `turn_m` whether a sign comes before a turn.
+- After changing choice-model parameters, re-run `node tools/demo.mjs` to check that the three acts still go the right way.
 
-## 已知问题
+## Known issues
 
-- 每类人参数、占比 `MIX`、两点校准的 3% / 20% 在 T12 的 `params.json` 到之前是假设值［待核］；`BETA`、「看到排队 1 公里 ≈ 多堵 4 分钟」是工程假设，不在 params.json 里
-- T3 的车流有些路段本身就超过通行能力（如 Flinders Street 2526 / 1800）：引擎只算比没施工多出来的，但绝对数会偏大
-- 绕行路线不走 CBD 小巷（OSM `living_street` / `service` 等，见 `routes.js` 的 `NO_DETOUR`）：T3 给 Heffernan Lane 这类小巷的通行能力是 1620 veh/h，比主路单车道还高，不排除的话屏上会点名一条巷子
-- BPR + 确定性排队，没有排队回溢到上游路口；路线按自由流定，不随拥堵重新找路；只改道施工第一段上的车
-- 引擎核心只模拟开车的人（每车 1 人）；电车公交乘客在接线层另算（`summary.transit`，每趟人数是假设值，公交不会因为排队而改道、电车只看全封）；骑车还没做
-- 行人只算「封人行道 → 绕行」（T17，`summary.peds`），不算人流和车流互相影响、不判断轮椅能不能走；`walk` 当只读数据用（索引按对象缓存，改了要给新对象）；peds.json 大多是估算（6802 条里 67 条实测），`measured` / `sensor` 报出来
-- 顾问（`advise`）、冲突成本（`conflict`）还只比车的延误，不含电车公交和行人
-- 冲突 / 顾问的时间窗最多 31 天、每天只采样 1–2 个小时
-- T3 路网没有 `truck` 字段，禁货车限制现在不生效
+- `BETA` and "a 1 km visible queue feels like about 4 extra minutes" are engineering assumptions not in `params.json`; most persona fields in `params.json` are still null and use the defaults in `choice.js`, and the 3% low anchor is a working assumption (low confidence).
+- Some flows in the network data already exceed capacity (e.g. Flinders Street 2,526 / 1,800 veh/h): the engine only counts the difference from no works, but the absolute numbers come out high. `be.clash()` flags this case as `negative_delay`.
+- Detours never use CBD laneways (OSM `living_street` / `service` etc., see `NO_DETOUR` in `routes.js`): the network data gives laneways such as Heffernan Lane a capacity of 1,620 veh/h, higher than a single main-road lane, so without the exclusion a sign could name a laneway.
+- BPR + deterministic point queues: no spillback into upstream junctions; routes are fixed at free-flow times rather than re-found under congestion; only vehicles on the first works link are rerouted.
+- The core models car drivers only (1 person per vehicle). Tram and bus riders are computed separately in the wiring layer (`summary.transit`; riders per trip are assumed, buses do not reroute around queues, trams only respond to full closures). Cycling is not modelled.
+- Pedestrians cover only "footpath closed → detour" (`summary.peds`): no interaction between pedestrian and vehicle flows, and no wheelchair-accessibility judgement. `walk` is treated as read-only data (its index is cached per object, so pass a new object after changing it). `peds.json` is mostly estimated (67 of 6,802 links measured); `measured` / `sensor` report this.
+- The advisor (`advise`) and the clash cost (`conflict`) compare vehicle delay only, not trams, buses or pedestrians. The advisor is rule-based.
+- Clash and advisor windows cover at most 31 days, sampling only 1–2 hours per day.
+- The network data has no `truck` field, so truck restrictions currently have no effect.

@@ -1,59 +1,59 @@
-// options.js —— T22（D-0929-2011 ③）：按 RPM Hire 库存（apps/roads 的 equipment.json）给一处施工配 3 套交通管理方案、算租金。纯函数。
-// 这里只管「摆什么设备、摆几件、摆在哪、多少钱、库存够不够」；每套方案的排队、延误由 backend.js 的 be.options() 交给引擎算（D-0929-1310：引擎算数字）。
-// 🔒 库存件数和日租价是假设值（equipment.json 每条的 assumed、sources 写明官网没有公开价格）→ hire.assumed 恒为 true（D-0929-1536）
-// 🔒 不超库存：方案里每种设备的件数（加上同一份方案里时间重叠的其他施工已经带走的）≤ 库存；不够的写进 short，不硬塞
-// 设备条目带 item（equipment.json 的 id）和 qty（件数），和 docs/contract.md 的 equipment[].item / qty 同口径，api 的 pack.js 能按同一份方案报价
+// options.js — build 3 traffic-management kits for one worksite from the RPM Hire inventory (apps/roads equipment.json) and price their hire (D-0929-2011 item 3). Pure functions.
+// This file only decides which equipment, how many, where, how much and whether stock suffices; each kit's queue and delay are computed by the engine via be.options() in backend.js (D-0929-1310: the engine computes the numbers).
+// Rule: stock quantities and day rates are assumed values (each equipment.json item's assumed / sources fields say RPM Hire publishes no prices) → hire.assumed is always true (D-0929-1536)
+// Rule: never exceed stock: each item's quantity in a kit (plus what time-overlapping worksites in the same plan already use) ≤ stock; shortfalls go into short instead of being forced in
+// Equipment entries carry item (equipment.json id) and qty, matching equipment[].item / qty in docs/reference/interfaces.md, so apps/api pack.js can quote the same plan
 import { footpathOf, overlaps } from './worksite.js';
 import { signsOn } from './reading.js';
 import { approaches } from './routes.js';
 
-// 三档（T50，lead 拍板：A、B 原来屏上都是「前方施工」、读数一样，C 和 B 一样贵）：
-//   最省 o1 = 护栏 + 静态标志，没有 VMS
-//   标准 o2 = 再加箭头板 + 两块 VMS 报「走原路要多等 N 分钟」、不点名路线（如 EXPECT / DELAYS ▸ 10 MIN）；三档里最贵
-//   引导 o3 = 箭头板 + 一块 VMS 点名引擎算出的最快绕行和省几分钟（如 USE / RUSSELL ▸ SAVE / 9 MIN）；比标准少租一块 VMS
-// vms = 几块 VMS；delay = 屏上报延误（标准档）；guided = 屏上点名绕行（引导档）
+// Three tiers (revised: previously A and B both showed only "roadwork ahead" and read the same, and C cost as much as B):
+//   Minimum o1  = barriers + static signs, no VMS
+//   Standard o2 = adds an arrow board + two VMS showing the extra minutes on the stay route without naming a road (e.g. EXPECT / DELAYS ▸ 10 MIN); the most expensive tier
+//   Guided o3   = arrow board + one VMS naming the engine's fastest detour and the minutes saved (e.g. USE / RUSSELL ▸ SAVE / 9 MIN); one VMS fewer than Standard
+// vms = number of VMS; delay = the sign reports delay (Standard); guided = the sign names a detour (Guided)
 export const TIERS = [
   { id: 'o1', label: 'Minimum', label_zh: '最省', vms: 0, arrow: false, guided: false, delay: false },
   { id: 'o2', label: 'Standard', label_zh: '标准', vms: 2, arrow: true, guided: false, delay: true },
   { id: 'o3', label: 'Guided', label_zh: '引导绕行', vms: 1, arrow: true, guided: true, delay: false },
 ];
 export const WARN_FRAME = ['ROADWORK', 'AHEAD'];
-export const DELAY_HEAD = ['EXPECT', 'DELAYS']; // 标准档屏上第一帧；第二帧是「N MIN」（delayFrames）
-export const VMS_AT_M = 300; // 找不到更快的绕行时 VMS 摆在上游 300 米（和 backend.js 的演示方案一样）
-export const VMS2_AT_M = 500; // 标准档第二块 VMS 最远摆在上游 500 米（vms2At：引擎模拟的上游路段不够长就往回收）
-export const AT_M = { ahead: 200, lane: 100, arrow: 60 }; // 静态标志 / 箭头板离施工起点多少米（工程假设，和演示方案同位置）
-export const BARRIER_PREF = ['barrier_water', 'barrier_klemmfix', 'barrier_steel']; // 先用水马（官网：50 km/h 以下道路合适、对行人友好）
+export const DELAY_HEAD = ['EXPECT', 'DELAYS']; // first frame of the Standard VMS; the second is "N MIN" (delayFrames)
+export const VMS_AT_M = 300; // VMS 300 m upstream when no faster detour is found (same as the demo plans in backend.js)
+export const VMS2_AT_M = 500; // the Standard tier's second VMS goes at most 500 m upstream (vms2At pulls it back if the modelled upstream stretch is shorter)
+export const AT_M = { ahead: 200, lane: 100, arrow: 60 }; // static sign / arrow board distance from the works start (engineering assumption, same positions as the demo plans)
+export const BARRIER_PREF = ['barrier_water', 'barrier_klemmfix', 'barrier_steel']; // water-filled barriers first (RPM Hire: suited to roads under 50 km/h, pedestrian-friendly)
 export const VMS_PREF = ['vms_a', 'vms_c'];
 export const HIRE_NOTE = 'Stock and day rates are assumed values (RPM Hire publishes no prices); confirm with an RPM Hire quote.';
 
 const dayNum = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10)) / 86400000;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const okDate = s => DATE_RE.test(String(s)) && new Date(dayNum(s) * 86400000).toISOString().slice(0, 10) === s;
-// time 写错会让租金悄悄按 1 天算、施工在 when 那个小时不生效 → be.options() 先拿它挡，抛 bad_plan
-export function timeErrors(time, who = '施工') {
+// a malformed time would silently price hire as 1 day and leave the works inactive at `when` → be.options() rejects it first with bad_plan
+export function timeErrors(time, who = 'Worksite') {
   if (time == null) return [];
-  if (typeof time !== 'object' || Array.isArray(time)) return [`${who}：time 要是 { from, to, hours? } 对象`];
+  if (typeof time !== 'object' || Array.isArray(time)) return [`${who}: time must be a { from, to, hours? } object`];
   const errs = [];
-  if (!okDate(time.from) || !okDate(time.to)) errs.push(`${who}：time.from / to 要是真实日期 YYYY-MM-DD（现在是 ${JSON.stringify(time.from)} / ${JSON.stringify(time.to)}）`);
-  else if (time.from > time.to) errs.push(`${who}：time.from ${time.from} 晚于 time.to ${time.to}`);
+  if (!okDate(time.from) || !okDate(time.to)) errs.push(`${who}: time.from / to must be real dates YYYY-MM-DD (got ${JSON.stringify(time.from)} / ${JSON.stringify(time.to)})`);
+  else if (time.from > time.to) errs.push(`${who}: time.from ${time.from} is after time.to ${time.to}`);
   const h = time.hours;
   if (h != null && !(Array.isArray(h) && h.length === 2 && h.every(Number.isFinite) && h[0] >= 0 && h[1] <= 24 && h[0] < h[1])) {
-    errs.push(`${who}：time.hours 要是 [开始, 结束)，0 ≤ 开始 < 结束 ≤ 24（现在是 ${JSON.stringify(h)}）`);
+    errs.push(`${who}: time.hours must be [start, end) with 0 ≤ start < end ≤ 24 (got ${JSON.stringify(h)})`);
   }
   return errs;
 }
 export function whenErrors(when) {
   const ok = when && typeof when === 'object' && okDate(when.date) && Number.isInteger(when.hour) && when.hour >= 0 && when.hour <= 23;
-  return ok ? [] : [`when 要是 { date: 'YYYY-MM-DD', hour: 0–23 }（现在是 ${JSON.stringify(when ?? null)}）`];
+  return ok ? [] : [`when must be { date: 'YYYY-MM-DD', hour: 0–23 } (got ${JSON.stringify(when ?? null)})`];
 }
 
-// 租几天 = time.from 到 time.to 的日历天数（含两头）；没写日期按 1 天算（flags.no_time 标出来）。日期写错的输入 be.options() 已经用 timeErrors 挡掉
+// hire days = calendar days from time.from to time.to inclusive; no dates = 1 day (flagged as flags.no_time). be.options() has already rejected malformed dates via timeErrors
 export function daysOf(time) {
   if (!time || !DATE_RE.test(String(time.from)) || !DATE_RE.test(String(time.to))) return 1;
   return Math.max(1, dayNum(time.to) - dayNum(time.from) + 1);
 }
 
-// 施工路段 → 封闭长度（各路段 len_m 相加）、最少几条车道、是不是全封、封哪侧人行道
+// works links → closed length (sum of len_m), minimum lane count, full closure or not, which footpath is closed
 export function siteOf(net, ws) {
   let len = 0, lanes = Infinity;
   const missing = [];
@@ -70,8 +70,8 @@ export function siteOf(net, ws) {
   };
 }
 
-// 引擎模拟的上游路段有多长（routes.js approaches() 从施工起点沿同一条街往上游走的那段；每段 approach 的车都从它的起点进来）。
-// 几段 approach 取最短的；算不出 → null
+// length of the upstream stretch the engine models (what routes.js approaches() walks upstream along the same street from the works start; every approach's vehicles enter at its start).
+// Shortest over the approaches; null if it cannot be computed
 function upOf(net, ws) {
   try {
     const ms = approaches(net, ws).map(a => a.up.reduce((s, l) => s + (Number(l.len_m) || 0), 0));
@@ -79,20 +79,20 @@ function upOf(net, ws) {
   } catch { return null; }
 }
 
-// 标准档第二块 VMS 摆多远（T50）：比第一块再往上游，司机在更多拐口之前就知道要堵多久。最远 VMS2_AT_M；
-// 引擎模拟的上游路段（up_m）不够长就摆在它的起点之内 ≥ 25 米、取整 50 —— 起点再往上游，从横街拐进来的车根本经过不了这块屏，
-// 引擎却会当所有车都看到了；至少比第一块远 50 米。Lonsdale 8 点：上游 436 米（到 Spring St）→ 400 米，在 Exhibition St 拐口（298 米）之前
+// where the Standard tier's second VMS goes: further upstream than the first, so drivers learn the delay before more turn-offs. At most VMS2_AT_M;
+// if the modelled upstream stretch (up_m) is shorter, place it ≥ 25 m inside its start, rounded to 50 — beyond the start, vehicles turning in from cross streets never pass the sign,
+// yet the engine would assume every vehicle saw it; always at least 50 m beyond the first. Lonsdale at 08:00: upstream stretch 436 m (to Spring St) → 400 m, before the Exhibition St turn (298 m)
 export function vms2At(vmsAt, upM) {
   const far = Number.isFinite(upM) && upM > 0 ? Math.min(VMS2_AT_M, Math.floor((upM - 25) / 50) * 50) : VMS2_AT_M;
   return Math.min(2000, Math.max((Number(vmsAt) || 0) + 50, far));
 }
 
-// 封的是哪一侧车道：原方案标志牌上写了 LEFT LANE CLOSED 就是左，否则按演示方案的右
+// which lane is closed: left if the original plan has a LEFT LANE CLOSED sign, otherwise right as in the demo plans
 export function laneSide(ws) {
   return (ws.equipment || []).some(e => /LEFT LANE CLOSED/i.test(String(e.text || ''))) ? 'left' : 'right';
 }
 
-// VMS 屏上文字规范（和 api 的 signs.js / advisor 的 checkSuggestion 同口径）：≤ 2 帧 × ≤ 4 行 × ≤ 10 字符、合计 ≤ 8 个词、大写
+// VMS text rules (same as apps/api signs.js and the advisor's checkSuggestion): ≤ 2 frames × ≤ 4 lines × ≤ 10 characters, ≤ 8 words in total, upper case
 const LINE_RE = /^[A-Z0-9 .,'&/:+-]{1,10}$/;
 export function vmsTextOk(frames) {
   if (!Array.isArray(frames) || frames.length < 1 || frames.length > 2) return false;
@@ -100,8 +100,8 @@ export function vmsTextOk(frames) {
   return lines && frames.flat().join(' ').split(/\s+/).filter(Boolean).length <= 8;
 }
 
-// 顾问规则给的引导帧（如 USE / RUSSELL ▸ SAVE / 9 MIN）→ VMS 上的帧。顾问给了两帧就原样用：屏最多两帧，「前方施工」由 S-1 静态牌说；
-// 只给一帧（旧写法，也可以直接传一帧）就在前面加「前方施工」，超 8 个词就只留引导帧
+// guidance frames from the rule-based advisor (e.g. USE / RUSSELL ▸ SAVE / 9 MIN) → VMS frames. Two frames are used as given: a VMS has at most two, and the S-1 static sign already says "roadwork ahead";
+// a single frame (older form, or passed directly) gets ROADWORK / AHEAD in front, keeping only the guidance frame if that exceeds 8 words
 export function guidedFrames(frames) {
   if (!Array.isArray(frames) || !frames.length) return null;
   const fs = Array.isArray(frames[0]) ? frames : [frames];
@@ -111,10 +111,10 @@ export function guidedFrames(frames) {
   return vmsTextOk([[...fs[0]]]) ? [[...fs[0]]] : null;
 }
 
-// 标准档（T50）的屏：报走原路每车要多等几分钟、不点名路线 → [['EXPECT', 'DELAYS'], ['N MIN']]。
-// N 和顾问给引导档算「SAVE N MIN」同一份摘要（advisorSummary，最省那套的引擎结果）、同一种取法：按延误从大到小挑方向，
-// 原路（stay）现在要走的分钟 − 平时要走的分钟，四舍五入到整分钟，≥ 1 才写、封顶 99（顾问是原路 − 最快绕行）。
-// 算不出（这个小时不施工、不到 1 分钟）→ null，屏上照旧写 ROADWORK / AHEAD（flags.no_delay_min）
+// Standard tier sign: the extra minutes per vehicle on the stay route, without naming a road → [['EXPECT', 'DELAYS'], ['N MIN']].
+// N uses the same summary as the advisor's "SAVE N MIN" for the Guided tier (advisorSummary of the Minimum kit's engine result) and the same method: pick approaches by delay, largest first,
+// stay route minutes now − usual minutes, rounded to whole minutes, written only if ≥ 1, capped at 99 (the advisor uses stay − fastest detour).
+// If it cannot be computed (works inactive this hour, under 1 minute) → null, and the sign keeps ROADWORK / AHEAD (flags.no_delay_min)
 export function delayFrames(summary, wsId) {
   const aps = [...(summary?.approaches || [])].filter(a => wsId == null || a.worksite === wsId).sort((a, b) => (b.delay_min || 0) - (a.delay_min || 0));
   for (const ap of aps) {
@@ -127,8 +127,8 @@ export function delayFrames(summary, wsId) {
   return null;
 }
 
-// 一档 → 要摆的东西（还没对库存）：{ id, type, at_m, text? | frames?, items: [按优先顺序的库存 id], close?, len_m? | qty? }
-// tier.vms 块 VMS 写同样的字：VMS-1 在 vmsAt，VMS-2（标准档）在 vms2At（默认按 site.up_m 算，见 vms2At()）
+// tier → equipment needed (before checking stock): { id, type, at_m, text? | frames?, items: [inventory ids in order of preference], close?, len_m? | qty? }
+// tier.vms VMS boards show the same text: VMS-1 at vmsAt, VMS-2 (Standard) at vms2At (by default from site.up_m, see vms2At())
 export function tierNeeds(tier, ws, site, { vmsAt = VMS_AT_M, frames = [WARN_FRAME], vms2 = vms2At(vmsAt, site?.up_m) } = {}) {
   const out = [];
   const lanes = site.close_lanes > 0;
@@ -143,9 +143,9 @@ export function tierNeeds(tier, ws, site, { vmsAt = VMS_AT_M, frames = [WARN_FRA
       : { id: 'S-2', type: 'sign', at_m: AT_M.lane, text: `${side.toUpperCase()} LANE CLOSED`, items: [`sign_lane_closed_${side}`] });
   }
   for (const s of sides) out.push({ id: `S-F${s}`, type: 'sign', at_m: 0, text: 'FOOTPATH CLOSED', items: ['sign_footpath_closed'] });
-  // 「施工结束」摆在施工段末端（at_m 为负 = 施工起点下游）：清单完整、要付租金；reading.js 的 signsOn() 只收 at_m ≥ 0 的牌，
-  // 所以它不进读数请求、不占 T5 一次最多读 6 块的名额（上游最多 7 块：S-1、S-2、S-FL、S-FR、A-1、VMS-1、VMS-2 —— 标准档封两侧人行道时
-  // 最远的 VMS-2 会被挤掉，flags.vms_read = false 如实报出来）
+  // END ROADWORK goes at the end of the works (negative at_m = downstream of the works start): the list is complete and it is hired; reading.js signsOn() only takes signs with at_m ≥ 0,
+  // so it is not in the reading request and does not use one of the reader's 6 sign slots (upstream there can be up to 7: S-1, S-2, S-FL, S-FR, A-1, VMS-1, VMS-2 — with both footpaths closed
+  // the Standard tier's farthest VMS-2 is pushed out, reported truthfully as flags.vms_read = false)
   out.push({ id: 'S-9', type: 'sign', at_m: -Math.max(1, site.len_m), text: 'END ROADWORK', items: ['sign_end_roadwork'] });
   if (tier.arrow && lanes && !site.full) out.push({ id: 'A-1', type: 'arrow', at_m: AT_M.arrow, items: ['arrow_board'] });
   const nV = Math.max(0, Math.min(2, Math.floor(Number(tier.vms)) || 0));
@@ -154,7 +154,7 @@ export function tierNeeds(tier, ws, site, { vmsAt = VMS_AT_M, frames = [WARN_FRA
   return out;
 }
 
-// 同一批施工已经带走的设备件数（item → 件数）：库存是共用的，配这一处之前先扣掉时间重叠的其他施工
+// equipment already taken by other worksites (item → quantity): stock is shared, so subtract time-overlapping worksites before building this one
 export function usageOf(worksites) {
   const m = new Map();
   for (const w of worksites || []) for (const e of w.equipment || []) if (e.item) m.set(e.item, (m.get(e.item) || 0) + (Number(e.qty) || 1));
@@ -162,16 +162,16 @@ export function usageOf(worksites) {
 }
 export const sharingWith = (worksites, ws) => (worksites || []).filter(w => w !== ws && overlaps(w, ws));
 
-// VMS 会不会进读数请求：signsOn() 只把离施工最近的 6 块牌交给 T5，VMS 被挤掉就等于没摆（引导档悄悄变成和标准档一样）；几块 VMS 都要读到才算
+// does each VMS reach the reading request: signsOn() passes only the 6 signs nearest the works to the reader, and a VMS pushed out is as good as absent (Guided would silently match Standard); every VMS must be read
 export function vmsRead(equipment) {
   const seen = signsOn({ dir: null, kmh: 40 }, { equipment });
   return (equipment || []).filter(e => e.type === 'vms').every(v => seen.some(x => x.kind === 'vms' && x.m === (Number(v.at_m) || 0)));
 }
 
-// 对库存：每件按优先顺序挑第一个「剩下的库存够」的条目；都不够就用首选条目、只摆剩下那么多（0 件就不摆），缺口记进 short。
-// 护栏件数 = ⌈封闭长度 ÷ 每节长度 unit_len_m⌉；封人行道只用 can_close 里有 footpath 的护栏。
-// 先配可选条目少的（人行道只能用水马）：免得车道护栏先把水马拿光、人行道报缺而塑料隔板闲着；输出仍按 needs 的顺序。
-// used0 = 别的施工已经占掉的件数（usageOf），从库存里先扣
+// Check stock: for each need pick the first item in order of preference with enough stock left; if none has enough, use the first choice with whatever is left (skip if 0) and record the shortfall in short.
+// Barrier count = ⌈closed length ÷ section length unit_len_m⌉; footpath closures only use barriers whose can_close includes footpath.
+// Needs with fewer candidate items go first (footpaths can only use water-filled barriers), so lane barriers do not use them all up and report a footpath shortfall while plastic barriers sit idle; output keeps the order of needs.
+// used0 = quantities already taken by other worksites (usageOf), subtracted from stock first
 export function resolveNeeds(needs, inventory, used0) {
   const inv = new Map((inventory?.items || []).map(i => [i.id, i]));
   const used = new Map(used0 || []);
@@ -196,7 +196,7 @@ export function resolveNeeds(needs, inventory, used0) {
   return { equipment: eqAt.filter(Boolean), short: shortAt.filter(Boolean) };
 }
 
-// 方案里的设备 → 租金明细（按首次出现的顺序，一种设备一行）：件数 × 日租价 × 天数。价钱、库存都是假设值
+// kit equipment → hire breakdown (one line per item, in order of first appearance): qty × day rate × days. Prices and stock are assumed values
 export function hireOf(equipment, inventory, days) {
   const inv = new Map((inventory?.items || []).map(i => [i.id, i]));
   const rows = new Map();
@@ -219,7 +219,7 @@ export function hireOf(equipment, inventory, days) {
   };
 }
 
-// 方案用的件数 vs 库存：这一处的件数 + 时间重叠的其他施工已经带走的（used0）≤ 库存
+// kit quantities vs stock: this worksite's quantity + what time-overlapping worksites already take (used0) ≤ stock
 export function stockOf(equipment, inventory, short = [], used0) {
   const inv = new Map((inventory?.items || []).map(i => [i.id, i]));
   const need = new Map();

@@ -1,33 +1,33 @@
-// worksite.js —— 施工方案：什么时候生效、把哪些路段的通行能力降多少、挪日期。纯函数。
-// 施工方案的格式见 docs/contract.md「施工方案」：
-//   { id, name?, links: [路段 id，按行车方向], closes: { lanes, footpath? }, time: { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD', hours: [开始, 结束) },
-//     equipment: [{ id, type: 'vms'|'sign'|'arrow'|'barrier', at_m: 离施工起点多少米, dir?, frames?, text?, char_mm? }] }
-// when = { date: 'YYYY-MM-DD', hour: 0–23, day?: 'wd'|'we' }（day 不给就按日期算周几）
+// worksite.js — worksite semantics: when it is active, how much capacity it removes from which links, shifting dates. Pure functions.
+// Worksite format (docs/reference/interfaces.md, Worksite plan):
+//   { id, name?, links: [link ids in driving direction], closes: { lanes, footpath? }, time: { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD', hours: [start, end) },
+//     equipment: [{ id, type: 'vms'|'sign'|'arrow'|'barrier', at_m: metres upstream of the works start, dir?, frames?, text?, char_mm? }] }
+// when = { date: 'YYYY-MM-DD', hour: 0–23, day?: 'wd'|'we' } (without day, the weekday comes from the date)
 
-export const WZ_FRICTION = 0.9; // 施工区旁边的车道也会变慢：剩下车道的通行能力再打 9 折（工程假设）
+export const WZ_FRICTION = 0.9; // lanes next to a work zone are slower too: remaining capacity × 0.9 (engineering assumption)
 
-// closes.footpath（T17，可选）：封哪一侧人行道，相对施工路段的行车方向，和 walk.json 的 side 同口径（靠左行驶，left = 挨着被封车道那边的路缘）。
-// 不写 / null / 'none' = 人行道不封；别的值 validateWorksite 报错
+// closes.footpath (optional): which footpath is closed, relative to the works link's driving direction, same convention as walk.json side (keep-left traffic: left = the kerb next to the closed lane).
+// Missing / null / 'none' = footpath open; any other value is a validateWorksite error
 export const FOOTPATH_SIDES = ['left', 'right', 'both'];
 export function footpathOf(ws) {
   const f = ws?.closes?.footpath;
   return FOOTPATH_SIDES.includes(f) ? f : 'none';
 }
 
-// 施工方案校验 → 错误列表（空 = 合格）。只挡引擎一定会算错的写法，其余字段照旧宽松
+// worksite validation → list of errors (empty = valid). Only rejects input the engine would certainly get wrong; other fields stay lenient
 export function validateWorksite(ws) {
   const errs = [];
-  const who = `施工 ${ws?.id ?? '?'}`;
-  if (!ws || typeof ws !== 'object' || Array.isArray(ws)) return ['施工方案要是一个对象'];
-  if (!Array.isArray(ws.links)) errs.push(`${who}：links 要是路段 id 的数组`);
-  if (ws.closes != null && (typeof ws.closes !== 'object' || Array.isArray(ws.closes))) errs.push(`${who}：closes 要是对象`);
+  const who = `Worksite ${ws?.id ?? '?'}`;
+  if (!ws || typeof ws !== 'object' || Array.isArray(ws)) return ['A worksite must be an object'];
+  if (!Array.isArray(ws.links)) errs.push(`${who}: links must be an array of link ids`);
+  if (ws.closes != null && (typeof ws.closes !== 'object' || Array.isArray(ws.closes))) errs.push(`${who}: closes must be an object`);
   const f = ws.closes?.footpath;
-  if (f != null && f !== 'none' && !FOOTPATH_SIDES.includes(f)) errs.push(`${who}：closes.footpath = ${JSON.stringify(f)}，只能是 ${FOOTPATH_SIDES.join(' / ')}（不写 = 人行道不封）`);
+  if (f != null && f !== 'none' && !FOOTPATH_SIDES.includes(f)) errs.push(`${who}: closes.footpath = ${JSON.stringify(f)} must be one of ${FOOTPATH_SIDES.join(' / ')} (omit it to keep the footpath open)`);
   return errs;
 }
 export function validatePlan(plan) {
-  if (!plan || typeof plan !== 'object') return ['方案要是 { when, worksites } 对象'];
-  if (!Array.isArray(plan.worksites)) return ['方案的 worksites 要是数组'];
+  if (!plan || typeof plan !== 'object') return ['A plan must be a { when, worksites } object'];
+  if (!Array.isArray(plan.worksites)) return ["The plan's worksites must be an array"];
   return plan.worksites.flatMap(validateWorksite);
 }
 
@@ -55,7 +55,7 @@ export function overlaps(a, b) {
   return ta.from <= tb.to && tb.from <= ta.to && a0 < b1 && b0 < a1;
 }
 
-// 生效中的施工 → 每个路段 { f: 通行能力系数（0 = 全封）, open: 还开着几条车道 }
+// active worksites → per link { f: capacity factor (0 = full closure), open: lanes still open }
 export function capFactors(net, worksites) {
   const closed = new Map();
   for (const ws of worksites) {
@@ -77,9 +77,9 @@ export function shiftWorksite(ws, days) {
 }
 
 export const PEAK_HOURS = [8, 17];
-export const MAX_DAYS = 31; // 采样最多看 31 天：浏览器里每个时刻都要跑一遍引擎（和问路人），太长的施工只看开头一个月
+export const MAX_DAYS = 31; // sample at most 31 days: every sampled hour runs the engine (and its sign readings) in the browser, so long works only look at their first month
 
-// 采样哪几个小时：给了 hours 就用；没给就每个施工取落在自己时段里的早晚高峰（8、17 点），都不在时段里就取时段中间那个小时
+// which hours to sample: use `hours` if given; otherwise each worksite contributes the peak hours (8, 17) inside its own hours, or the middle hour of its hours if neither falls inside
 export function sampleHours(worksites, hours) {
   if (hours && hours.length) return [...hours];
   const hs = new Set();
@@ -91,7 +91,7 @@ export function sampleHours(worksites, hours) {
   return [...hs].sort((a, b) => a - b);
 }
 
-// 从最早开工到最晚完工之间的每一天 × 采样小时 → when 列表（算叠加、错开对比用）。超过 MAX_DAYS 天只取前 MAX_DAYS 天，结果带 truncated
+// every day from the earliest start to the latest finish × sampled hours → list of whens (for clash and stagger comparisons). Beyond MAX_DAYS only the first MAX_DAYS are kept and the result carries truncated
 export function windowWhens(worksites, hours) {
   const ts = worksites.map(w => w.time).filter(Boolean);
   const out = [];

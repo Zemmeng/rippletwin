@@ -1,6 +1,6 @@
-// advisor.js —— 第 ⑦ 步的引擎这一半：把结果摘要交给规划顾问（askAdvisor，注入进来；大模型版谁做待定），拿回最多 3 个改法，
-// 每个改法都回到第 ⑤ 步用引擎重算，给前端做前后对比。大模型出主意，引擎算数字。
-// 用法：const res = await advise(engine, 方案, { askAdvisor: mockAdvise });
+// advisor.js — the engine half of step 7: hand a result summary to the planning advisor (askAdvisor, injected; the shipped advisor is the rule-based mockAdvise,
+// no LLM advisor was built), take back up to 3 suggested changes, and re-run each through step 5 with the engine for a before/after comparison. The advisor proposes, the engine computes the numbers.
+// Usage: const res = await advise(engine, plan, { askAdvisor: mockAdvise });
 
 import { shiftWorksite, windowWhens } from './worksite.js';
 
@@ -19,7 +19,7 @@ export function advisorSummary(result, worksites, conflicts = []) {
   };
 }
 
-// 一条建议合不合格：改字（屏上文字）/ 挪设备（at_m 0–2000）/ 错开日期（整天数，≤ 60）
+// is a suggestion valid: reword (sign text) / move equipment (at_m 0–2000) / shift dates (whole days, ≤ 60)
 export function checkSuggestion(s) {
   if (!s || typeof s !== 'object' || !ID_RE.test(String(s.worksite))) return false;
   if (s.kind === 'text') return Array.isArray(s.frames) && s.frames.length >= 1 && s.frames.length <= 2 && s.frames.every(f => Array.isArray(f) && f.length >= 1 && f.length <= 4 && f.every(l => typeof l === 'string' && /^[A-Z0-9 .,'&/:+-]{1,10}$/.test(l)))
@@ -29,13 +29,13 @@ export function checkSuggestion(s) {
   return false;
 }
 
-// 一条建议 → 新的施工方案列表；建议对不上（施工 / 设备不存在）回 null
+// a suggestion → new list of worksites; null if it does not match (worksite / equipment does not exist)
 export function applySuggestion(worksites, s) {
   const list = clone(worksites);
   const ws = list.find(w => w.id === s.worksite);
   if (!ws) return null;
   if (s.kind === 'shift') {
-    if (!ws.time) return null; // 没有时段的施工谈不上错开
+    if (!ws.time) return null; // a worksite without a time cannot be shifted
     const i = list.indexOf(ws);
     list[i] = shiftWorksite(ws, s.days);
     return list;
@@ -60,8 +60,8 @@ export function applySuggestion(worksites, s) {
   return null;
 }
 
-// whens：比较用的时段（默认 = 改前改后所有施工从最早开工到最晚完工的每一天 × 各施工时段里的采样小时）。
-// 改前、改后用同一段时间比：错开日期的改法要把挪出去的那几天也算进来，不然好处会被高估
+// whens: the times to compare over (default = every day from the earliest start to the latest finish of all worksites before and after the change × each worksite's sampled hours).
+// Before and after are compared over the same period: a date shift must include the days it moves into, or its benefit would be overstated
 export async function advise(engine, plan, { askAdvisor, whens, hours } = {}) {
   const { when, worksites } = plan;
   const W0 = whens || windowWhens(worksites, hours);
@@ -85,13 +85,13 @@ export async function advise(engine, plan, { askAdvisor, whens, hours } = {}) {
     if (!next) return { suggestion: s, skipped: 'no_such_worksite_or_equipment' };
     const afterW = engine.window(next, W);
     const delta = afterW.delay_min - beforeW.delay_min;
-    // better：引擎重算后真的变好才算；主意变差了照样列出来，界面标「不建议」
+    // better: only if the engine's re-run is actually better; worse ideas are still listed and the UI marks them "not recommended"
     return { suggestion: s, worksites: next, delay_min: afterW.delay_min, delta_min: delta, better: delta < 0, result: engine.evaluate({ when, worksites: next }) };
   });
   return { src: adv?.src || 'unknown', summary, whens: W.length, truncated: Boolean(W.truncated), before: { delay_min: beforeW.delay_min, result: before }, options };
 }
 
-// ---------- MOCK 顾问：大模型版到之前演示和测试用（规则：点名最快的绕行 · 屏摆在拐口之后就往前挪 · 叠加就错开）----------
+// ---------- Rule-based advisor (the one in use; rules: name the fastest detour · move a sign that sits after the turn · stagger overlapping works) ----------
 const up = s => String(s ?? '').replace(/\s+/g, ' ').trim().toUpperCase();
 function shortName(name) {
   let s = up(name).replace(/[^A-Z0-9 .,'&/:+-]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -110,12 +110,12 @@ export async function mockAdvise(summary) {
     return alts.length ? alts.reduce((a, b) => (b.now_min < a.now_min || (b.now_min === a.now_min && (b.turn_m ?? 0) < (a.turn_m ?? 0)) ? b : a)) : null;
   };
   const vmsOf = (ws, ap) => (ws.equipment || []).find(e => e.type === 'vms' && (!e.dir || e.dir === ap.dir));
-  for (const ap of aps) { // 1 改字：绕行现在确实更快才劝人绕
+  for (const ap of aps) { // 1 reword: only suggest a detour when it really is faster now
     const ws = wsById.get(ap.worksite), best = pick(ap), stay = (ap.routes || []).find(r => r.id === 'stay');
     if (!ws || !best || !stay) continue;
     const save = Math.round(stay.now_min - best.now_min);
     if (!(save >= 1)) continue;
-    // 两帧、每帧 ≤ 3 行、每行 ≤ 8 字符（路名除外），过 T5 checkSigns 的软警告：原来一帧「SAVE 9 MIN」一行 10 个字符、省 10 分钟以上拆成 4 行，顾问自己的建议被自己的检查警告
+    // two frames, ≤ 3 lines each, ≤ 8 characters per line (road names excepted), to pass the soft warnings of checkSigns (apps/api check.js): a one-line "SAVE 9 MIN" is 10 characters, and saves of 10+ min used to split into 4 lines, so the advisor's own suggestion was warned by our own check
     const frames = [['USE', shortName(best.name)], ['SAVE', `${Math.min(save, 99)} MIN`]];
     const vms = vmsOf(ws, ap);
     if (vms && up(vms.frames?.flat().join(' ')) === up(frames.flat().join(' '))) continue;
@@ -123,14 +123,14 @@ export async function mockAdvise(summary) {
       why: `Name the fastest detour (${best.name}) and the ${save} min it saves.` });
     break;
   }
-  for (const ap of aps) { // 2 挪设备：屏在推荐路线的拐口之后
+  for (const ap of aps) { // 2 move equipment: the sign is after the recommended route's turn
     const ws = wsById.get(ap.worksite), best = pick(ap), vms = ws && vmsOf(ws, ap);
     if (!vms || !best || !(vms.at_m < (best.turn_m || 0))) continue;
     out.push({ kind: 'move', worksite: ws.id, equipment: vms.id, at_m: Math.min(2000, Math.round(((best.turn_m || 0) + 100) / 50) * 50),
       why: `The sign is ${vms.at_m} m before the works but the turn into ${best.name} is ${best.turn_m} m before; drivers see it too late.` });
     break;
   }
-  for (const c of summary.conflicts || []) { // 3 错开日期
+  for (const c of summary.conflicts || []) { // 3 shift dates
     const a = wsById.get(c.a), b = wsById.get(c.b);
     if (!(c.cost_min > 0) || !a?.time?.to || !b?.time?.from) continue;
     const days = dayNum(a.time.to) - dayNum(b.time.from) + 1;

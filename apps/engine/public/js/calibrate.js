@@ -1,10 +1,10 @@
-// calibrate.js —— 两点校准（D-0929-1435：保留，改成校引擎参数）。
-// 大模型（和规则）读懂屏上的字，但「多少人真绕」是引擎的选择模型算的；选择模型里有两个没法拍脑袋定的全局参数：
-//   A = 绕行的习惯惰性（越大越不愿意离开原路）   B = 屏上点名一条路的推荐力度
-// 在同一个参考场景（La Trobe St 西行）上用两块「标准屏」定刻度：
-//   只写 ROADWORK / AHEAD      → 全体车辆约 3% 绕行 ［待核］   —— 只和 A 有关（屏没点名路），先解 A
-//   写推荐路线 USE / RUSSELL ST → 约 20% ［待核，Erke 2007 二手转述］ —— A 定了再解 B
-// 其他文案、排队、每类人的差别都由选择模型按参数算，不再单独换算。两块标准屏的读数要从同一个 readSigns 来。
+// calibrate.js — two-point calibration (D-0929-1435: kept, now calibrating engine parameters).
+// The LLM (or the rules) reads the sign text, but how many drivers actually divert comes from the engine's choice model, which has two global parameters that cannot be guessed:
+//   A = detour inertia (larger = less willing to leave the stay route)   B = strength of a sign naming a road
+// Both are fixed on one reference scene (La Trobe St westbound) with two "standard signs":
+//   ROADWORK / AHEAD only        → about 3% of all vehicles divert (working assumption, low confidence)  — depends only on A (no road named), so solve A first
+//   named route USE / RUSSELL ST → about 20% (Erke, Sagberg & Hagman 2007, high confidence)            — then solve B with A fixed
+// Targets come from params.json anchors when present. Other wordings, queues and persona differences then follow from the choice model; no separate conversion. Both standard-sign readings must come from the same readSigns.
 
 import { TYPES, MIX, PERSONAS, DEFAULT_AB, chooseShares, informed } from './choice.js';
 
@@ -13,7 +13,7 @@ export const ANCHORS = {
   hi: { frames: [['USE', 'RUSSELL ST']], real: 0.2 },
 };
 
-// 参考场景（docs/arch/5-llm-api-detail.pdf 第 3 页）：屏在 400 米、200 mm 字高 40 km/h 能读 9 秒；两条绕行都在施工起点拐
+// Reference scene: sign at 400 m, 200 mm characters readable for 9 s at 40 km/h; both detours turn off at the works start
 export const REF = {
   street: 'La Trobe Street',
   kmh: 40,
@@ -36,7 +36,7 @@ export function anchorRequest(which, persona) {
   };
 }
 
-// 读数 → 选择模型要的「屏上说了什么」（参考场景里两条绕行都在屏之后拐，全都看得到）
+// reading → "what the sign says" for the choice model (in the reference scene both detours turn after the sign, so everything is visible)
 export function signOf(reading, street, routes) {
   const use = new Set(), avoid = new Set();
   const adv = reading?.advice || {};
@@ -68,11 +68,11 @@ function bisect(f, lo, hi, target, increasing, iters = 60) {
   return (a + b) / 2;
 }
 
-// 命中目标：相对误差 5% 以内（目标可以低到 0.1%，绝对容差在小目标上会放过差一倍的结果）
+// target hit: within 5% relative error (targets can be as low as 0.1%, where an absolute tolerance would accept a result off by 2×)
 const near = (d, t) => Math.abs(d - t) <= Math.max(1e-4, 0.05 * t);
 
-// lo / hi：每类人对两块标准屏的读数 { persona: reading }。缺任何一类就不校准（method: 'default'）
-// opts.anchors = { lo, hi }：两块标准屏的目标绕行比例（T12 params.json 的 anchors；不给就用 ANCHORS 里的假设值）
+// lo / hi: each persona's reading of the two standard signs { persona: reading }. If any persona is missing, no calibration (method: 'default')
+// opts.anchors = { lo, hi }: target diversion shares for the two standard signs (params.json anchors; defaults to the values in ANCHORS)
 export function calibrate(lo, hi, opts = {}) {
   const have = x => x && TYPES.every(t => x[t]);
   if (!have(lo) || !have(hi)) return { ...DEFAULT_AB, method: 'default', ok: false };
@@ -88,7 +88,7 @@ export function calibrate(lo, hi, opts = {}) {
     A: +A.toFixed(4),
     B: +B.toFixed(4),
     method: 'two_point',
-    // false = 两个目标至少有一个够不着：比如读数里「点名路线」的力度不够，推荐力度顶到上限也到不了高点；或者目标本身离谱
+    // false = at least one target cannot be reached: e.g. the readings give a named route too little weight, so B at its cap still misses the high target; or the target itself is unrealistic
     ok: near(loD, tLo) && near(hiD, tHi),
     target: { lo: tLo, hi: tHi },
     lo_detour: +loD.toFixed(4),
