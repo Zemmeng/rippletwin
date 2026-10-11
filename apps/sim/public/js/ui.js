@@ -1,7 +1,7 @@
-// ui.js —— 画面、控件和读数。只通过 sim.js 导出的接口用引擎（见 README「对外接口」）。
-import { Sim, HALF, HOUR, DT, WZ, sigState, pathAt, hashStr } from './sim.js?v=4';
+// ui.js — canvas, controls and readouts. Uses the engine only through the sim.js exports (see the API table in README.md).
+import { Sim, HALF, HOUR, DT, WZ, sigState, pathAt, hashStr } from './sim.js?v=5';
 
-const DATA = await fetch('demand/demand_2921.json?v=4').then(r => { if (!r.ok) throw new Error('读不到 demand/demand_2921.json：' + r.status); return r.json(); });
+const DATA = await fetch('demand/demand_2921.json?v=5').then(r => { if (!r.ok) throw new Error('Cannot load demand/demand_2921.json: ' + r.status); return r.json(); });
 const $ = s => document.querySelector(s);
 const cv = $('#map'), ctx = cv.getContext('2d');
 const base = document.createElement('canvas'), bctx = base.getContext('2d');
@@ -15,7 +15,7 @@ const pulses = [];
 let seenEvents = 0;
 const X = x => (x + HALF) * K, Y = y => (HALF - y) * K;
 const pad = n => String(n).padStart(2, '0');
-const MODES = [['car', '汽车'], ['bike', '自行车'], ['tram', '电车'], ['ped', '行人']];
+const MODES = [['car', 'Car'], ['bike', 'Bike'], ['tram', 'Tram'], ['ped', 'Pedestrian']];
 
 function readColors() {
   const cs = getComputedStyle(document.documentElement);
@@ -54,7 +54,7 @@ function drawBase() {
   g.save(); g.translate(X(18.5), Y(86)); g.rotate(Math.PI / 2); g.fillText('SWANSTON ST', 0, 0); g.restore();
   g.font = `500 ${fs}px Barlow, sans-serif`; g.textAlign = 'center';
   g.fillText('Melbourne Central', X(-52), Y(-52)); g.fillText('State Library Victoria', X(52), Y(-70)); g.fillText('RMIT', X(52), Y(52));
-  g.font = `600 ${fs * 0.8}px Barlow, sans-serif`; g.fillText('电车站', X(-22), Y(38)); g.fillText('电车站', X(22), Y(-38)); g.fillText('N ↑', X(83), Y(84));
+  g.font = `600 ${fs * 0.8}px Barlow, sans-serif`; g.fillText('Tram stop', X(-22), Y(38)); g.fillText('Tram stop', X(22), Y(-38)); g.fillText('N ↑', X(83), Y(84));
 }
 function drawWorkZone(g) {
   const n = Math.round((WZ.x1 - WZ.x0) / 2);
@@ -129,20 +129,20 @@ function ui() {
   $('#queue').textContent = `${Math.round(sm.qEB)} / ${Math.round(sm.qWB)} m`;
   $('#outside').textContent = sm.outside;
   $('#nconf').textContent = sm.conflicts;
-  $('#confby').innerHTML = Object.keys(sm.byLabel).length ? Object.entries(sm.byLabel).map(([l, n]) => `<div class="kv"><span>${l}</span><b>${n}</b></div>`).join('') : '<p class="hint">还没有冲突。</p>';
+  $('#confby').innerHTML = Object.keys(sm.byLabel).length ? Object.entries(sm.byLabel).map(([l, n]) => `<div class="kv"><span>${l}</span><b>${n}</b></div>`).join('') : '<p class="hint">No conflicts yet.</p>';
   $('#evlist').innerHTML = sim.events.slice(-4).reverse().map(e => `<li><time>${fmtClock(e.t)}</time><span>${e.label}</span><span class="pill ${e.val < 0.5 ? 'sev' : 'mid'}">${e.kind === 'ttc' ? 'TTC' : 'PET'} ${e.val.toFixed(1)} s</span></li>`).join('');
 }
 function cmpCard() {
   const key = w => `${sim.day}-${sim.hour}-${w}`, a = RESULTS[key(0)], b = RESULTS[key(1)];
-  if (!a || !b) { $('#cmp').innerHTML = '<p class="hint">跑完一小时后，打开「施工模式」再跑一遍同一时段，这里会并排对比。两次的到达车流和行人完全相同，只有施工不同。</p>'; return; }
-  const rows = [['汽车平均延误', x => fmtD(x.delay.car)], ['自行车平均延误', x => fmtD(x.delay.bike)], ['西行汽车平均延误', x => fmtD(x.delayCarWB)], ['排到画面外、还没进场的车', x => String(x.outside)], ['冲突', x => String(x.conflicts)], ['其中严重（< 0.5 s）', x => String(x.severe)]];
-  $('#cmp').innerHTML = `<table><thead><tr><th>指标</th><th>正常</th><th>施工</th></tr></thead><tbody>${rows.map(([n, f]) => `<tr><td>${n}</td><td>${f(a)}</td><td>${f(b)}</td></tr>`).join('')}</tbody></table>`;
+  if (!a || !b) { $('#cmp').innerHTML = '<p class="hint">After a full hour, turn on Work zone mode and run the same hour again to compare the two side by side here. Both runs see exactly the same arriving traffic and pedestrians; only the work zone differs.</p>'; return; }
+  const rows = [['Average car delay', x => fmtD(x.delay.car)], ['Average bike delay', x => fmtD(x.delay.bike)], ['Average westbound car delay', x => fmtD(x.delayCarWB)], ['Cars queued off-screen, not yet entered', x => String(x.outside)], ['Conflicts', x => String(x.conflicts)], ['of which severe (< 0.5 s)', x => String(x.severe)]];
+  $('#cmp').innerHTML = `<table><thead><tr><th>Metric</th><th>Normal</th><th>Work zone</th></tr></thead><tbody>${rows.map(([n, f]) => `<tr><td>${n}</td><td>${f(a)}</td><td>${f(b)}</td></tr>`).join('')}</tbody></table>`;
 }
 function finish() {
-  playing = false; $('#play').textContent = '播放';
+  playing = false; $('#play').textContent = 'Play';
   const sm = sim.summary(); RESULTS[`${sim.day}-${sim.hour}-${sim.wz ? 1 : 0}`] = sm;
   const d = $('#done'); d.hidden = false;
-  d.innerHTML = `<b>${pad(sim.hour)}:00–${pad((sim.hour + 1) % 24)}:00 跑完了</b><br>汽车 ${fmtN(sm.spawned.car)} · 自行车 ${fmtN(sm.spawned.bike)} · 电车 ${fmtN(sm.spawned.tram)} · 行人 ${fmtN(sm.spawned.ped)}；汽车平均延误 ${fmtD(sm.delay.car)}，冲突 ${sm.conflicts} 次。${sim.wz ? '' : '<br>打开「施工模式」再跑一遍，看看会怎样。'}`;
+  d.innerHTML = `<b>${pad(sim.hour)}:00–${pad((sim.hour + 1) % 24)}:00 finished</b><br>Cars ${fmtN(sm.spawned.car)} · bikes ${fmtN(sm.spawned.bike)} · trams ${fmtN(sm.spawned.tram)} · pedestrians ${fmtN(sm.spawned.ped)}; average car delay ${fmtD(sm.delay.car)} · conflicts ${sm.conflicts}.${sim.wz ? '' : '<br>Turn on Work zone mode and run it again to see what changes.'}`;
   cmpCard(); ui();
 }
 
@@ -154,12 +154,12 @@ function newSim(autoplay) {
   budget = 0; pulses.length = 0; seenEvents = 0;
   $('#done').hidden = true; $('#wzflag').hidden = !wz;
   $('#tl0').textContent = `${pad(hour)}:00`; $('#tl1').textContent = `${pad((hour + 1) % 24)}:00`;
-  $('#meta').textContent = `${day === 'wd' ? '工作日平均' : '周末平均'} · ${speedLabel()}`;
+  $('#meta').textContent = `${day === 'wd' ? 'Weekday average' : 'Weekend average'} · ${speedLabel()}`;
   drawBase(); clearTrail(); draw(0); ui();
   cmpCard();
-  playing = !!autoplay; $('#play').textContent = playing ? '暂停' : '播放';
+  playing = !!autoplay; $('#play').textContent = playing ? 'Pause' : 'Play';
 }
-function speedLabel() { return { 180: '20 秒 / 小时', 60: '1 分钟 / 小时', 10: '10× 速度', 1: '实时' }[speed]; }
+function speedLabel() { return { 180: '20 s / hour', 60: '1 min / hour', 10: '10× speed', 1: 'Real time' }[speed]; }
 
 function tick(ts) {
   requestAnimationFrame(tick);
@@ -185,8 +185,8 @@ for (let h = 0; h < 24; h++) { const o = document.createElement('option'); o.val
 hs.addEventListener('change', () => newSim(true));
 document.querySelectorAll('input[name=day]').forEach(r => r.addEventListener('change', () => newSim(true)));
 $('#wz').addEventListener('change', () => newSim(true));
-document.querySelectorAll('input[name=spd]').forEach(r => r.addEventListener('change', () => { speed = +r.value; $('#meta').textContent = `${sim.day === 'wd' ? '工作日平均' : '周末平均'} · ${speedLabel()}`; }));
-$('#play').addEventListener('click', () => { if (sim.t >= HOUR) { newSim(true); return; } playing = !playing; $('#play').textContent = playing ? '暂停' : '播放'; });
+document.querySelectorAll('input[name=spd]').forEach(r => r.addEventListener('change', () => { speed = +r.value; $('#meta').textContent = `${sim.day === 'wd' ? 'Weekday average' : 'Weekend average'} · ${speedLabel()}`; }));
+$('#play').addEventListener('click', () => { if (sim.t >= HOUR) { newSim(true); return; } playing = !playing; $('#play').textContent = playing ? 'Pause' : 'Play'; });
 $('#restart').addEventListener('click', () => newSim(true));
 
 new ResizeObserver(() => resize()).observe($('#cw'));
@@ -199,4 +199,4 @@ readColors();
 newSim(false);
 resize();
 requestAnimationFrame(tick);
-if (!reduce) setTimeout(() => { playing = true; $('#play').textContent = '暂停'; }, 500);
+if (!reduce) setTimeout(() => { playing = true; $('#play').textContent = 'Pause'; }, 500);

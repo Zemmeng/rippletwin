@@ -1,95 +1,95 @@
 <!doctype html>
-<!-- 改 CSS/JS 后跑 bash apps/sim/bump.sh 把 ?v= 都 +1，否则浏览器拿旧缓存 -->
-<html lang="zh-CN">
+<!-- After CSS/JS changes run bash apps/sim/bump.sh to increment every ?v=, otherwise browsers serve stale caches -->
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Swanston × La Trobe 路口仿真</title>
+<title>Swanston × La Trobe junction simulation</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
-<link rel="stylesheet" href="style.css?v=4">
-<script type="module" src="js/ui.js?v=4"></script>
+<link rel="stylesheet" href="style.css?v=5">
+<script type="module" src="js/ui.js?v=5"></script>
 </head>
 <body>
 <main class="wrap">
   <header>
-    <h1>Swanston × La Trobe 路口仿真</h1>
-    <p>墨尔本 CBD 的一个路口，用 2026 年 8–9 月的真实车流、自行车、电车和行人数据，把一个小时压成 20 秒回放。</p>
+    <h1>Swanston × La Trobe junction simulation</h1>
+    <p>One Melbourne CBD junction, driven by real traffic, bike, tram and pedestrian counts from August–September 2026, with an hour replayed in 20 seconds.</p>
   </header>
 
   <section class="grid">
     <div class="stage">
       <div class="canvas-wrap" id="cw">
-        <canvas id="map" role="img" aria-label="Swanston 街与 La Trobe 街路口的俯视仿真画面"></canvas>
-        <div class="hud"><div class="clock" id="clock">17:00:00</div><div class="meta" id="meta">工作日平均 · 20 秒 / 小时</div><div class="wzflag" id="wzflag" hidden>施工模式：西行自行车道封闭</div></div>
+        <canvas id="map" role="img" aria-label="Top-down simulation of the Swanston St and La Trobe St junction"></canvas>
+        <div class="hud"><div class="clock" id="clock">17:00:00</div><div class="meta" id="meta">Weekday average · 20 s / hour</div><div class="wzflag" id="wzflag" hidden>Work zone: westbound bike lane closed</div></div>
         <div class="done" id="done" hidden></div>
       </div>
       <div class="timeline"><div class="bar"><span id="prog"></span></div><div class="tl"><span id="tl0">17:00</span><span id="tl1">18:00</span></div></div>
       <ul class="legend">
-        <li><span class="sw" style="background:var(--c-car)"></span>汽车</li>
-        <li><span class="sw" style="background:var(--c-bike)"></span>自行车</li>
-        <li><span class="sw" style="background:var(--c-tram)"></span>电车</li>
-        <li><span class="sw" style="background:var(--c-ped)"></span>行人</li>
-        <li><span class="sw" style="background:var(--c-conf);border-radius:50%"></span>冲突点</li>
+        <li><span class="sw" style="background:var(--c-car)"></span>Car</li>
+        <li><span class="sw" style="background:var(--c-bike)"></span>Bike</li>
+        <li><span class="sw" style="background:var(--c-tram)"></span>Tram</li>
+        <li><span class="sw" style="background:var(--c-ped)"></span>Pedestrian</li>
+        <li><span class="sw" style="background:var(--c-conf);border-radius:50%"></span>Conflict point</li>
       </ul>
     </div>
 
     <aside class="side">
       <div class="card">
-        <h2>场景</h2>
-        <div class="row"><label for="hour">时段</label><select id="hour"></select></div>
-        <div class="row"><span class="lab">日子</span>
-          <div class="seg" role="radiogroup" aria-label="日子">
-            <input type="radio" name="day" id="day-wd" value="wd" checked><label for="day-wd">工作日</label>
-            <input type="radio" name="day" id="day-we" value="we"><label for="day-we">周末</label>
+        <h2>Scenario</h2>
+        <div class="row"><label for="hour">Hour</label><select id="hour"></select></div>
+        <div class="row"><span class="lab">Day</span>
+          <div class="seg" role="radiogroup" aria-label="Day">
+            <input type="radio" name="day" id="day-wd" value="wd" checked><label for="day-wd">Weekday</label>
+            <input type="radio" name="day" id="day-we" value="we"><label for="day-we">Weekend</label>
           </div></div>
-        <div class="row"><span class="lab">回放速度</span>
-          <div class="seg" role="radiogroup" aria-label="回放速度">
-            <input type="radio" name="spd" id="spd-180" value="180" checked><label for="spd-180">20 秒 / 小时</label>
-            <input type="radio" name="spd" id="spd-60" value="60"><label for="spd-60">1 分钟 / 小时</label>
+        <div class="row"><span class="lab">Replay speed</span>
+          <div class="seg" role="radiogroup" aria-label="Replay speed">
+            <input type="radio" name="spd" id="spd-180" value="180" checked><label for="spd-180">20 s / hour</label>
+            <input type="radio" name="spd" id="spd-60" value="60"><label for="spd-60">1 min / hour</label>
             <input type="radio" name="spd" id="spd-10" value="10"><label for="spd-10">10×</label>
-            <input type="radio" name="spd" id="spd-1" value="1"><label for="spd-1">实时</label>
+            <input type="radio" name="spd" id="spd-1" value="1"><label for="spd-1">Real time</label>
           </div></div>
-        <label class="switch" for="wz"><input type="checkbox" id="wz"><span>施工模式<small>封掉 La Trobe 东口西行自行车道 40 米，自行车被迫并入机动车道</small></span></label>
-        <div class="btns"><button class="primary" id="play" type="button">暂停</button><button id="restart" type="button">从头再跑</button></div>
+        <label class="switch" for="wz"><input type="checkbox" id="wz"><span>Work zone mode<small>Closes 40 m of the westbound bike lane on the east leg of La Trobe St, so bikes must merge into the traffic lane</small></span></label>
+        <div class="btns"><button class="primary" id="play" type="button">Pause</button><button id="restart" type="button">Restart</button></div>
       </div>
 
       <div class="card">
-        <h2>这一小时</h2>
+        <h2>This hour</h2>
         <table>
-          <thead><tr><th>类型</th><th>数据给的量</th><th>已进场</th><th>平均延误</th></tr></thead>
+          <thead><tr><th>Mode</th><th>From data</th><th>Entered</th><th>Avg delay</th></tr></thead>
           <tbody id="tb"></tbody>
         </table>
-        <div class="kv"><span>La Trobe 最长排队（东行 / 西行）</span><b id="queue">0 / 0 m</b></div>
-        <div class="kv"><span>排到画面外、还没进场的车</span><b id="outside">0</b></div>
+        <div class="kv"><span>Longest La Trobe queue (EB / WB)</span><b id="queue">0 / 0 m</b></div>
+        <div class="kv"><span>Cars queued off-screen, not yet entered</span><b id="outside">0</b></div>
       </div>
 
       <div class="card">
-        <h2>冲突</h2>
-        <div class="big"><b id="nconf">0</b><span>次（PET 或 TTC 小于 1.5 秒）</span></div>
+        <h2>Conflicts</h2>
+        <div class="big"><b id="nconf">0</b><span>(PET or TTC under 1.5 s)</span></div>
         <div id="confby"></div>
         <ul class="evlist" id="evlist"></ul>
       </div>
 
       <div class="card">
-        <h2>正常 vs 施工</h2>
-        <div id="cmp"><p class="hint">跑完一小时后，打开「施工模式」再跑一遍同一时段，这里会并排对比。两次的到达车流和行人完全相同，只有施工不同。</p></div>
+        <h2>Normal vs work zone</h2>
+        <div id="cmp"><p class="hint">After a full hour, turn on Work zone mode and run the same hour again to compare the two side by side here. Both runs see exactly the same arriving traffic and pedestrians; only the work zone differs.</p></div>
       </div>
     </aside>
   </section>
 
   <details>
-    <summary>数据来源和假设</summary>
+    <summary>Data sources and assumptions</summary>
     <ul>
-      <li>车、自行车、电车：维州交通与规划部 Traffic Signal Volume Data（SCATS），站点 2921 Swanston St / La Trobe St，2026-08-01 至 09-27，按工作日 / 周末分小时平均。去掉了 9/25 公众假期和 8/31（官方数据缺这一天）。许可证 CC BY 4.0。</li>
-      <li>用到的检测器：7 = La Trobe 东行汽车，5 = 西行汽车，3 = Swanston 北口汽车，1 = Swanston 北行自行车，4 = La Trobe 西行自行车，11 / 13 = Swanston 南行 / 北行电车，22 = La Trobe 西行电车。</li>
-      <li>行人：City of Melbourne Pedestrian Counting System，传感器 3（Melbourne Central）、66（QV2，300 Swanston St）、62（La Trobe St North）、187（RMIT Building 22）。</li>
-      <li>没有数据、按假设补的：La Trobe 东行自行车（检测器 6 故障）按西行的数；Swanston 南行自行车没有检测器，按北行的数；La Trobe 东行电车按西行的数；La Trobe 南侧人行道按北侧的数。</li>
-      <li>信号配时参考该路口配置表的相位图简化成三段、100 秒周期：A 段 Swanston 直行 30 秒，B 段 Swanston 左转专用 10 秒，C 段 La Trobe 44 秒。左转车要穿过的东侧人行横道只在 A 段放行。真实路口由 SCATS 自适应控制，秒数是假设的。</li>
-      <li>Swanston 北口的汽车全部当作左转进 La Trobe 东行；La Trobe 上的转弯车没有模拟。</li>
-      <li>电车按时刻表间隔到达（平均间隔 ±25%），停站 8–18 秒，站台都在过路口之后。行人走到第一个路口：60% 直行过街，25% 拐弯不过街，15% 拐弯过另一条街。10% 的左转司机观察不充分，只看 0.7 秒以内的来人。</li>
-      <li>车辆用 IDM 跟驰模型；冲突指标用 PET（两者先后通过同一冲突区的时间差）和 TTC（按当前速度还有几秒追上前车），阈值 1.5 秒；小于 0.5 秒记为严重。</li>
+      <li>Cars, bikes and trams: Department of Transport and Planning (Victoria) Traffic Signal Volume Data (SCATS), site 2921 Swanston St / La Trobe St, 2026-08-01 to 09-27, averaged by hour for weekdays and weekends. The 25 Sep public holiday and 31 Aug (missing from the official data) are excluded. Licence CC BY 4.0.</li>
+      <li>Detectors used: 7 = La Trobe eastbound cars, 5 = westbound cars, 3 = Swanston north approach cars, 1 = Swanston northbound bikes, 4 = La Trobe westbound bikes, 11 / 13 = Swanston southbound / northbound trams, 22 = La Trobe westbound trams.</li>
+      <li>Pedestrians: City of Melbourne Pedestrian Counting System, sensors 3 (Melbourne Central), 66 (QV2, 300 Swanston St), 62 (La Trobe St North) and 187 (RMIT Building 22).</li>
+      <li>Filled in by assumption where there is no data: La Trobe eastbound bikes (detector 6 is faulty) use the westbound counts; Swanston southbound bikes have no detector and use the northbound counts; La Trobe eastbound trams use the westbound counts; the south footpath of La Trobe St uses the north footpath counts.</li>
+      <li>Signal timing is simplified from the phasing diagram in the site's configuration sheet into three phases on a 100 s cycle: phase A, Swanston through, 30 s green; phase B, exclusive Swanston left turn, about 12 s (left turners keep their green from 0 to 45 s); phase C, La Trobe, 44 s green. The east crosswalk, which left turners cross, walks only during phase A. The real junction is SCATS-adaptive; the timings are assumed.</li>
+      <li>All cars on the Swanston north approach are treated as turning left into La Trobe St eastbound; turning traffic on La Trobe St is not modelled.</li>
+      <li>Trams arrive at timetable intervals (mean headway ±25%) and dwell 8–18 s at stops, which are all on the far side of the junction. At their first corner, 60% of pedestrians cross straight ahead, 25% turn without crossing and 15% turn and cross the other street. 10% of left-turning drivers do not look properly and give way only to someone who will reach the conflict area within 0.8 s; so does any left turner who has waited more than 15 s in the junction.</li>
+      <li>Vehicles use the IDM car-following model. Conflicts are measured with PET (the time between two road users passing through the same conflict area) and TTC (seconds until catching up with the vehicle ahead at current speeds), with a 1.5 s threshold; under 0.5 s counts as severe.</li>
     </ul>
   </details>
 </main>
