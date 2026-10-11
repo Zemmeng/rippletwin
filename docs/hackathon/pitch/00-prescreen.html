@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RippleTwin pre-screen</title>
+<!-- Source of the 3-page pre-screen PDF (draft). Edit the text directly in the HTML below; to export: open in Chrome → Print → Save as PDF, margins "None", tick "Background graphics".
+     Page 3 embeds 03-architecture-rippletwin-en.svg from the same folder (PR #51). Command-line export: see docs/hackathon/pitch/README.md. -->
+<style>
+  @page { size: 13.333in 7.5in; margin: 0; }
+  :root {
+    --ink: #1F2328; --muted: #565D67; --line: #D8DCE1; --paper: #FFFFFF; --soft: #F6F7F9;
+    --green: #2E9A5A; --green-ink: #1E6E3F; --green-bg: #EDF8F1;
+    --blue: #2F6BD0;  --blue-ink: #1F4F9E;  --blue-bg: #EEF4FD;
+    --orange: #E0852B; --orange-ink: #A55810; --orange-bg: #FFF5EA;
+    --purple: #7A4CC8; --purple-ink: #5A33A0; --purple-bg: #F4EEFC;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #E9ECEF; color: var(--ink);
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .slide { width: 1280px; height: 720px; margin: 24px auto; background: var(--paper); position: relative; overflow: hidden;
+    box-shadow: 0 2px 12px rgba(0,0,0,.12); }
+  @media print {
+    html, body { background: var(--paper); }
+    .slide { margin: 0; box-shadow: none; break-after: page; page-break-after: always; }
+    .slide:last-child { break-after: auto; page-break-after: auto; }
+  }
+
+  /* Header: project name on the left, team name + challenge on the right */
+  .head { position: absolute; left: 48px; right: 48px; top: 32px; display: flex; justify-content: space-between; align-items: flex-start; }
+  .brand { display: flex; align-items: center; gap: 14px; }
+  .brand svg { width: 46px; height: 46px; flex: none; }
+  .brand h1 { margin: 0; font-size: 40px; line-height: 1; font-weight: 700; letter-spacing: -.5px; }
+  .brand .tag { margin-top: 6px; font-size: 19px; color: var(--muted); }
+  .meta { text-align: right; }
+  .team { display: inline-block; padding: 5px 14px; border: 2px dashed var(--orange); border-radius: 8px; color: var(--orange-ink); font-weight: 700; font-size: 18px; }
+  .event { margin-top: 8px; font-size: 14px; color: var(--muted); }
+  .pageno { position: absolute; right: 48px; bottom: 18px; font-size: 13px; color: #8B919A; }
+  .foot { position: absolute; left: 48px; right: 110px; bottom: 16px; font-size: 12.5px; line-height: 1.4; color: var(--muted); }
+
+  /* Cards */
+  .card { border-radius: 12px; border: 2px solid var(--line); background: var(--soft); padding: 14px 18px 12px; }
+  .card h2 { margin: 0 0 8px; font-size: 15px; letter-spacing: 1.2px; text-transform: uppercase; font-weight: 700; }
+  .card ul { margin: 0; padding-left: 20px; }
+  .card li { font-size: 17px; line-height: 1.38; margin: 0 0 7px; }
+  .card li:last-child { margin-bottom: 0; }
+  .card li b { font-weight: 700; }
+  .c-orange { border-color: var(--orange); background: var(--orange-bg); } .c-orange h2 { color: var(--orange-ink); }
+  .c-green  { border-color: var(--green);  background: var(--green-bg); }  .c-green h2  { color: var(--green-ink); }
+  .c-blue   { border-color: var(--blue);   background: var(--blue-bg); }   .c-blue h2   { color: var(--blue-ink); }
+  .c-purple { border-color: var(--purple); background: var(--purple-bg); } .c-purple h2 { color: var(--purple-ink); }
+
+  /* Page 1 */
+  .p1 .left  { position: absolute; left: 48px; top: 128px; width: 590px; display: flex; flex-direction: column; gap: 14px; }
+  .p1 .right { position: absolute; left: 662px; top: 128px; width: 570px; display: flex; flex-direction: column; gap: 12px; }
+  .shot { border: 1.5px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .shot img { display: block; width: 100%; height: auto; }
+  .cap { font-size: 13px; color: var(--muted); margin-top: -4px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .pair .card li { font-size: 15px; line-height: 1.35; margin-bottom: 5px; }
+  ol.steps { margin: 0; padding-left: 0; list-style: none; counter-reset: s; }
+  ol.steps li { counter-increment: s; position: relative; padding-left: 34px; font-size: 17px; line-height: 1.38; margin: 0 0 7px; }
+  ol.steps li::before { content: counter(s); position: absolute; left: 0; top: 1px; width: 23px; height: 23px; border-radius: 50%;
+    background: var(--green); color: #fff; font-size: 14px; font-weight: 700; text-align: center; line-height: 23px; }
+  .ai { display: inline-block; padding: 0 6px; border-radius: 5px; background: var(--purple); color: #fff; font-size: 12px; font-weight: 700; line-height: 18px; vertical-align: 2px; }
+  .principle { margin-top: 8px; font-size: 16px; color: var(--green-ink); font-weight: 700; }
+
+  /* Page 2 */
+  .p2 .title { position: absolute; left: 48px; top: 32px; }
+  .p2 .title h1 { margin: 0; font-size: 36px; font-weight: 700; }
+  .p2 .title .tag { margin-top: 6px; font-size: 18px; color: var(--muted); }
+  .cols { position: absolute; left: 48px; right: 48px; top: 120px; bottom: 76px; display: grid; grid-template-columns: 300px 1fr 360px; gap: 18px; }
+  .cols .card { display: flex; flex-direction: column; }
+  .stack { margin: 0; display: grid; grid-template-columns: auto; gap: 8px; }
+  .stack div { font-size: 15px; line-height: 1.35; }
+  .stack dt { font-size: 12.5px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase; color: var(--blue-ink); margin-top: 2px; }
+  .stack dd { margin: 1px 0 0; font-size: 15.5px; line-height: 1.35; }
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+  .tile { background: #fff; border: 1.5px solid #CFE7D8; border-radius: 9px; padding: 7px 10px; }
+  .tile b { display: block; font-size: 24px; line-height: 1.1; color: var(--green-ink); }
+  .tile span { display: block; font-size: 13px; line-height: 1.3; color: var(--muted); }
+  .runs li { font-size: 15.5px; line-height: 1.35; margin-bottom: 5px; }
+  .tl { list-style: none; margin: 0; padding: 0; }
+  .tl li { position: relative; padding: 0 0 9px 20px; font-size: 15.5px; line-height: 1.35; }
+  .tl li::before { content: ""; position: absolute; left: 3px; top: 6px; width: 9px; height: 9px; border-radius: 50%; background: var(--purple); }
+  .tl li::after { content: ""; position: absolute; left: 7px; top: 17px; bottom: -2px; width: 1.5px; background: #CDBDEB; }
+  .tl li:last-child::after { display: none; }
+  .tl .when { display: block; font-size: 12.5px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--purple-ink); }
+  .done { color: var(--green-ink); font-weight: 700; }
+
+  /* Page 3: architecture diagram fills the page, one caption line below */
+  .p3 iframe { position: absolute; inset: 0; width: 1280px; height: 720px; border: 0; }
+  .p3 .foot { text-align: center; left: 110px; right: 110px; bottom: 12px; font-size: 14px; }
+
+  /* Page 1 headline */
+  .headline { position: absolute; left: 48px; right: 48px; top: 110px; height: 50px; border-radius: 12px; background: var(--green);
+    color: #fff; display: flex; align-items: center; gap: 16px; padding: 0 22px; }
+  .headline b { font-size: 23px; letter-spacing: -.2px; }
+  .headline span { font-size: 16px; opacity: .92; }
+  .p1 .left, .p1 .right { top: 172px; gap: 10px; }
+  .p1 .card { padding: 12px 18px 11px; }
+  .p1 .card li, .p1 ol.steps li { font-size: 16.5px; margin-bottom: 5px; }
+  .p1 .wide li { font-size: 15.5px; margin-bottom: 3px; }
+  .p1 .right { left: 668px; width: 564px; gap: 10px; }
+  .p1 .foot { left: 668px; right: 100px; bottom: 14px; }
+  .ba { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .ba figure { margin: 0; border: 1.5px solid var(--line); border-radius: 10px; padding: 8px; background: #F4F4F2; }
+  .ba figcaption { font-size: 14px; font-weight: 700; margin: 0 0 6px 2px; }
+  .ba figcaption span { font-weight: 400; color: var(--muted); }
+  .ba img { display: block; width: 100%; height: auto; border-radius: 6px; }
+  .ba img + img { margin-top: 6px; }
+  .demo { margin-top: 12px; font-size: 15px; color: var(--green-ink); }
+  .demo b { font-weight: 700; }
+.readout{padding:12px 16px;background:#EEF4FD;font-size:18px;line-height:1.6;border-radius:6px}.readout b{font-size:23px}.p3 .arch{display:block;width:100%;height:100%;object-fit:contain}.p3>.foot,.p3>.pageno{display:none}
+</style>
+</head>
+<body>
+
+<!-- ============ Page 1: Project Overview ============ -->
+<section class="slide p1">
+  <div class="head">
+    <div class="brand">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="5" fill="#2E9A5A"/><circle cx="24" cy="24" r="12" fill="none" stroke="#2E9A5A" stroke-width="3"/><circle cx="24" cy="24" r="20" fill="none" stroke="#2E9A5A" stroke-width="3" opacity=".45"/></svg>
+      <div>
+        <h1>RippleTwin</h1>
+        <div class="tag">Know the ripple before you close the road.</div>
+      </div>
+    </div>
+    <div class="meta">
+      <div class="team">Uncapped</div>
+      <div class="event">FEIT Hackathon 2026 · Challenge 5 · RPM Hire</div>
+    </div>
+  </div>
+
+  <div class="headline"><b>One extra line on a VMS — “USE RUSSELL ST” — cut Lonsdale St delay by 46%*</b><span>bus riders −41%</span></div>
+
+  <div class="left">
+    <div class="card c-orange">
+      <h2>Problem statement</h2>
+      <ul>
+        <li>Councils and contractors can’t foresee how a closure — alone or <b>overlapping other works</b> — hits traffic, trams and pedestrians.</li>
+        <li>Sign effects are guessed: in London, real diversions were <b>one-fifth</b> of what drivers said they would do (Chatterjee 2002).</li>
+      </ul>
+    </div>
+    <div class="card c-green">
+      <h2>Solution overview</h2>
+      <ol class="steps">
+        <li>Close a lane on the <b>real Melbourne CBD</b> network; add barriers, signs and the exact <b>VMS wording</b>.</li>
+        <li>Four driver types — commuter, local, tourist, delivery — <b>read each sign</b> (<span class="ai">DeepSeek LLM</span> connected, with rule fallback).</li>
+        <li>A deterministic engine computes <b>detours, queues and delay</b> for drivers, riders and pedestrians, then re-tests each fix.</li>
+      </ol>
+      <div class="principle">AI interprets — the engine calculates.</div>
+    </div>
+    <div class="card c-blue wide"><h2>Who uses it &amp; pays</h2><ul>
+        <li>Contractors &amp; councils: impact evidence for each permit.</li>
+        <li>RPM Hire: every plan is priced from its inventory — what each extra VMS or barrier buys → the hire quote.</li>
+      </ul></div>
+  </div>
+
+  <div class="right">
+    <div class="ba">
+      <figure><figcaption>Before <span>· generic warning</span></figcaption><img src="01-before-vms.jpg" alt="VMS reads ROADWORK AHEAD"><div class="readout"><b>918 m</b> queue<br><b>10,493</b> veh·min delay<br><b>18,693</b> rider·min</div></figure>
+      <figure><figcaption>After <span>· names the detour</span></figcaption><img src="01-after-vms.jpg" alt="VMS adds a second frame USE RUSSELL ST"><div class="readout"><b>538 m</b> queue<br><b>5,629</b> veh·min delay<br><b>10,991</b> rider·min</div></figure>
+    </div>
+    <div class="cap">LLM-run results, 29 Sep — Lonsdale St westbound, 1 lane closed, 8 am, real CBD traffic counts</div>
+    <div class="card c-purple wide"><h2>What's different</h2><ul>
+        <li>RPM's VMS Preview shows how a sign <b>looks</b>; we show its <b>effect</b>.</li>
+        <li>Mooven forecasts from past delays; we test the <b>wording</b> before deployment.</li>
+        <li>one.network flags clashes; we count the <b>minutes they add</b>.</li>
+      </ul></div>
+  </div>
+  <div class="foot">* Single run (1 lane closed, 8 am); DeepSeek LLM sign reading; assumed traveller mix and bus loads (25 per trip).</div>
+  <div class="pageno">1 / 3</div>
+</section>
+
+<!-- ============ Page 2: Tech & Progress ============ -->
+<section class="slide p2">
+  <div class="title">
+    <h1>Tech &amp; Progress</h1>
+    <div class="tag">Real data, a working engine and a live demo — built since 29 Sep, 09:30</div>
+  </div>
+  <div class="meta" style="position:absolute; right:48px; top:32px;">
+    <div class="team">Uncapped</div>
+    <div class="event">RippleTwin · FEIT Hackathon 2026</div>
+  </div>
+
+  <div class="cols">
+    <div class="card c-blue">
+      <h2>Tech stack</h2>
+      <dl class="stack">
+        <dt>Data</dt><dd>Python + OSMnx → static JSON, all from open data</dd>
+        <dt>Engine</dt><dd>JavaScript in the browser + Canvas map; deterministic, under 10 ms per scenario</dd>
+        <dt>Sign reading</dt><dd>DeepSeek LLM connected; cached answers + rule fallback</dd>
+        <dt>Hosting</dt><dd>Cloudflare Workers, one URL; API keys stay server-side</dd>
+        <dt>Open data</dt><dd>OpenStreetMap · DataVic SCATS &amp; PTV GTFS · City of Melbourne</dd>
+      </dl>
+    </div>
+    <div class="card c-green">
+      <h2>Built so far</h2>
+      <div class="tiles">
+        <div class="tile"><b>Live</b><span>public demo on Cloudflare since 29 Sep</span></div>
+        <div class="tile"><b>1,513</b><span>CBD road links with 8 weeks of traffic-signal counts (SCATS)</span></div>
+        <div class="tile"><b>−46%</b><span>Lonsdale St driver delay when the VMS adds “USE RUSSELL ST” (1 lane, 8 am)*</span></div>
+        <div class="tile"><b>−41%</b><span>delay for riders on the 15 bus routes through the closure, same sign*</span></div>
+        <div class="tile"><b>+176 m</b><span>walk and 2 extra crossings for 185 people/h if one footpath closes*</span></div>
+        <div class="tile"><b>3 plans</b><span>priced from RPM Hire’s inventory, A$515–1,765; the guided VMS plan cuts the queue 918 → 79 m; 937 veh·min*</span></div>
+      </div>
+      <div class="demo"><b>Try it:</b> [demo link + QR — team to confirm]</div>
+    </div>
+    <div class="card c-purple">
+      <h2>Working now</h2>
+      <ul class="tl">
+        <li><span class="when">Working</span>Real CBD clashes: approx +33,012 veh·min; stagger by 3 days → 0 (rule-reading run)</li>
+        <li><span class="when">Working</span>Compare the 3 plans side by side for drivers, riders and pedestrians</li>
+        <li><span class="when">Working</span>Pick a plan and export a one-page pack: equipment list, hire quote, VMS schedule, who to notify</li>
+        <li><span class="when">Working</span>DeepSeek sign reading and AI plan interpretation</li>
+        <li><span class="when">1 Oct 10:00</span>Code freeze, tagged release, public repo</li>
+      </ul>
+    </div>
+  </div>
+  <div class="foot">* LLM sign reading, single runs; 29 of 37 behaviour parameters (incl. traveller mix) assumed or low-confidence, flagged in the app; most road and footpath flows estimated from nearby counts; bus loads, stock and hire rates assumed. Data © OpenStreetMap contributors (ODbL); DataVic (CC BY 4.0); City of Melbourne (CC BY). Status: 29 Sep 2026.</div>
+  <div class="pageno">2 / 3</div>
+</section>
+
+<!-- ============ Page 3: Visuals, architecture diagram (LLM connected) ============ -->
+<section class="slide p3">
+  <img class="arch" src="03-architecture-rippletwin-en.svg" alt="RippleTwin architecture: all components working">
+  <div class="foot">Every queue, delay and detour comes from a deterministic engine on open Melbourne data · Clash cost = D(A+B) − D(A) − D(B), D = total delay</div>
+  <div class="pageno">3 / 3</div>
+</section>
+
+</body>
+</html>
