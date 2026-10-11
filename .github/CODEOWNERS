@@ -1,32 +1,15 @@
-# CODEOWNERS —— 谁的 PR 由谁审
+# CODEOWNERS -- who is asked to review which paths
 #
-# 作用：PR 碰到下面的路径时，GitHub 自动请对应的人 review。
-# ⚠️ 私有仓库只有 GitHub Pro / Team / 学生包（Student Developer Pack）才会强制执行
-#    （配合分支保护的 "Require review from Code Owners"）；否则只是自动请人审的提示。
-#    真正兜底的是 .githooks/pre-push + CI 里的 scripts/check.sh [3]。
-# 模块归属以 apps/README.md 的登记表为准，这里跟着登记表同步。
-# 规则：后面的行覆盖前面的行；路径以 / 开头表示从仓库根算起。
-# 🔒 本文件是独占区，只有 lead 在 lead/* 分支上改。
+# When a PR touches a path below, GitHub automatically requests a review from its owner.
+# The repository is public, but main has no branch protection, so these entries only request reviews; they do
+# not block merges. The enforced gates are .githooks/pre-push and scripts/check.sh in CI.
+# Module owners follow the registry in apps/README.md and are kept in sync with it.
+# Rules: later lines override earlier ones; a path starting with / is relative to the repository root.
 
-# ---- 独占区：全部归 lead ----
-# 有 backup lead 时加在每行末尾，例如：/README.md @Zemmeng @<backup-lead>
-/README.md                    @Zemmeng
-/hackathon.conf               @Zemmeng
-/docs/1-brief.md              @Zemmeng
-/docs/2-plan.md               @Zemmeng
-/docs/contract.md             @Zemmeng
-/docs/deploy-cloudflare.md    @Zemmeng
-/handoff/README.md            @Zemmeng
-/docs/llm-apis/README.md      @Zemmeng
-/docs/llm-apis/TEMPLATE.md    @Zemmeng
-/.github/                     @Zemmeng
-/.githooks/                   @Zemmeng
-/scripts/                     @Zemmeng
-/.gitignore                   @Zemmeng
-/.gitattributes               @Zemmeng
+# ---- Default: the maintainer (README, docs, scripts, hooks, CI, hackathon.conf, ...) ----
+*                             @Zemmeng
 
-# ---- 模块：kickoff 时由 lead 追加（手工加；new-app.sh 已随 starters/ 停用，D-0929-1311）----
-# /apps/<模块>/                 @<负责人>
+# ---- Modules (owners from the hackathon team) ----
 /apps/sim/                    @Zemmeng
 /apps/roads/                  @louisxie316-dotcom
 /apps/web/                    @unicornnnnnny
@@ -35,10 +18,3 @@
 /apps/params/                 @Unzzip
 /apps/site/                   @Zemmeng @unicornnnnnny
 /apps/sumo/                   @Zemmeng
-# /docs/4-demo.md               @<pitch owner>
-# /docs/pitch-assets/           @<pitch owner>
-# pitch owner 用 <handle>/pitch/T<n>-x 分支写 docs/4-demo.md 与 docs/pitch-assets/
-#（check.sh [3] 对模块 pitch 放行这两处）。
-# 例：
-# /apps/lobby/                  @<handle>
-# /apps/gen/                    @<handle>

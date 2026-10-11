@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Zemmeng/rippletwin/security/policy
+    about: Please report vulnerabilities privately, never in a public issue. See the security policy for how.
+  - name: Live demo
+    url: https://hackathon-site.zemmmeng.workers.dev/web/public/
+    about: Try RippleTwin in the browser before filing an issue.

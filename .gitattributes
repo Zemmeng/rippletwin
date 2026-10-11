@@ -1,15 +1,16 @@
-# 换行符统一成 LF：Windows 队友把 .sh / hook 存成 CRLF 会直接报 "bad interpreter"
+# Normalise line endings to LF: a .sh file or hook saved with CRLF on Windows fails with "bad interpreter"
 * text=auto eol=lf
 *.sh text eol=lf
 .githooks/* text eol=lf
 
-# 只追加的日志用 union 合并：多人同时在末尾追加时自动两边保留，不出冲突标记。
-# ⚠️ union 只在本地 git merge 时生效，GitHub 网页冲突编辑器不认 —— 冲突时本地 git merge origin/main。
-# ⚠️ union 只适合「一行一条」的文件，别用在带表头的表格或代码上。
+# Append-only logs use the union merge driver: concurrent appends at the end keep both sides, with no conflict markers.
+# ⚠️ union applies only to a local git merge; GitHub's web conflict editor ignores it -- resolve conflicts locally
+#    with git merge origin/main.
+# ⚠️ union suits one-entry-per-line files only; never use it on tables with headers or on code.
 docs/decisions.md merge=union
 docs/pitfalls.md merge=union
 
-# 二进制不做换行转换、不做文本 diff
+# Binary files: no line-ending conversion, no text diff
 *.png binary
 *.jpg binary
 *.jpeg binary
@@ -19,3 +20,8 @@ docs/pitfalls.md merge=union
 *.mp3 binary
 *.woff binary
 *.woff2 binary
+
+# GitHub Linguist: keep generated files and the event archive out of the language statistics
+apps/web/public/index.html linguist-generated
+apps/sumo/public/** linguist-generated
+docs/hackathon/** linguist-documentation

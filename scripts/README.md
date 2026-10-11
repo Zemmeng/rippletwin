@@ -1,68 +1,88 @@
-# scripts/ —— 脚本清单
+# scripts
 
-一眼看出谁在什么时候跑什么。都在仓库根目录用 `bash scripts/<名字>` 跑（从别的目录跑也行，按当前所在仓库找根目录）。每个脚本 `--help` 打印头注释。
+Shell tooling for the repository: one quality gate (`check.sh`) shared by the git hooks and CI, a secret scanner, onboarding and deployment. Run each script from the repository root as `bash scripts/<name>` (any directory inside the repository also works, because the root is found from the current repository). `--help` prints a script's header comment. For the contribution workflow, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-| 脚本 | 做什么 | 谁跑 | 什么时候跑 |
+## Overview
+
+| Script | What it does | Run by | When |
 |---|---|---|---|
-| `setup.sh` | 检查工具（git / gh / node ≥20 / python3 ≥3.9）、启用 `.githooks`、复制 `.env`、建本地目录、设 `hack.me`、建议 noreply 邮箱、打印倒计时和 `check --quick` 汇总 | 每个人 | clone 后跑一次；换电脑、拉到新 hooks 后再跑（幂等） |
-| `check.sh` | **唯一的检查 / 测试入口**：[1]–[9] 九项检查，末尾固定「`======== 汇总 X ❌ Y ⚠️`」，写 `logs/last-check.txt`，有 ❌ 退出 1 | 每个人；Stop hook、pre-push、CI 自动调 | 每完成一小步；commit / push 前；收工前 |
-| `secret-scan.sh` | 扫 key / token / 私钥，只输出「文件:行号:模式名」，绝不打印值 | pre-commit、check [1] 自动调；lead 手动跑 `--history` | 每次 commit（自动）；仓库转 public 前（`--history` 必跑） |
-| `sync.sh` | 零 token 实况对齐：各分支最近提交、开着的 PR 和 CI、没落账的交接单、3-tasks 里的 🔨、main 最近 5 条、倒计时 | lead；Codex / 不用 AI 的人 | lead 每次开口前；任何人开工前 |
-| `deploy.sh` | 前置检查（DEPLOYER 本人、工作区干净、在 main 或 tag 上且与 origin 一致、冻结期只从 `demo-*` tag、全量 check 无 ❌）→ 逐个模块部署 → `check --e2e` 冒烟 → 记 `logs/deploy.log`；失败打印回滚命令 | DEPLOYER（不在时 BACKUP_LEAD）；🔒 AI 执行前必须先问人 | M1 部署打通；每个集成点；打 `demo-*` tag 后 |
-| `.githooks/pre-commit` | `secret-scan.sh --staged`；拦暂存区里的 `.env` / `.dev.vars` / `settings.local.json` / `keys.json`；拦单个 >1MB 的文件 | git 自动（`setup.sh` 启用后） | 每次 `git commit` |
-| `.githooks/pre-push` | 目标是 `main` 且没设 `ALLOW_MAIN=1` 就拒绝；跑 `check.sh --quick`（限时 90 秒），有 ❌ 就拒绝并打印汇总节 | git 自动 | 每次 `git push` |
-| CI（`.github/workflows/check.yml`） | PR 上跑 `check.sh --base origin/main`，push 到 main 跑全量；PR 带 `cross-module` 标签时设 `ALLOW_CROSS=1`；汇总节写进 job summary | GitHub Actions | 开 PR / 更新 PR / 打标签 / 合进 main |
+| `setup.sh` | Checks the tools (git, gh, node ≥ 20, python3 ≥ 3.9; wrangler and uv optional), enables `.githooks`, copies `.env.example` to `.env` (never overwrites), creates the local `logs/`, `out/` and `scratch/` directories, sets `git config hack.me` to your GitHub handle, then runs `check.sh --quick` and prints its summary | Every contributor | Once after cloning; again on a new machine or after pulling new hooks (idempotent) |
+| `check.sh` | **The single check / test entry point**: nine numbered checks `[1]`–`[9]`, always ending with the `======== Summary X ❌ Y ⚠️` block; writes `logs/last-check.txt`; exits 1 on any ❌ | Everyone; called by pre-push, CI and `deploy.sh` | After each small step; before committing or pushing |
+| `secret-scan.sh` | Scans for keys, tokens and private keys; prints only `file:line:pattern`, never the value | Called by pre-commit and check `[1]`; run `--history` by hand | Every commit (automatic); before making a repository public (`--history`) |
+| `deploy.sh` | Preflight checks (you are the `DEPLOYER`, or the `BACKUP_LEAD` for a backup deploy; clean worktree; HEAD on `main` or a tag and in sync with origin; after the code freeze only a `demo-*` tag unless `--hotfix`; full `check.sh` with no ❌), then deploys module by module, runs `check.sh --e2e` and appends to `logs/deploy.log`; prints a rollback command on failure | The `DEPLOYER` in `hackathon.conf`; automated agents must ask a human first | Deliberate deploys only |
+| `.githooks/pre-commit` | `secret-scan.sh --staged`; blocks staged secret files (`.env*`, `.dev.vars*`, `settings.local.json`, `keys.json`, `credentials*.json`, `*.pem`, `*.key`; `*.example` is allowed); blocks files over 1 MB (2 MB for `apps/*/public/*.json`, 10 MB for `docs/hackathon/pitch/*.pdf`) | git, once `setup.sh` has enabled the hooks | Every `git commit` |
+| `.githooks/pre-push` | Refuses pushes to `main` unless `ALLOW_MAIN=1`; refuses to push a ref that is not the current HEAD; runs `check.sh --quick` (70 s per test, 90 s overall) and refuses on any ❌ or a missing summary line | git | Every `git push` |
+| CI (`.github/workflows/check.yml`) | Runs the full `check.sh --base origin/main` and then `check.sh --selftest` on pull requests and on pushes to `main`; sets `ALLOW_CROSS=1` when the PR has the `cross-module` label; writes the summary block to the job summary on failure | GitHub Actions | Opening, updating or labelling a PR; merging to `main` |
 
-## 参数
+The hackathon ended on 1 October 2026, so `check.sh --time` now reports the phase `deadline passed`, and `deploy.sh` needs either a `demo-*` tag pushed to origin or `--hotfix`.
 
-| 命令 | 参数 | 说明 |
+## Options
+
+| Command | Option | Meaning |
 |---|---|---|
-| `bash scripts/check.sh` | （无） | 全量：扫全部文件，跑 `apps/*` 的全部 `test.sh` |
-| | `--quick` | 秘密扫描和测试只覆盖相对 base 改动过的文件 / 模块（没有 base 就全跑） |
-| | `--base <ref>` | 对比基准，默认 `origin/main` → `main`；都没有（还没提交 / 没远端）就跳过 diff 类检查并 ⚠️ |
-| | `--e2e [URL]` | 只做线上冒烟：`GET /` 200 且含 `data-smoke`；`/api/health` 含 `"ok":true`；HTML 无 `localhost`；每个请求 ≤3 秒。**不给 URL 就读 `hackathon.conf` 的 `DEMO_URL`**（为空 → ❌）。日常就写 `bash scripts/check.sh --e2e` |
-| | `--selftest` | 在临时仓库里造 8 种场景（直推 main / 假 key / 越界 / 测试崩溃 / 不打计数 / 分支名不合约定 / RULES 标记缺失 + 全绿基线），确认门禁该红就红 |
-| | `--time` / `--time-raw` | 只打印现在时间、离截止多久、阶段；`-raw` 是 `KEY=VALUE`（`PHASE=`），给脚本用 |
-| `bash scripts/secret-scan.sh` | `--all`（默认） | 所有已跟踪文件 + 未跟踪但没被忽略的文件 |
-| | `--staged` | 只扫暂存区里将要提交的内容（pre-commit 用） |
-| | `--files <路径>…` | 只扫给定文件（`check.sh --quick` 用） |
-| | `--history` | 全部 git 历史里新增过的行，输出「提交号:文件:模式名」 |
-| `bash scripts/sync.sh` | `[小时数]` | 看最近几小时的提交，默认 6 |
-| `bash scripts/deploy.sh` | `<模块>` / `all` | `all` = `hackathon.conf` 的 `DEPLOY_MODULES` |
-| | `--hotfix` | 代码冻结期允许不在 `demo-*` tag 上部署（P0 紧急修复；事后打 tag、写 decisions） |
-| | BACKUP_LEAD | `hack.me` 等于 conf 的 `BACKUP_LEAD` 时也放行，打 ⚠️，`deploy.log` 标「备份部署」 |
+| `bash scripts/check.sh` | (none) | Full run: scans every file and runs every `apps/*/test.sh` |
+| | `--quick` | The secret scan and the tests cover only files / modules changed since the base (everything if there is no base) |
+| | `--base <ref>` | Diff base; defaults to `origin/main`, then `main`. If neither exists (no commits yet, no remote), diff-based checks are skipped with a ⚠️ |
+| | `--e2e [URL]` | Live smoke test only: `GET /` returns 200 and contains `data-smoke`; `/api/health` contains `"ok":true`; the HTML does not reference `localhost`; each request within 3 s. **Without a URL it reads `DEMO_URL` from `hackathon.conf`** (❌ if empty). Results go to `logs/last-e2e.txt` |
+| | `--selftest` | Builds 16 scenarios in throwaway repositories and confirms that each check turns red or green as expected (see [Self-test](#self-test)) |
+| | `--time` / `--time-raw` | Prints only the current time, the time to the deadline and the phase; `--time-raw` prints `KEY=VALUE` lines (`PHASE=`) for scripts |
+| `bash scripts/secret-scan.sh` | `--all` (default) | All tracked files plus untracked files that are not ignored |
+| | `--staged` | Only the staged content about to be committed (used by pre-commit) |
+| | `--files <path>…` | Only the given files (used by `check.sh --quick`) |
+| | `--history` | Every line ever added in git history; prints `commit:file:pattern` |
+| `bash scripts/deploy.sh` | `<module>` / `all` | `all` means `DEPLOY_MODULES` in `hackathon.conf` |
+| | `--hotfix` | Allows a deploy that is not from a `demo-*` tag during the code freeze or after the deadline (urgent fixes; tag it and record a decision afterwards) |
+| | `BACKUP_LEAD` | When `hack.me` equals `BACKUP_LEAD` in the conf, the deploy is also allowed, with a ⚠️, and is marked "backup deploy" in `deploy.log` |
 
-## check.sh 的九项
+## The nine checks in check.sh
 
-| # | 检查 | ❌ | ⚠️ |
+| # | Check | ❌ | ⚠️ |
 |---|---|---|---|
-| [1] | 秘密扫描（`--quick` 只扫改动的文件） | 命中任何模式 | — |
-| [2] | 秘密文件被跟踪 | `.env*`、`.dev.vars`、`settings.local.json`、`keys.json`、`*.pem`、`*.key`、`credentials*.json` 在 git 里 | — |
-| [3] | 分支与越界（分支名 `<handle>/<模块>/T<n>-<slug>` 推出模块；模块 `pitch` 另可写 `docs/4-demo.md`、`docs/pitch-assets/`） | main 上有改动；分支名不合约定且有改动；改了模块范围外的文件；decisions / pitfalls 有删除行；改了别人的交接单或新建的交接单前缀不是自己；`docs/llm-apis/` 里改 / 删了别人的卡、新建的卡不以自己的 handle 开头、卡的文件名不是 ASCII 或后缀不是 `.md` / `.json`、动了 `README.md` `TEMPLATE.md` 或建了子目录 | 还没有提交 / 没有 base；`lead/*` 分支但你不是 LEAD / BACKUP_LEAD；`ALLOW_CROSS=1` 放行 |
-| [4] | 模块结构 | `apps/*` 缺 README、缺 `Owner:` 行、缺可执行的 `test.sh` | Owner 没填 |
-| [5] | 模块测试（单个限时 `CHECK_TEST_TIMEOUT`，默认 120 秒） | 退出码非 0；最后一行不是 `N passed, M failed`；超时 | 一个 `test.sh` 都没有；test.sh 留了后台进程（已清理） |
-| [6] | 仓库卫生 | 跟踪文件 >1MB（`apps/<模块>/public/` 下的 `.json` 数据文件 >2MB，不报 500KB 提醒） | 跟踪文件 >500KB；`*.sh` / hooks 缺可执行位或是 CRLF；shell 文件里 `$变量` 后面紧跟中文 / 全角字符（macOS 上会崩，改成 `${变量}`） |
-| [7] | RULES 块一致（README.md 里恰好一对 BEGIN / END） | 缺 BEGIN / END 标记、有多个 BEGIN | — |
-| [8] | 交接单格式 | — | 文件名不对；缺四节；根目录有超过 12 小时没处理的单 |
-| [9] | hackathon.conf | 解析不了；TZ 无效；时间格式不对 | DEADLINE 未设置；DEMO_URL 有值但 README 里没有 |
+| [1] | Secret scan (`--quick` scans only changed files) | Any pattern matches | — |
+| [2] | Secret files tracked | `.env*`, `.dev.vars*`, `settings.local.json`, `keys.json`, `credentials*.json`, `*.pem` or `*.key` is tracked by git (`*.example` is allowed) | — |
+| [3] | Branch & module boundary (the branch name `<handle>/<module>/T<n>-<slug>` determines the module; a `lead/*` branch may change the whole repository) | Changes on `main`; a non-conforming branch name with changes; files outside `apps/<module>/`; deleted lines in `docs/decisions.md` or `docs/pitfalls.md` (append-only) | No commits or no base yet; detached HEAD without `BRANCH`; a `lead/*` branch used by someone other than `LEAD` / `BACKUP_LEAD`; anything let through by `ALLOW_MAIN=1` or `ALLOW_CROSS=1` |
+| [4] | Module structure | An `apps/*` directory without `README.md`, an `Owner:` line, or an executable `test.sh` | `Owner:` is still a placeholder |
+| [5] | Module tests (each `test.sh` runs in its own process group with `MOCK=1` and a `CHECK_TEST_TIMEOUT` limit, default 120 s) | Non-zero exit code; the last line is not `N passed, M failed`; failures reported with exit code 0; timeout | No `test.sh` at all; a `test.sh` left background processes behind (they are killed) |
+| [6] | Repo hygiene | A tracked file over 1 MB (`.json` data files under `apps/<module>/public/`: 2 MB; `.pdf` files under `docs/hackathon/pitch/`: 10 MB) | A tracked file over 500 KB (data JSON and pitch PDFs excepted); an untracked file over its limit; a `*.sh` file or hook without the executable bit or with CRLF line endings; `$var` directly followed by a non-ASCII character in a shell file (crashes macOS bash under `set -u`; write `${var}`) |
+| [7] | RULES block | `README.md` does not contain exactly one `<!-- RULES:BEGIN -->` / `<!-- RULES:END -->` pair | `README.md` does not exist |
+| [8] | Handoff notes (only the top-level `handoff/` directory; the check passes when it does not exist, and the hackathon's notes are archived in `docs/hackathon/handoff/`) | — | File name is not `<handle>-T<n>-<MMDD-HHMM>.md`; a missing section (`## 1. Facts`, `## 2. Shared files to change`, `## 3. For the lead`, `## 4. Next steps`); a note pending for more than 12 hours |
+| [9] | hackathon.conf | Missing file; a line that is not `KEY=VALUE`; invalid `TZ`; a badly formatted time; `START` not before `DEADLINE` | Duplicate or missing keys; empty `DEADLINE`, `LEAD` or `DEPLOYER`; `DEMO_URL` not found in `README.md`; a `DEPLOY_MODULES` entry with no `apps/` directory |
 
-汇总节 = 「`======== 汇总 X ❌ Y ⚠️`」一行 + 所有 ❌ / ⚠️ 行的副本。Stop hook、pre-push、CI 只看这一节；**没有汇总行一律按失败处理**（崩溃不许伪装成全绿）。
+The summary block is one `======== Summary X ❌ Y ⚠️` line followed by a copy of every ❌ / ⚠️ line. pre-push, CI and `deploy.sh` read only this block, and **a missing summary line always counts as a failure** (a crash must never pass as green). pre-push extracts the ❌ count with `sed -nE 's/^======== Summary ([0-9]+) ❌.*/\1/p'`, so keep the `<marker> N ❌ M ⚠️` shape if you ever change the line.
 
-## 原则
+### Self-test
 
-- **幂等**：重复跑不会坏事（setup 不覆盖 `.env`）。
-- **有进度输出**：`[i/N]` 或 `[N] 名称 ✅/❌/⚠️`，长任务每步都打一行。
-- **失败时打印修法**：❌ 后面写原因和下一条该敲的命令，不只说「失败了」。
-- **文件头写用途 / 用法 / 退出码**：`--help` 就是打印这段头注释。
-- 兼容 macOS 自带 bash 3.2 和 ubuntu（CI）；时间一律用 python3 `zoneinfo` 按 `hackathon.conf` 的 TZ 算（墨尔本 10-04 进夏令时，不写死偏移）。
-- 🔒 脚本不自动 commit / push，不读、不打印任何 key 的值。
+`bash scripts/check.sh --selftest` builds 16 throwaway repositories under `$TMPDIR` and runs `check.sh --quick` in each. The scenarios are: an all-green baseline; changes on `main`; a fake AWS key; a cross-module change; a crashing test; a missing count line; a non-conforming branch name; missing RULES markers; a deleted line in the append-only `docs/decisions.md`; two files with five and four kinds of fake keys (the values must never appear in the output or the log); placeholder-only `Bearer` headers (no false positive); the 2 MB data-file limit; the 1 MB general limit; the 10 MB pitch-PDF limit; and the warning for `$var` followed by a full-width character. CI runs it on every pull request; run it locally after any change to `check.sh` or `secret-scan.sh`.
 
-## 环境变量开关
+## hackathon.conf
 
-| 变量 | 作用 | 什么时候用 |
+`hackathon.conf` holds the event metadata as `KEY=VALUE` lines (comments and surrounding quotes are stripped). It is read by `check.sh`, `deploy.sh` and `.github/workflows/deploy.yml`, and two module tests (`apps/site` and `apps/sumo`) read `DEPLOY_MODULES`, so keep the file.
+
+| Keys | Used for |
+|---|---|
+| `TZ`, `START`, `DEADLINE`, `FEATURE_FREEZE_HOURS`, `CODE_FREEZE_HOURS` | Countdown and phase (`--time`, check `[8]` note ages, check `[9]`) |
+| `LEAD`, `BACKUP_LEAD`, `DEPLOYER` | Identity on `lead/*` branches (check `[3]`, warning only) and the `deploy.sh` identity gate |
+| `DEMO_URL` | Default `--e2e` target; must appear in `README.md` (check `[9]`) |
+| `DEPLOY_MODULES` | `deploy.sh all`; each entry must exist under `apps/` |
+| `EVENT_NAME`, `EVENT_URL`, `VIDEO_URL` | Metadata only (check `[9]` warns if a key is missing) |
+
+`check.sh --time-raw` prints the phase as `PHASE=<value>`, one of `not set`, `pre-event`, `development`, `🧊 feature freeze`, `🔒 code freeze` or `deadline passed`. `deploy.sh` and `deploy.yml` treat values matching `*code freeze*` or `*deadline passed*` as frozen, so change all three together.
+
+## Principles
+
+- **Idempotent**: running a script twice does no harm (`setup.sh` never overwrites `.env`).
+- **Progress output**: `[i/N]` or `[N] Name ✅/❌/⚠️`, one line per step for long tasks.
+- **Print the fix on failure**: after a ❌ comes the reason and the next command to type, not just "failed".
+- **Header comment with purpose, usage and exit codes**: `--help` prints it.
+- Compatible with macOS's bundled bash 3.2 and Ubuntu (CI), and with Python 3.9 (CI pins 3.9). All times are computed with python3 `zoneinfo` in the `TZ` from `hackathon.conf` (Melbourne's daylight saving starts on the first Sunday in October, which was 4 October in 2026, just after the event, so no offsets are hard-coded).
+- Scripts never commit or push on their own, and never read or print key values.
+
+## Environment variables
+
+| Variable | Effect | When to use it |
 |---|---|---|
-| `ALLOW_MAIN=1` | pre-push 放行直推 main；check [3]「在 main 上有改动」降为 ⚠️ | lead 的小改动：`ALLOW_MAIN=1 git push`（commit 里写原因） |
-| `ALLOW_CROSS=1` | check [3] 越界文件、分支名不合约定降为 ⚠️ | CI 在 PR 带 `cross-module` 标签时自动设；队员**经 lead 同意**跨模块后，push 前 `ALLOW_CROSS=1 git push`，PR 打 `cross-module` 标签 |
-| `HACK_NO_GATE=1` | Claude 的 Stop hook 直接放行（逃生开关） | 门禁本身坏了、要先修门禁的时候 |
-| `CHECK_TEST_TIMEOUT=<秒>` | 单个 `test.sh` 限时，默认 120；门禁（Stop hook / pre-push）会传更小的值 | 测试确实慢的模块（先想想能不能拆） |
-| `BRANCH=<名>` / `GITHUB_ACTOR` | check.sh 认的分支名 / `lead/*` 分支核身份用的人（本地用 `git config hack.me`） | CI 设置（PR 的 checkout 是 detached merge commit） |
+| `ALLOW_MAIN=1` | pre-push allows a push to `main`; check `[3]` downgrades "changes on main" to ⚠️ | Small changes by the lead: `ALLOW_MAIN=1 git push` (give the reason in the commit message) |
+| `ALLOW_CROSS=1` | check `[3]` downgrades cross-module files and non-conforming branch names to ⚠️ | Set automatically by CI when the PR has the `cross-module` label; for an agreed cross-module change, run `ALLOW_CROSS=1 git push` and add the label to the PR |
+| `CHECK_TEST_TIMEOUT=<seconds>` | Time limit per `test.sh`, default 120; pre-push passes 70 | Genuinely slow test suites (consider splitting them first) |
+| `BRANCH=<name>` / `GITHUB_ACTOR` | The branch name `check.sh` uses, and the identity checked on `lead/*` branches (locally `git config hack.me`) | Set by CI (a PR checkout is a detached merge commit) |
+| `MOCK` | Passed to every `test.sh`; `check.sh` sets `MOCK=1` (mock mode: no paid LLM calls) unless it is already set | Leave it unset |
