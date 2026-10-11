@@ -1,170 +1,169 @@
-# site —— 同源网站外壳：一个网址挂全部模块，/api/sumo/* 给现场 SUMO，其余 /api/* 留给 T5
-Owner: @unicornnnnnny（部署人，D-0929-1322）· 代码：@Zemmeng
+# site: same-origin gateway and static host (`hackathon-site`)
+Owner: @unicornnnnnny (designated deployer) · @Zemmeng (code)
 
-一个 Cloudflare Worker = 整个 demo 网址。部署时 `build.mjs` 把 `apps/<模块>/public/` 里 **git 已跟踪的文件**原样拷到 `/<模块>/public/`（契约 `docs/contract.md`：「lead 部署时把每个模块的 `public/` 原样挂到 `/<模块>/public/`」）。这样网页面板、引擎 JS、路网数据和路口仿真都在同一个网址下，互相 `fetch` / `import` 不用跨域。`/api/sumo/*` 转给现场 SUMO 的 `hackathon-sumo`（`apps/sumo`，T37），其余 `/api/*` 转给 T5 的 api Worker（服务绑定，D-0929-1436），T5 上线前先回占位。
+One Cloudflare Worker serves the whole RippleTwin demo from a single origin: <https://hackathon-site.zemmmeng.workers.dev>.
 
-## 部署（高h 照做）
+- At build time, `build.mjs` copies the **git-tracked** files in each `apps/<module>/public/` to `/<module>/public/`, unchanged. The web app, the engine's JavaScript, the road network data and the SUMO replays therefore share one origin, so they can `fetch` and `import` each other without CORS.
+- At run time, `src/worker.js` forwards `/api/sumo/*` to the SUMO Worker and every other `/api/*` request to the API Worker through Cloudflare service bindings. Neither backend has a public URL of its own.
 
-> 🔒 只走 `bash scripts/deploy.sh all`，不直接 `npm run deploy`。部署人是 `hackathon.conf` 的 `DEPLOYER`（@unicornnnnnny），备份部署人是 lead。
+> **Status after the hackathon.** `hackathon-site` and `hackathon-api` are still online. The SUMO Worker and its container were deleted, so `/api/sumo/*` now returns `502 sumo_down` and the page falls back to the pre-computed SUMO run. The `SUMO` binding is still declared in `wrangler.jsonc` and **must be removed before the next site deploy**. Details: [Status after the hackathon](#status-after-the-hackathon).
 
-### 第一次（大约 15 分钟）
+## Architecture
 
-**0. lead 先做：** Cloudflare 后台 → Manage Account → Members → Invite，填高h 的邮箱。角色**只勾名字里带 Workers 的**（例如 Workers Admin），不给 Administrator（D-0929-1322）。
-
-**1. 高h 收邮件，接受邀请。** 没有 Cloudflare 账号就按提示用同一个邮箱注册。
-
-**2. 拿最新代码、装依赖**（在仓库根目录）：
-
-```bash
-git switch main && git pull
-git config hack.me          # 必须打印 unicornnnnnny；空的话先跑 bash scripts/setup.sh
-cd apps/site && npm ci      # 只装 wrangler，版本锁死在 package-lock.json
+```mermaid
+flowchart LR
+  B["Browser"] --> S["hackathon-site Worker<br/>src/worker.js"]
+  S -->|"static files<br/>(ASSETS binding)"| A["out/: every module's public/<br/>built by build.mjs"]
+  S -.->|"/api/sumo/*<br/>service binding SUMO"| W["hackathon-sumo Worker<br/>+ SUMO container<br/>(deleted after the event)"]
+  S -->|"other /api/*<br/>service binding API"| P["hackathon-api Worker<br/>sign reading, explain,<br/>worksite register"]
 ```
 
-**3. 登录 Cloudflare**（还在 `apps/site` 里）：
+Release path: `git ls-files` → `build.mjs` → `out/` → `wrangler deploy` (gated by `scripts/deploy.sh`) → `scripts/check.sh --e2e` against the live URL.
 
-```bash
-npx wrangler login          # 浏览器弹出授权页：用被邀请的那个邮箱登录，点 Allow
-npx wrangler whoami         # 列表里要能看到 lead 的账号
-```
+## Routing
 
-**4. whoami 列出了不止一个账号**（你自己也有 Cloudflare 账号时会这样）：
+`wrangler.jsonc` sets `run_worker_first: ["/api/*", "!/api/public/*"]`, so a request for an existing static file is served by Workers Static Assets without running Worker code. Requests that do reach `src/worker.js` are matched in this order:
 
-```bash
-export CLOUDFLARE_ACCOUNT_ID=<lead 私下发你的账号 ID>   # 只在当前终端有效；不写进任何文件、不发群
-npx wrangler whoami                                    # 再确认一次
-```
+| # | Path | Handled by | Errors |
+|---|---|---|---|
+| 1 | `/api/sumo`, `/api/sumo/*` (not lookalikes such as `/api/sumoX`) | Forwarded unchanged to the `SUMO` binding (`hackathon-sumo`): method, query, body and headers kept, prefix not stripped. The allowlist, header stripping and rate limiting happen in `apps/sumo` | no binding → `503 sumo_off`; the binding throws → `502 sumo_down` |
+| 2 | `/api`, `/api/*` except `/api/public/*` | Forwarded unchanged to the `API` binding (`hackathon-api`) | the binding throws → `502 api_unreachable`; no binding → `/api/health` answers `{"ok":true,"v":"site-0.1","mock":true,"api":false}` and every other path `503 api_not_deployed` |
+| 3 | everything else, including `/api/public/*` | The `ASSETS` binding (`out/`) | no binding → `500 no_assets` |
 
-**5. 部署**（回到仓库根目录）：
+What the static side serves:
 
-```bash
-cd ../..
-bash scripts/deploy.sh all
-```
-
-`deploy.sh` 先查 6 项：你是 DEPLOYER、工作区干净、在 main 上且和 origin 一致、冻结期规则、全量 `check.sh` 没有 ❌，然后在 `apps/site` 里跑 `npm run deploy`（= `node build.mjs && wrangler deploy`）。成功时终端打出网址：`https://hackathon-site.<账号子域>.workers.dev`。哪一项被拒，它会打印修法，照做就行。
-
-**6. 打开看一眼：**
-
-| 地址 | 应该看到 |
+| Path | Content |
 |---|---|
-| `<网址>/` | 有 `apps/web` 就跳到网页面板 `/web/public/`；还没有就是模块目录 |
-| `<网址>/?list` | 模块目录（每个模块的链接和文件数） |
-| `<网址>/sim/public/` | 路口仿真 |
-| `<网址>/roads/public/cbd/network.json` | 路网 JSON |
-| `<网址>/api/health` | `{"ok":true,"v":"0.2.0","mock":true,"llm":{…}}`（T5 的 api Worker 回的；看到 `"api":false` = 服务绑定没生效） |
+| `/` | Generated landing page with `data-smoke="site"` and a build stamp (`<meta name="build">`, commit and UTC time). If `apps/web/public/index.html` exists, it redirects to `/web/public/` in JavaScript (with a `<noscript>` meta-refresh fallback) |
+| `/?list` | The same page without the redirect: a list of every module with its file count |
+| `/<module>/public/*` | Git-tracked files from `apps/<module>/public/`. A new module is served automatically once it has a `public/` directory; no change to `site` is needed |
+| `/api/public/*` | Static files from `apps/api/public/` (`reader.js`, `answers/demo.json`, ...). This exclusion lives in two places, `run_worker_first` and the `isApi` check in `worker.js`; change both together |
 
-**7. 把网址发给 lead。** 网址不是秘密，群里发就行。lead 把它写进 `hackathon.conf` 的 `DEMO_URL` 和 README 顶部（这两处只有 lead 改）。
+Observed behaviour (local workerd on 2026-09-29 and the live site on 2026-10-11): `/index.html` returns `307` to `/`, `/sim/public` returns `307` to `/sim/public/`, and an unknown static path returns `404` with an empty body.
 
-**8. lead 的改动合进 main 以后，跑线上冒烟：**
+### Error envelope
+
+Every error is `{ "ok": false, "error": "<code>", "msg": "<explanation>" }` with `content-type: application/json` and `cache-control: no-store` (see [`docs/reference/interfaces.md`](../../docs/reference/interfaces.md), error format). Responses carry no CORS headers, because everything is same-origin, and never include internal error text or stack traces.
+
+| Code | Status | When | Client behaviour |
+|---|---|---|---|
+| `sumo_off` | 503 | no `SUMO` binding | `sumo-client.js` falls back to the pre-computed results in `/sumo/public/real/` |
+| `sumo_down` | 502 | the `SUMO` binding throws (the live behaviour today) | same fallback |
+| `api_unreachable` | 502 | the `API` binding throws | sign reading falls back to keyword rules |
+| `api_not_deployed` | 503 | no `API` binding | same as above |
+| `no_assets` | 500 | the `assets` block is missing from `wrangler.jsonc` | — |
+
+Clients must branch on `error`, never on `msg`.
+
+## Build (`build.mjs`)
+
+`node build.mjs [--out <dir>]` (default `apps/site/out`, gitignored) wipes the output directory, copies each module's `public/`, and writes `out/index.html`. It uses Node built-ins only and runs automatically before `npm run dev`, `dry-run` and `deploy`. Safety properties, each covered by `tests/build.test.mjs`:
+
+- **Only git-tracked files ship.** It copies exactly what `git ls-files` lists. Gitignored files on the deployer's laptop (`keys.json`, `*.pem`, `raw/`, `node_modules/`) and files never `git add`ed are never published, even though `deploy.sh`'s clean-tree check cannot see ignored files. Without git, or outside a git work tree, it refuses to build and leaves the previous output untouched.
+- **No path tricks.** It skips dotfiles and `..` segments, symlinks, submodules and paths behind a symlinked parent directory. A module directory or `public/` that is a symlink, or whose real path is outside `apps/`, skips the whole module with a log line. It strips inherited `GIT_DIR` / `GIT_INDEX_FILE` so a git hook cannot point it at another index.
+- **Safe wipe.** The output directory must be `apps/site/out` or lie outside `apps/`, and a non-empty directory is wiped only if it holds the build's own `data-smoke="site"` page.
+- **Cloudflare limits checked at build time.** It aborts on any file over 25 MiB or more than 20,000 files in total.
+- **Traceable output.** The landing page carries the commit and build time, so the deployed version is visible. The live site shows `68f549e 2026-09-30 18:04 UTC`.
+
+At HEAD the build copies 7 modules (`api`, `engine`, `params`, `roads`, `sim`, `sumo`, `web`): about 210 files and 57 MB, most of it the pre-computed SUMO frames in `sumo/public/`. Untracked files are counted in the log, never copied.
+
+## Configuration (`wrangler.jsonc`)
+
+| Key | Value |
+|---|---|
+| `name` | `hackathon-site` (also the `workers.dev` URL prefix) |
+| `main` / `compatibility_date` | `src/worker.js` / `2026-09-01` |
+| `workers_dev` / `preview_urls` | `true` / `false` (no per-version preview URLs) |
+| `observability` | enabled (Workers Logs, or `npx wrangler tail`) |
+| `assets` | directory `out`, binding `ASSETS`, `run_worker_first: ["/api/*", "!/api/public/*"]` |
+| `services` | `API` → `hackathon-api`, `SUMO` → `hackathon-sumo`. Each service must equal the `name` in `apps/api/wrangler.jsonc` / `apps/sumo/wrangler.jsonc`; `tests/config.test.mjs` checks both |
+
+There are no `vars` and no secrets. The LLM key lived on the API Worker as a wrangler secret.
+
+## Run locally
+
+Needs Node 18+, npm and git.
 
 ```bash
-git pull && bash scripts/check.sh --e2e
-# 等不及的话，直接给网址：bash scripts/check.sh --e2e https://hackathon-site.<账号子域>.workers.dev
+cd apps/site
+npm ci          # installs only wrangler, pinned to 4.143.0 in package-lock.json
+npm run dev     # node build.mjs && wrangler dev --port 8790
 ```
 
-最后一行是 `======== 汇总 0 ❌ 0 ⚠️` 就算通了（M1）。它查 4 件事：首页 200 且有 `data-smoke`、`/api/health` 有 `"ok":true`、首页没有 localhost、每个请求 3 秒内返回。
+Open <http://localhost:8790>: it redirects to `/web/public/`, and `/?list` shows the module list.
 
-### 以后每次
+- `npm run dev` builds once. After changing another module's `public/`, restart it. **New files must be `git add`ed first**, or they are not copied (the build log reports how many were left out).
+- For a working `/api/*`, start `apps/api` first (`npm run dev`, port 8788), then `site`. Wrangler's local dev registry should connect the `API` binding to that session; this two-Worker setup was not verified during the event.
+- Without a local `apps/sumo` (which needs Docker), `/api/sumo/*` fails and the page uses the pre-computed SUMO results, as on the live site.
+- To preview one module's own page, its own static server is quicker (ports in [`apps/README.md`](../README.md)). Use `site` to check that paths still work once everything is mounted under one origin.
+- `npm run build` only builds; `npm run dry-run` bundles without uploading and lists the bindings (`env.API`, `env.SUMO`). Prefix `WRANGLER_SEND_METRICS=false` to turn off wrangler's telemetry.
 
-队友的 PR 合进 main 后：`git switch main && git pull && bash scripts/deploy.sh all`。`DEMO_URL` 填好以后，`deploy.sh` 部署完会自己跑一遍 `--e2e`。
+## Tests
 
-### 出错了
+```bash
+bash apps/site/test.sh     # 89 passed, 0 failed
+```
 
-| 看到什么 | 怎么办 |
+No `npm ci` and no network needed. `test.sh` runs each file with a 60 s limit and ends with the `N passed, M failed` line that `scripts/check.sh` reads.
+
+| File | Assertions | Covers |
+|---|---|---|
+| `tests/build.test.mjs` | 35 | throwaway git repos in a temp dir: only tracked files are copied, planted gitignored placeholders never reach `out/`, symlinked modules are skipped, refusal without git or outside a repository, the landing page (`data-smoke`, redirect, `?list`, no `localhost`, commit stamp), safe wipe; then a build of the real repository and the CLI |
+| `tests/config.test.mjs` | 15 | `wrangler.jsonc` fields, exactly the `API` and `SUMO` bindings cross-checked against the target Workers' names, `DEPLOY_MODULES` order (`api` before `site`), no `vars`, pinned wrangler matching the lockfile, exact `dev` / `deploy` scripts |
+| `tests/worker.test.mjs` | 39 | fake `ASSETS` / `API` / `SUMO` bindings: default export only, route precedence, `/api/sumoX` lookalikes, forwarding of the original request, every error code, no leaked error detail, no CORS headers |
+
+Live smoke test: `bash scripts/check.sh --e2e https://hackathon-site.zemmmeng.workers.dev` checks that `GET /` returns 200 with `data-smoke`, that `/api/health` contains `"ok":true`, that the landing page has no `localhost`, and that each request returns within 3 s.
+
+## Deploy
+
+| Worker | Role | Public URL | How it was deployed |
+|---|---|---|---|
+| `hackathon-site` | this module | `hackathon-site.zemmmeng.workers.dev` | `scripts/deploy.sh` |
+| `hackathon-api` | `apps/api` | none (`workers_dev: false`), reachable only through the `API` binding | `scripts/deploy.sh` |
+| `hackathon-sumo` | `apps/sumo`, Worker + Cloudflare Container | none, reachable only through the `SUMO` binding | by hand from a machine with Docker (`cd apps/sumo && npx wrangler deploy`); **deleted after the event** |
+
+A binding's target Worker must exist before `site` is deployed, so `DEPLOY_MODULES=api site` in `hackathon.conf` deploys `api` first (`tests/config.test.mjs` checks the order). `sumo` is deliberately not in `DEPLOY_MODULES`.
+
+Deploy only through the gate, never with a bare `npm run deploy`:
+
+```bash
+bash scripts/deploy.sh all            # api, then site
+```
+
+`deploy.sh` runs six preflight checks: identity (`git config hack.me` equals `DEPLOYER` or `BACKUP_LEAD` in `hackathon.conf`), a clean work tree, `main` or a pushed tag in sync with `origin`, the freeze rule (after the deadline only a `demo-*` tag deploys, unless `--hotfix` is given), and a green full `scripts/check.sh`. Then it runs `npm run deploy` (`node build.mjs && wrangler deploy`) per module, runs `check.sh --e2e` against `DEMO_URL`, and on failure prints a rollback command based on the previous `demo-*` tag. `wrangler login` (or `CLOUDFLARE_ACCOUNT_ID` when several accounts are logged in) must be done first in `apps/site`.
+
+During the event @Zemmeng ran the production deploys as `BACKUP_LEAD`. The backup GitHub Actions workflow (`.github/workflows/deploy.yml`) never completed a run: its `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets were never set, and it calls `wrangler deploy` without running `node build.mjs`, so a `site` deploy from it would fail on the missing `out/` directory.
+
+## Status after the hackathon
+
+Checked with read-only requests on 2026-10-11:
+
+- **Online.** `hackathon-site` serves build `68f549e` (the last code commit). `/api/health` is answered by `hackathon-api` with `"mock":false` and `"llm":{"mode":"rules",...}`: the LLM key was deleted, so new sign wording is read by keyword rules, while the 92 pre-computed readings in `/api/public/answers/demo.json` still ship.
+- **SUMO deleted.** The `hackathon-sumo` Worker and its container are gone, but the deployed site still has the `SUMO` binding, so `env.SUMO.fetch` throws and `/api/sumo/*` returns `502 sumo_down`. The live body still carries the original Chinese `msg`, because the site has not been redeployed since; the current source returns English. Step 02 and step 03 replay the pre-computed real-network run in `/sumo/public/real/` (seed 42), labelled "SUMO · pre-computed (cloud unavailable)". Step 04's per-plan SUMO cells show "—", because the options run has no pre-computed fallback.
+- **Before the next site deploy**, in one commit:
+  1. remove `{ "binding": "SUMO", "service": "hackathon-sumo" }` from `services` in `wrangler.jsonc`; otherwise `wrangler deploy` is expected to fail with "Could not resolve service binding" (not tried);
+  2. relax `tests/config.test.mjs` (it requires exactly the `API` and `SUMO` bindings and checks the SUMO service name);
+  3. relax `apps/sumo/tests/config.test.mjs` (it checks the site's `SUMO` binding name).
+
+  `worker.js` then answers `503 sumo_off`, which `sumo-client.js` treats like `sumo_down`. The deadline has passed, so `deploy.sh` also needs a `demo-*` tag or `--hotfix`.
+- **Hosting plan.** Containers needed Workers Paid. `site` and `api` use only static assets, service bindings, SQLite Durable Objects and one KV namespace, so they should run on the Free plan within its limits; this has not been verified.
+- An early standalone Worker, `rippletwin` (from `apps/web/wrangler.jsonc`), is still online with an outdated prototype of the web page. It is not part of this deployment.
+
+## Design notes
+
+- `src/worker.js` exports only `default`. workerd treats every named export as an entrypoint, and exporting a string stops the Worker from starting (`Incorrect type for map entry`, seen in local workerd). `tests/worker.test.mjs` checks this first.
+- The `/api/sumo` check must come before the general `/api/*` check; moved after it, the API would swallow every SUMO request (`tests/worker.test.mjs` checks the precedence).
+- `out/` is build output: not in git, never edited by hand, regenerated before `dev` and `deploy`.
+- Static asset requests are free on Cloudflare; only requests that run Worker code (`/api/*`) count against the daily request quota.
+- The landing page must never mention `localhost` (`check.sh --e2e` checks it).
+
+## Files
+
+| File | Purpose |
 |---|---|
-| `Not logged in` / `Authentication error` | 在 `apps/site` 里重新 `npx wrangler login`，再 `npx wrangler whoami` |
-| `More than one account available` 或让你选账号 | 第 4 步：`export CLOUDFLARE_ACCOUNT_ID=…` |
-| `permission` / `403` / `not authorized` | 可能是 Workers 角色的权限不够（还没实测过）。把报错原文发给 lead，lead 去后台调角色 |
-| 问你要不要注册 workers.dev 子域 | 先别选，问 lead（lead 的账号应该已经有了） |
-| `A Worker with this name already exists` 之类的重名 | 改 `wrangler.jsonc` 的 `name`（走 lead 分支），告诉 lead 新网址 |
-| `Could not resolve service binding` | 绑定的 Worker 还没部署：`hackathon-api`（`DEPLOY_MODULES` 里 `api` 要排在 `site` 前面，见下一节），或 `hackathon-sumo`（lead 先手动部署 `apps/sumo`，见「接现场 SUMO」） |
-| 部署成功但 `--e2e` 红 | `cd apps/site && npx wrangler tail` 开着，浏览器再点一次，看报错 |
-| 线上坏了、演示快到了 | `deploy.sh` 失败时会打印回滚命令：切到上一个 `demo-*` tag 重新部署 |
-
-## 接上 T5 的 api Worker（T19 已打开）
-
-1. ✅ `hackathon.conf`：`DEPLOY_MODULES=api site`（`api` 必须排在前面：绑定的目标 Worker 要先存在）
-2. ✅ `apps/site/wrangler.jsonc` 的 `services` 已打开：`{ "binding": "API", "service": "hackathon-api" }`，`hackathon-api` = `apps/api/wrangler.jsonc` 的 `name`（两边改名要一起改，`tests/config.test.mjs` 查）
-3. **部署人** `bash scripts/deploy.sh all`：先部署 api，再部署 site
-4. 验证：`<网址>/api/health` 变成 T5 的 `{"ok":true,"v":"0.2.0","mock":true,"llm":{"mode":"rules",…}}`（不再有 `"api":false`），`POST /api/read` 不再 503
-5. 大模型的 key 放在 **api Worker** 上，不放 site：`cd apps/api && npx wrangler secret put LLM_API_KEY`，再把 MOCK 改成 `"0"` 重新部署（两步详见 `apps/api/README.md`「怎么接大模型」）。site 不需要任何 key
-6. ✅ api Worker 不开自己的 `hackathon-api.<账号子域>.workers.dev` 网址（`apps/api/wrangler.jsonc` 的 `workers_dev: false`），公开入口只有这里的 `/api/*`；服务绑定不受影响。部署 api 时 wrangler 会打印 `No targets deployed for hackathon-api`，是正常的
-
-`apps/api/public/`（`reader.js`、答案文件）照常挂在 `/api/public/…`，是静态文件，不转发给 T5。引擎从 `/api/public/js/reader.js` 引 `readSigns()`，`reader.js` 再同源调 `/api/read`。
-
-本地同时起两个也能联调：先在 `apps/api` 里 `npm run dev`（8788），再起 site（8790），wrangler 会在本机把两个连起来（尚未实测）。
-
-## 接现场 SUMO（T37，C + Cloudflare Containers）
-
-1. `apps/site/wrangler.jsonc` 的 `services` 加了第二个绑定 `{ "binding": "SUMO", "service": "hackathon-sumo" }`，`hackathon-sumo` = `apps/sumo/wrangler.jsonc` 的 `name`（`tests/config.test.mjs` 查）
-2. **顺序**：`hackathon-sumo` 必须先存在，site 才能部署（否则 `Could not resolve service binding`）。镜像要 Docker 构建，所以由 **lead 在装了 Docker 的机器上**先 `cd apps/sumo && npx wrangler deploy`，之后才跑 `bash scripts/deploy.sh all`
-3. `DEPLOY_MODULES` 故意还是 `api site`，不加 `sumo`：`deploy.sh` 不管 sumo
-4. `worker.js` 先判 `/api/sumo`、`/api/sumo/*`（`/api/sumoX` 不算），再判其余 `/api/*`。原请求原样转给 `hackathon-sumo`，删 Origin / Cookie、白名单、限流都在那边做
-5. 没绑 SUMO → 503 `sumo_off`；`hackathon-sumo` 抛错 → 502 `sumo_down`。网页见到这两个（或 `sumo_busy` / `sumo_rate` 等）就改用预先跑好的结果 `/sumo/public/baked/…`，那是静态文件，和现场服务无关
-6. 验证：`<网址>/api/sumo/v1/health` 是 hackathon-sumo 的响应（不是 T5 api Worker 回的）
-
-## 怎么跑
-
-- 手动：`cd apps/site && npm ci && npm run dev`，浏览器开 http://localhost:8790
-- `npm run dev` 先 build 一次。改了别的模块的 `public/` → 重启 dev；**新加的文件要先 `git add` 才会被拷**（build 会打印「N 个没 git add 的文件没拷」）
-- 只改某个模块自己的页面时，起那个模块自己的静态服务器更快（端口见 `apps/README.md` 登记表）；site 用来查「挂到一个网址下以后，路径还对不对」
-
-## 怎么测
-
-- `bash apps/site/test.sh`：不需要 `npm ci`、不联网，3 个文件共 89 条断言
-  - `build.test.mjs`：各模块 `public/` 拷到 `/<模块>/public/`、首页有 `data-smoke`、有 web 就跳、不清空别人的目录
-  - `worker.test.mjs`：假 ASSETS / API / SUMO 绑定下的路由（`/api/sumo/*` 先于 `/api/*`）、503 / 502 错误格式、没有 CORS 头
-  - `config.test.mjs`：`wrangler.jsonc`、`package.json`、锁文件的关键项
-- `cd apps/site && npm run dry-run`：打包但不上传，看配置和绑定对不对（需要先 `npm ci`；想关掉 wrangler 的匿名统计就在前面加 `WRANGLER_SEND_METRICS=false`）
-
-## 对外接口（→ `docs/contract.md` §谁调谁、§路网数据文件、§错误格式）
-
-| 路径 | 返回 |
-|---|---|
-| `/` | 首页，含 `data-smoke`。有 `apps/web/public/index.html` 就用 JS 跳 `/web/public/`（`/?list` 不跳，看模块目录） |
-| `/<模块>/public/…` | `apps/<模块>/public/` 里 `git ls-files` 列出的文件原样挂上；被 gitignore 的（keys.json、*.pem、raw/、node_modules/）、没 git add 的、点开头的、符号链接都不拷；模块目录或 `public/` 是符号链接 → 整个模块跳过。git 不可用或不在仓库里 → build 报错不构建。新模块只要有 `public/` 就自动挂上，不用改 site |
-| `/api/health` | 没绑 API：`{"ok":true,"v":"site-0.1","mock":true,"api":false}`；绑了：T5 的响应 |
-| `/api/sumo`、`/api/sumo/*` | 绑了 SUMO：原样转给 `hackathon-sumo`（路径前缀不剥）；没绑：503 `{"ok":false,"error":"sumo_off","msg":"…"}`；抛错：502 `sumo_down`，不带内部报错。网页收到就用 `/sumo/public/baked/` |
-| `/api/*`（`/api/public/*`、`/api/sumo/*` 除外） | 绑了 API：原样转发（方法、查询串、请求体不变）；没绑：503 `{"ok":false,"error":"api_not_deployed","msg":"…"}`；API 抛错：502 `api_unreachable`，不带内部报错 |
-| `/api/public/*` | `apps/api/public/` 的静态文件 |
-
-故意不加 CORS 头：所有东西在同一个网址下。
-
-## 外部 API
-
-Cloudflare Workers（静态资源 + 服务绑定）。账号是 lead 的，登录方式见上面的部署步骤。
-
-- 变量名：`CLOUDFLARE_ACCOUNT_ID`，只在一台电脑登录了两个账号时 `export`，值由 lead 私下给，不进任何文件
-- 限制：单个静态文件 25 MiB、免费计划 20,000 个文件（`build.mjs` 超了会直接报错）；静态文件请求不收费，进 Worker 代码的请求（`/api/*`）占每天的免费额度
-- 实测（2026-09-29，wrangler 4.143.0 本机 workerd，没上线）：
-  - `/index.html` 返回 307 跳到 `/`，`/sim/public` 返回 307 跳到 `/sim/public/`
-  - 没有的路径返回 404，响应体为空
-  - `/api/public/…` 由静态资源处理，不进 Worker
-  - `src/worker.js` 多导出一个字符串常量，整个 Worker 就起不来（`Incorrect type for map entry`）
-
-## 结构
-
-| 文件 | 一句话 |
-|---|---|
-| `build.mjs` | 各模块 `public/` → `out/<模块>/public/`，生成首页 `out/index.html`；每次先清空 `out/` |
-| `src/worker.js` | `/api/sumo/*` 转 SUMO，其余 `/api/*` 转 API 或占位，其余交给 ASSETS |
-| `wrangler.jsonc` | Worker 名 `hackathon-site`（部署人可以改）、`assets.directory = out`、`run_worker_first`、`services`（API → `hackathon-api`，SUMO → `hackathon-sumo`） |
-| `package.json` / `package-lock.json` | 只有 wrangler（锁 4.143.0）；`build` / `dev` / `dry-run` / `deploy` / `test` |
-| `test.sh` + `tests/*.test.mjs` | 见「怎么测」 |
-| `out/` | 构建产物，已 gitignore，不手改 |
-
-## 本模块固定模式
-
-- 🔒 `src/worker.js` 只导出 `default`（workerd 把具名导出当入口；`worker.test.mjs` 第一条查它）
-- 🔒 `out/` 是产物：不进 git、不手改；`dev` / `deploy` 前自动重新 build
-- 🔒 `/api/public/*` 永远是静态文件；`wrangler.jsonc` 的 `run_worker_first` 和 `worker.js` 两处都这么处理，改一处要改两处
-- 🔒 `/api/sumo/*` 的判断排在 `/api/*` 前面；挪到后面就全被 API 吃掉（`worker.test.mjs` 查）
-- 首页不许出现 localhost（`check.sh --e2e` 会查）
-
-## 已知问题
-
-- 尚未验证：只给 Workers 角色的成员，能不能部署带静态资源的 Worker（第一次部署时就知道了）
-- 尚未验证：绑上 T5 后的真实转发（T19 打开了绑定，要等第一次 `deploy.sh all`）。目前只用假绑定测过
-- 尚未验证：绑上 `hackathon-sumo` 后的真实转发（T37）。目前只用假绑定测过；`wrangler deploy --dry-run` 能看到 `env.SUMO (hackathon-sumo)`
-- `hackathon-site` 这个名字在 lead 的账号里有没有被占用，第一次部署时才知道
+| `build.mjs` | copies each module's `public/` to `out/<module>/public/` and writes `out/index.html`; wipes `out/` first |
+| `src/worker.js` | routes `/api/sumo/*` to `SUMO`, other `/api/*` to `API` (or the placeholder answers), everything else to `ASSETS` |
+| `wrangler.jsonc` | Worker name, assets directory, `run_worker_first`, service bindings |
+| `package.json` / `package-lock.json` | wrangler only (pinned 4.143.0); scripts `build`, `dev`, `dry-run`, `deploy`, `test` |
+| `test.sh`, `tests/*.test.mjs` | see [Tests](#tests) |
+| `out/` | build output, gitignored |

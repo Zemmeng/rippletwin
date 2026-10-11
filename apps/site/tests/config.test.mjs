@@ -1,11 +1,12 @@
-// 用途：核对 wrangler.jsonc / package.json 的关键项 —— 静态目录是 out、/api/* 先进 Worker、/api/public/* 例外、API / SUMO 两个服务绑定、脚本先 build
-// 用法：node tests/config.test.mjs（test.sh 会自动跑）；不需要 npm i；最后一行固定「N passed, M failed」
+// Purpose: check the key settings in wrangler.jsonc / package.json: assets dir is out, /api/* runs the Worker first except /api/public/*,
+//          the API and SUMO service bindings, and scripts that build first
+// Usage: node tests/config.test.mjs (test.sh runs it); no npm install; the last line is always "N passed, M failed"
 import { existsSync, readFileSync } from 'node:fs';
 
 let P = 0, F = 0;
 const ok = (cond, msg) => { if (cond) { P++; console.log('✅ ' + msg); } else { F++; console.log('❌ ' + msg); } };
 
-// 去掉 JSONC 的 // 和 /* */ 注释、以及尾逗号（跳过字符串里的内容）
+// Strip JSONC // and /* */ comments and trailing commas (leaving string contents alone)
 function parseJsonc(text) {
   let out = '', i = 0, str = false;
   while (i < text.length) {
@@ -22,41 +23,43 @@ function parseJsonc(text) {
 try {
   const raw = readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8');
   const w = parseJsonc(raw);
-  ok(w.main === 'src/worker.js' && typeof w.name === 'string' && /^[a-z0-9-]+$/.test(w.name), `wrangler.jsonc：main = src/worker.js，name = ${w.name}（只含小写字母、数字、连字符）`);
-  ok(w.workers_dev === true && w.preview_urls === false && w.observability?.enabled === true, 'workers_dev 开、preview_urls 关、observability 开');
+  ok(w.main === 'src/worker.js' && typeof w.name === 'string' && /^[a-z0-9-]+$/.test(w.name), `wrangler.jsonc: main = src/worker.js, name = ${w.name} (lowercase letters, digits and hyphens only)`);
+  ok(w.workers_dev === true && w.preview_urls === false && w.observability?.enabled === true, 'workers_dev on, preview_urls off, observability on');
   ok(/^\d{4}-\d{2}-\d{2}$/.test(w.compatibility_date || ''), `compatibility_date = ${w.compatibility_date}`);
-  ok(w.assets?.directory === 'out' && w.assets?.binding === 'ASSETS', 'assets：目录 out（build.mjs 产物）、绑定名 ASSETS（worker.js 用）');
+  ok(w.assets?.directory === 'out' && w.assets?.binding === 'ASSETS', 'assets: directory out (build.mjs output), binding ASSETS (used by worker.js)');
   const rwf = w.assets?.run_worker_first || [];
-  ok(rwf.includes('/api/*') && rwf.includes('!/api/public/*'), `run_worker_first = ${JSON.stringify(rwf)}：/api/* 先进 Worker，/api/public/* 留给静态文件`);
-  // T19：services 绑定打开了。service 必须等于 apps/api/wrangler.jsonc 的 name，否则部署报 Could not resolve service binding
+  ok(rwf.includes('/api/*') && rwf.includes('!/api/public/*'), `run_worker_first = ${JSON.stringify(rwf)}: /api/* runs the Worker first, /api/public/* stays with static assets`);
+  // The service must equal the name in apps/api/wrangler.jsonc, or the deploy fails with Could not resolve service binding
   const api = parseJsonc(readFileSync(new URL('../../api/wrangler.jsonc', import.meta.url), 'utf8'));
   const svc = Array.isArray(w.services) ? w.services : [];
   const byName = Object.fromEntries(svc.map((s) => [s.binding, s.service]));
-  ok(svc.length === 2 && Object.keys(byName).sort().join(',') === 'API,SUMO', `services 正好两个绑定 API、SUMO（worker.js 读 env.API、env.SUMO）：${JSON.stringify(svc)}`);
-  ok(byName.API === api.name && api.name === 'hackathon-api', `API 绑的是 T5 的 Worker：service = ${byName.API}，apps/api/wrangler.jsonc name = ${api.name}`);
-  // T37：SUMO 绑现场 SUMO 容器的 Worker。apps/sumo 在 T37 里和本文件同时写，还没有 wrangler.jsonc 时只查 service 名
-  ok(byName.SUMO === 'hackathon-sumo', `SUMO 绑的是 hackathon-sumo：service = ${byName.SUMO}`);
+  ok(svc.length === 2 && Object.keys(byName).sort().join(',') === 'API,SUMO', `services has exactly two bindings, API and SUMO (worker.js reads env.API, env.SUMO): ${JSON.stringify(svc)}`);
+  ok(byName.API === api.name && api.name === 'hackathon-api', `API binds the API Worker: service = ${byName.API}, apps/api/wrangler.jsonc name = ${api.name}`);
+  // SUMO binds the Worker in front of the live SUMO container. apps/sumo was written alongside this file; if it has no wrangler.jsonc yet, only the service name is checked
+  // hackathon-sumo was deleted after the event: removing the SUMO binding means changing the two-binding check above, these checks and
+  // the SUMO binding check in apps/sumo/tests/config.test.mjs in the same commit (see README.md, status after the hackathon)
+  ok(byName.SUMO === 'hackathon-sumo', `SUMO binds hackathon-sumo: service = ${byName.SUMO}`);
   const sumoCfg = new URL('../../sumo/wrangler.jsonc', import.meta.url);
   if (existsSync(sumoCfg)) {
     const sumo = parseJsonc(readFileSync(sumoCfg, 'utf8'));
-    ok(sumo.name === byName.SUMO, `apps/sumo/wrangler.jsonc name = ${sumo.name}，和 SUMO 绑定的 service 一致（改名两边一起改）`);
+    ok(sumo.name === byName.SUMO, `apps/sumo/wrangler.jsonc name = ${sumo.name}, matching the SUMO binding's service (rename both together)`);
   } else {
-    console.log('⏭️  apps/sumo/wrangler.jsonc 还不存在，跳过「name = hackathon-sumo」这一条');
+    console.log('⏭️  apps/sumo/wrangler.jsonc does not exist yet; skipping the "name = hackathon-sumo" check');
   }
   const conf = readFileSync(new URL('../../../hackathon.conf', import.meta.url), 'utf8');
   const mods = (conf.match(/^DEPLOY_MODULES=(.*)$/m)?.[1] || '').trim().split(/\s+/);
-  ok(mods.includes('api') && mods.includes('site') && mods.indexOf('api') < mods.indexOf('site'), `hackathon.conf DEPLOY_MODULES = ${mods.join(' ')}：api 排在 site 前面（绑定的目标 Worker 要先存在）`);
-  ok(!('vars' in w), '反向：wrangler.jsonc 里没有 vars（site 不需要变量；密钥只在 T5 Worker 的 wrangler secret）');
+  ok(mods.includes('api') && mods.includes('site') && mods.indexOf('api') < mods.indexOf('site'), `hackathon.conf DEPLOY_MODULES = ${mods.join(' ')}: api comes before site (a binding's target Worker must exist first)`);
+  ok(!('vars' in w), 'negative: wrangler.jsonc has no vars (site needs none; secrets live only as wrangler secrets on the API Worker)');
 
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  ok(/^\d+\.\d+\.\d+$/.test(pkg.devDependencies?.wrangler || ''), `wrangler 版本锁死：${pkg.devDependencies?.wrangler}`);
-  ok(/^node build\.mjs && wrangler deploy$/.test(pkg.scripts?.deploy || ''), 'npm run deploy 先 build 再 wrangler deploy（deploy.sh 调它）');
-  ok(/^node build\.mjs && wrangler dev --port 8790$/.test(pkg.scripts?.dev || ''), 'npm run dev 先 build，端口 8790');
+  ok(/^\d+\.\d+\.\d+$/.test(pkg.devDependencies?.wrangler || ''), `wrangler version pinned: ${pkg.devDependencies?.wrangler}`);
+  ok(/^node build\.mjs && wrangler deploy$/.test(pkg.scripts?.deploy || ''), 'npm run deploy builds first, then wrangler deploy (called by deploy.sh)');
+  ok(/^node build\.mjs && wrangler dev --port 8790$/.test(pkg.scripts?.dev || ''), 'npm run dev builds first, port 8790');
   const lock = JSON.parse(readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
-  ok(lock.packages?.['node_modules/wrangler']?.version === pkg.devDependencies.wrangler, `package-lock.json 里 wrangler 也是 ${pkg.devDependencies.wrangler}（npm ci 装的就是它）`);
+  ok(lock.packages?.['node_modules/wrangler']?.version === pkg.devDependencies.wrangler, `package-lock.json also has wrangler ${pkg.devDependencies.wrangler} (what npm ci installs)`);
 } catch (e) {
   F++;
-  console.log('❌ 测试本身崩了：' + (e && e.stack));
+  console.log('❌ the test itself crashed: ' + (e && e.stack));
 }
 
 console.log(`${P} passed, ${F} failed`);
