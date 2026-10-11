@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""用途：CBD 的真实 OSM 矢量底图 → public/<area>/vectormap.json（水域、绿地、用地、铁路，给网页 CITY 层当底图）。
+"""Purpose: real OSM vector basemap for the CBD -> public/<area>/vectormap.json (water, green space, land use, rail; the basemap for the web app's CITY layer).
 
-用法：
+Usage:
   python3 apps/roads/tools/fetch_vectormap.py [--bbox S,W,N,E] [--area cbd] [--zoom 14] [--refresh]
-      从 OpenFreeMap 公共实例的 OpenMapTiles 矢量瓦片（.pbf，免 key，无请求上限）拉一圈瓦片，
-      解码成 lat/lon 存本地 —— 网页运行时只取同源的这一个文件，不连任何外部服务器
-      tile_source 跟着它返回的 TileJSON 走，不写死快照日期（快照每周换）
-前置：无（只用标准库，不需要 apps/roads/.venv）
-退出码：0 成功；1 瓦片源连不上 / TileJSON 里没有 tiles
-依赖：无
-数据许可证：ODbL（OpenStreetMap）+ CC BY 4.0（OpenMapTiles schema），页面要写「© OpenStreetMap contributors」
-坑：MVT 是自己解的最小实现（protobuf wire format），只认 Layer / Feature / Value 那几号字段，
-    不支持 extension、不保证对任意瓦片都对；只用于本项目这一圈瓦片
-    瓦片整块落盘到 raw/vectormap_tiles/，重跑不重下（--refresh 强制重下）
+      downloads the tiles covering the bbox from the OpenFreeMap public instance's OpenMapTiles vector tiles (.pbf, no key, no request cap)
+      and decodes them to lat/lon stored locally; at run time the page fetches only this one same-origin file and contacts no external server
+      tile_source follows the TileJSON the instance returns; the snapshot date is not hard-coded (snapshots rotate weekly)
+Prerequisites: none (standard library only; apps/roads/.venv is not needed)
+Exit code: 0 success; 1 tile source unreachable / TileJSON has no tiles
+Dependencies: none
+Data licence: ODbL (OpenStreetMap) + CC BY 4.0 (OpenMapTiles schema); pages must show "© OpenStreetMap contributors"
+Gotchas: the MVT decoder is a minimal in-house implementation (protobuf wire format) that understands only the Layer / Feature / Value field numbers;
+    it does not support extensions and is not guaranteed to handle arbitrary tiles; it is meant only for this project's tiles
+    whole tiles are cached in raw/vectormap_tiles/ and not downloaded again on re-runs (--refresh forces a new download)
 """
 import argparse, json, math, os, struct, sys, time, urllib.error, urllib.request
 
 MOD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DEFAULT_BBOX = (-37.8235, 144.9480, -37.8060, 144.9760)  # 和 network.json / buildings.json 同一个 bbox
-# 默认源：OpenFreeMap 公共实例（openfreemap.org）。它给的是 TileJSON，tiles[0] 才是当期快照的瓦片模板
+DEFAULT_BBOX = (-37.8235, 144.9480, -37.8060, 144.9760)  # same bbox as network.json / buildings.json
+# Default source: the OpenFreeMap public instance (openfreemap.org). It returns TileJSON; tiles[0] is the tile template for the current snapshot
 DEFAULT_SOURCE = 'https://tiles.openfreemap.org/planet'
 UA = 'hackathon-roads/1.0 (vector basemap)'
 TIMEOUT_S = 60
-PAUSE_S = 0.4            # 每个瓦片之间停一下，别把公共实例当 CDN 压
-MIN_AREA_M2 = 200.0      # 比这小的面丢掉（z14 的泛化已经滤过一遍，这里再滤一次零碎）
-ROUND = 6                # 经纬度小数位：1e-6° ≈ 0.11 m，CITY 层 1 px ≈ 0.6 m
+PAUSE_S = 0.4            # pause between tiles so the public instance is not hammered like a CDN
+MIN_AREA_M2 = 200.0      # drop polygons smaller than this (z14 generalisation already filters; this removes remaining slivers)
+ROUND = 6                # lat/lon decimal places: 1e-6° ≈ 0.11 m; one CITY-layer pixel ≈ 0.6 m
 
-# OpenMapTiles 的图层 / class → 本项目的一小组 kind（网页 VEC 调色板按 kind 上色）
+# OpenMapTiles layer / class -> this project's small set of kinds (the web VEC palette colours by kind)
 POLY_KIND = {
     'water': {'': 'water'},
     'aeroway': {'': 'aeroway'},
@@ -57,7 +57,7 @@ def varint(buf, i):
 
 
 def fields(buf):
-    """→ (field_no, value)；varint 给 int，length-delimited 给 bytes"""
+    """-> (field_no, value); varint yields int, length-delimited yields bytes"""
     i, n = 0, len(buf)
     while i < n:
         key, i = varint(buf, i)
@@ -106,8 +106,8 @@ def value_of(buf):
 
 
 def parse_tile(data):
-    """→ [(layer_name, extent, [(tags, gtype, rings)])]；gtype 1=点 2=线 3=面
-    rings 对线是 [[点…]]，对面是 [[环…]]（第 0 个是外环，其余是洞，绕向和 MVT 里一致）"""
+    """-> [(layer_name, extent, [(tags, gtype, rings)])]; gtype 1=point 2=line 3=polygon
+    for lines rings is [[points…]], for polygons [[rings…]] (index 0 is the outer ring, the rest are holes; winding as in the MVT)"""
     out = []
     for fn, layer in fields(data):
         if fn != 3:
@@ -141,7 +141,7 @@ def parse_tile(data):
 
 
 def cursor_to_rings(cmds):
-    """MVT 游标几何 → [[点…]]：一次 MoveTo 起一段（面里就是新环），ClosePath 收尾"""
+    """MVT cursor geometry -> [[points…]]: each MoveTo starts a new part (a new ring for polygons); ClosePath ends it"""
     rings, ring, x, y = [], None, 0, 0
     i = 0
     while i < len(cmds):
@@ -171,7 +171,7 @@ def cursor_to_rings(cmds):
     return rings
 
 
-# ---------- 瓦片 → 经纬度 ----------
+# ---------- tile -> lat/lon ----------
 
 def lonlat(z, tx, ty, px, py, extent):
     n = 2 ** z
@@ -191,11 +191,11 @@ def tile_range(bbox, z):
         r = math.radians(lat)
         return (1 - math.log(math.tan(r) + 1 / math.cos(r)) / math.pi) / 2 * m
 
-    return (int(xt(w)), int(xt(e)), int(yt(n)), int(yt(s)))  # x0, x1, y0, y1（含）
+    return (int(xt(w)), int(xt(e)), int(yt(n)), int(yt(s)))  # x0, x1, y0, y1 (inclusive)
 
 
 def area_m2(ring, lat0):
-    """等距圆柱近似：够用来筛掉零碎面，不追求精确"""
+    """Equirectangular approximation: good enough to filter out slivers, not meant to be exact"""
     k = 111320 * math.cos(math.radians(lat0))
     a = 0.0
     for i in range(len(ring)):
@@ -216,7 +216,7 @@ def hits(ring, s, w, n, e):
 
 
 def round_ring(ring):
-    """去重（round 后相邻重复点）、去退化环；够不成环的返回 None"""
+    """Remove adjacent duplicates after rounding and degenerate rings; None if no valid ring remains"""
     out = []
     for la, lo in ring:
         p = (round(la, ROUND), round(lo, ROUND))
@@ -236,7 +236,7 @@ def round_line(pts):
     return out if len(out) >= 2 else None
 
 
-# ---------- 主流程 ----------
+# ---------- main ----------
 
 def get(url, timeout=TIMEOUT_S):
     req = urllib.request.Request(url, headers={'User-Agent': UA})
@@ -248,29 +248,29 @@ def tile_template(source):
     doc = json.loads(get(source).decode('utf-8'))
     tiles = doc.get('tiles') or []
     if not tiles:
-        print('❌ %s 返回的 TileJSON 里没有 tiles' % source)
+        print('❌ the TileJSON returned by %s has no tiles' % source)
         sys.exit(1)
     return tiles[0]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--bbox', default=None, help='S,W,N,E，默认和 network.json 一致')
+    ap.add_argument('--bbox', default=None, help='S,W,N,E; defaults to the same bbox as network.json')
     ap.add_argument('--area', default='cbd')
     ap.add_argument('--zoom', type=int, default=14)
-    ap.add_argument('--source', default=DEFAULT_SOURCE, help='TileJSON 地址（默认 OpenFreeMap 公共实例）')
+    ap.add_argument('--source', default=DEFAULT_SOURCE, help='TileJSON URL (default: the OpenFreeMap public instance)')
     ap.add_argument('--out', default=os.path.join(MOD, 'raw'))
-    ap.add_argument('--refresh', action='store_true', help='重下瓦片（默认用 raw/vectormap_tiles/ 里的）')
+    ap.add_argument('--refresh', action='store_true', help='download tiles again (default: reuse raw/vectormap_tiles/)')
     a = ap.parse_args()
     bbox = tuple(float(x) for x in a.bbox.split(',')) if a.bbox else DEFAULT_BBOX
     s, w, n, e = bbox
 
     tmpl = tile_template(a.source)
-    print('·  源 %s' % tmpl)
+    print('·  source %s' % tmpl)
     tiles = {}
     for z in (a.zoom,):
         x0, x1, y0, y1 = tile_range(bbox, z)
-        print('·  zoom %d：x %d–%d，y %d–%d（%d 块）' % (z, x0, x1, y0, y1, (x1 - x0 + 1) * (y1 - y0 + 1)))
+        print('·  zoom %d: x %d–%d, y %d–%d (%d tiles)' % (z, x0, x1, y0, y1, (x1 - x0 + 1) * (y1 - y0 + 1)))
         for tx in range(x0, x1 + 1):
             for ty in range(y0, y1 + 1):
                 cache = os.path.join(a.out, 'vectormap_tiles', str(z), str(tx), '%d.pbf' % ty)
@@ -329,7 +329,7 @@ def main():
                         seen[key] = 1
                         lines.setdefault(kind, []).append([list(p) for p in q])
 
-    # kind 固定顺序输出，重跑 diff 干净
+    # write kinds in a fixed order so re-runs diff cleanly
     doc = {
         'version': 1,
         'area': a.area,
@@ -340,8 +340,8 @@ def main():
         'sources': ['© OpenStreetMap contributors (ODbL)',
                     'OpenMapTiles map data schema, CC BY 4.0'],
         'assumptions': {'round': ROUND, 'min_area_m2': MIN_AREA_M2, 'tunnel': 'dropped',
-                        'note': '经纬度坐标，网页用 6-engine.js 的 geoToWorld 换到页面坐标；'
-                                '道路和建筑不在这个文件里（见 network.json / buildings.json）'},
+                        'note': 'lat/lon coordinates; the web app converts them to page coordinates with geoToWorld in 6-engine.js; '
+                                'roads and buildings are not in this file (see network.json / buildings.json)'},
         'polygons': [{'kind': k, 'polys': polys[k]} for k in KINDS if k in polys],
         'lines': [{'kind': k, 'pts': lines[k]} for k in ('waterway', 'rail', 'transit') if k in lines],
     }
@@ -354,13 +354,13 @@ def main():
     nrings = sum(len(poly) for p in doc['polygons'] for poly in p['polys'])
     npts = sum(len(r) for p in doc['polygons'] for poly in p['polys'] for r in poly)
     nlines = sum(len(l['pts']) for l in doc['lines'])
-    print('·  %s：%.0f KB，%d 个面 / %d 环 / %d 点，%d 条线' % (
+    print('·  %s: %.0f KB, %d polygons / %d rings / %d points, %d lines' % (
         os.path.relpath(out, MOD), os.path.getsize(out) / 1024, npoly, nrings, npts, nlines))
     for p in doc['polygons']:
         s_ = sum(len(r) for poly in p['polys'] for r in poly)
-        print('     %-8s 面 %d / 点 %d' % (p['kind'], len(p['polys']), s_))
+        print('     %-8s polygons %d / points %d' % (p['kind'], len(p['polys']), s_))
     for l in doc['lines']:
-        print('     %-8s 线 %d / 点 %d' % (l['kind'], len(l['pts']), sum(len(q) for q in l['pts'])))
+        print('     %-8s lines %d / points %d' % (l['kind'], len(l['pts']), sum(len(q) for q in l['pts'])))
 
 
 if __name__ == '__main__':

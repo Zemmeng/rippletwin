@@ -1,185 +1,309 @@
-# roads —— CBD 真实路网和真实车流，整理成路网引擎能直接读的 JSON
+# roads: Melbourne CBD open-data pipeline
+
 Owner: @louisxie316-dotcom
 
-任务 T3。**先读 `PRD.md`**：要交什么、文件格式、数据从哪来、验收标准、时间盒都在里面。
+An offline, re-runnable Python pipeline that turns open datasets for a CBD bounding box into 11 static, schema-checked JSON files under `public/cbd/` (about 5.9 MB in total, each under 2 MB). They are served at `/roads/public/cbd/<file>` and read by the engine, the web app, the API and the SUMO service. Nothing in this module runs at request time, and no API keys are needed to rebuild it.
 
-## 怎么跑
+- The area is a parameter, not hard-coded: `fetch_osm.py`, `fetch_scats.py`, `build_network.py`, `build_transit.py`, `fetch_buildings.py` and `fetch_vectormap.py` take `--bbox S,W,N,E` (default `-37.8235,144.9480,-37.8060,144.9760`), and the later steps take `--area <name>` and read the bbox from that area's `network.json`, so another district is a re-run, not a code change (only the weather grid point is fixed in `fetch_weather.py`).
+- Ids are derived from OSM ids and output is written in a fixed, sorted order, so re-runs diff cleanly and the UI can store the link ids a user picks.
+- Every imputed number carries a `method` label saying how it was produced, and every assumption is written into the file's `assumptions`.
 
-第一次：`python3 -m venv apps/roads/.venv && apps/roads/.venv/bin/pip install -r apps/roads/requirements.txt`（`.venv/` 已 gitignore）
+Wider context: [module interfaces](../../docs/reference/interfaces.md) (road data files section), [data sources and licences](../../docs/data/sources.md), [assumptions and validation](../../docs/data/assumptions-and-validation.md).
 
-```bash
-python3 apps/roads/tools/fetch_scats.py --sites                  # 站点表 → raw/
-apps/roads/.venv/bin/python apps/roads/tools/fetch_osm.py        # OSM 路网 + 电车轨道 → raw/（约 30 秒）
-apps/roads/.venv/bin/python apps/roads/tools/build_network.py    # → public/cbd/network.json、signals.json（约 2 秒）
-python3 apps/roads/tools/fetch_scats.py --range 2026-08-01..2026-09-27   # SCATS 8 周 → raw/（约 270 MB、30 分钟，抽过的天跳过）
-python3 apps/roads/tools/build_flows.py                          # → public/cbd/flows.json
+## Data lineage
+
+```mermaid
+flowchart LR
+  osm[OpenStreetMap<br/>Overpass] --> fo[fetch_osm.py] --> bn[build_network.py]
+  sig[DataVic traffic<br/>signal sites] --> fsites["fetch_scats.py --sites"] --> bn
+  bn --> net[network.json<br/>signals.json]
+  scats[DataVic SCATS<br/>volume data] --> frange["fetch_scats.py --range"] --> bf[build_flows.py] --> flows[flows.json]
+  net --> bf
+  gtfs[DataVic PTV GTFS] --> fg[fetch_gtfs.py] --> bt[build_transit.py] --> transit[transit.json]
+  net --> bt
+  osm --> fow["fetch_osm.py --walk"] --> bw[build_walk.py] --> walk[walk.json<br/>peds.json]
+  ped[City of Melbourne<br/>pedestrian counts] --> bw
+  net --> bw
+  bld[Overpass buildings +<br/>CoM footprints + CLUE] --> fb[fetch_buildings.py] --> buildings[buildings.json]
+  net --> fb
+  rpm[RPM Hire catalogue<br/>inline in the script] --> be[build_equipment.py] --> equipment[equipment.json]
+  ofm[OpenFreeMap<br/>vector tiles] --> fv[fetch_vectormap.py] --> vectormap[vectormap.json]
+  om[Open-Meteo<br/>archive API] --> fw[fetch_weather.py] --> wh[weather_hourly.json]
+  bom[BoM daily observations<br/>manual download] --> bwx
+  wh --> bwx[backtest_weather.py] --> wb[weather_backtest.json]
+  scats --> bwx
+  ped --> bwx
 ```
 
-第二期（需求 `PRD-2.md`，@jinmingq 写，在他的分支 `jinmingq/roads/T3-phase2-prd`）：
+Downloads land in `raw/` (gitignored) and outputs in `public/cbd/`; `fetch_buildings.py`, `fetch_vectormap.py` and `fetch_weather.py` do both steps. Consumers:
+
+- `apps/engine` (`backend.js` `connect()`): network, flows, transit, walk, peds (walk and peds load in the background), equipment
+- `apps/web`: buildings, vectormap, walk geometry; the network through the engine
+- `apps/api` (`pack.js` `quote()` / `stockCheck()`): equipment
+- `apps/web/tools/sumo/build_real.py` and the SUMO container image (`apps/sumo/Dockerfile`): network, signals, flows
+
+## Outputs
+
+| File | Contents | Size | Built by | Read by |
+|---|---|---|---|---|
+| `network.json` | Directed road graph: 805 nodes, 1,513 junction-to-junction links with lanes, speed, capacity, free-flow time, tram and bike-lane flags | 499 KB | `build_network.py` | engine, SUMO |
+| `signals.json` | 151 SCATS signal sites in the bbox, 124 snapped to a network node | 19 KB | `build_network.py` | SUMO, web tests |
+| `flows.json` | Weekday and weekend 24-hour profiles (veh/h) for every link, with a `method` per link | 409 KB | `build_flows.py` | engine, SUMO |
+| `transit.json` | PTV trams (22 routes) and buses (25 routes) map-matched onto directed links, hourly trips, 182 stops | 123 KB | `build_transit.py` | engine |
+| `walk.json` | Undirected walking network: 5,198 nodes, 6,802 links, each sidewalk attached to a road link and side | 1.7 MB | `build_walk.py` | engine, web |
+| `peds.json` | Hourly pedestrian volumes per walking link from 71 sensors, with a `method` per link | 1.8 MB | `build_walk.py` | engine |
+| `buildings.json` | 2,508 building footprints with height, height source, use and frontage links | 911 KB | `fetch_buildings.py` | web |
+| `equipment.json` | 16 works equipment items (barriers, static signs, VMS, arrow board, portable pedestrian signals) with specifications; quantities and day rates assumed | 8 KB | `build_equipment.py` | engine, API |
+| `vectormap.json` | Basemap layers in lat/lon: 336 polygons (water, green space, land use) and 328 lines (rail, tram, waterways) | 158 KB | `fetch_vectormap.py` | web |
+| `weather_hourly.json` | 1,392 hours of Open-Meteo weather, 1 Aug to 27 Sep 2026 | 71 KB | `fetch_weather.py` | none (evidence only) |
+| `weather_backtest.json` | Weather back-test results, placebo, case studies and audit trail | 40 KB | `backtest_weather.py` | none (evidence only) |
+
+The two weather files are an offline study. No app code reads them and the page never shows them.
+
+## Data sources and licences
+
+| Source | Used for | Licence |
+|---|---|---|
+| OpenStreetMap via Overpass / OSMnx | Road and walking networks, tram tracks, building outlines | ODbL 1.0, "© OpenStreetMap contributors" |
+| DataVic [Traffic Signal Volume Data](https://discover.data.vic.gov.au/dataset/traffic-signal-volume-data) (SCATS) | Hourly vehicle flows, bike counts for the back-test | CC BY 4.0, Department of Transport and Planning Victoria |
+| DataVic [Victorian traffic signals](https://discover.data.vic.gov.au/dataset/victorian-traffic-signals) | Signal site list | CC BY 4.0 |
+| DataVic [Traffic signal configuration data sheets](https://discover.data.vic.gov.au/dataset/traffic-signal-configuration-data-sheets) | Detector layout for site 2921 (read by HTTP Range) | CC BY 4.0 |
+| DataVic [GTFS Schedule](https://discover.data.vic.gov.au/dataset/gtfs-schedule) (PTV, 26 Sep 2026 release, sub-feeds 3 and 4) | Tram and bus routes, stops, trips | CC BY 4.0 |
+| City of Melbourne Pedestrian Counting System (hourly counts and sensor locations) | Pedestrian volumes | Not stated on the dataset page; companion City of Melbourne datasets are CC BY |
+| City of Melbourne 2018 Building Footprints | Measured building heights | CC BY |
+| City of Melbourne CLUE building information, census 2024 | Building use and floor counts | CC BY |
+| OpenMapTiles vector tiles via the OpenFreeMap public instance | Vector basemap | Schema CC BY 4.0, data ODbL |
+| Open-Meteo Historical Weather API, model `ecmwf_ifs` | Hourly weather | CC BY 4.0, "Weather data by Open-Meteo.com" |
+| Bureau of Meteorology daily observations IDCJDW3033 (Melbourne Olympic Park) | Checking model rain against measured rainfall | © Commonwealth of Australia; downloaded by hand, not redistributed |
+| RPM Hire product pages, TfNSW sign register (T1-1, T2-16) | Equipment specifications and sign codes | Reference only; no images or text copied |
+
+**Licence of the data files.** `network.json`, `walk.json`, `buildings.json` and `vectormap.json` are derived from OpenStreetMap and are distributed under the **ODbL 1.0 (share-alike), not the MIT licence** that covers the code. `vectormap.json` also follows the OpenMapTiles schema. Credit "© OpenStreetMap contributors", and for the basemap also "© OpenMapTiles / OpenFreeMap". Anyone redistributing these files must pass the licence on with them. The other files carry the attributions listed above; see the repository root for the code licence and the full notice.
+
+## Rebuilding
+
+The committed JSON is the frozen dataset from the event (29–30 Sep 2026). `raw/` is not committed, and the upstream data has moved since then (OSM edits, new GTFS releases, weekly OpenFreeMap snapshots), so a re-run will not reproduce the files byte for byte and link ids may shift. Only `equipment.json` regenerates exactly, because its catalogue lives in the script. To change a metadata string in another file, edit it in place and update the generating script to match.
+
+One-time setup for the OSMnx steps (Python 3.9 or later):
 
 ```bash
-python3 apps/roads/tools/build_equipment.py                      # → public/cbd/equipment.json（清单写在脚本里）
-python3 apps/roads/tools/fetch_gtfs.py                           # GTFS 电车 3/、市区巴士 4/ → raw/gtfs/（约 105 MB，一两分钟）
-apps/roads/.venv/bin/python apps/roads/tools/build_transit.py    # → public/cbd/transit.json（约 20 秒）
+python3 -m venv apps/roads/.venv && apps/roads/.venv/bin/pip install -r apps/roads/requirements.txt   # osmnx, networkx, geopandas, shapely
 ```
 
-`transit.json`（服务日 工作日 2026-09-29、周六 10-03）：电车 22 条、巴士 25 条，站点 182 个；走向对上机动车路网的长度 90.6%。核对（09-29）：
-- 电车线路用到的 285 条路段里 98% 在 `network.json` 标了 `tram`（顺带验证第一期的电车标记）
-- 96 路有 1.3–1.6 km 对不上机动车路网，正是 Bourke St Mall 只走电车的段（`offnet_m`）
-- La Trobe St 上挂着 30、35、86 路；19 路工作日高峰每小时 13 班、96 路 10 班
-- 12 个站点 30 米内没有机动车路段（`road_link: null`），多在电车专用段上
+`fetch_scats.py`, `fetch_gtfs.py`, `build_flows.py`, `build_equipment.py`, `fetch_vectormap.py`, `fetch_weather.py` and `backtest_weather.py` use the standard library only and run with plain `python3`. Every script exits with code 1 when an input is missing and says which one.
 
 ```bash
-apps/roads/.venv/bin/python apps/roads/tools/fetch_osm.py --walk # OSM 行人路网 → raw/（主站拒连就加 --overpass <镜像>）
+PY=apps/roads/.venv/bin/python
 B=https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets
+
+# Road network and signals -> network.json, signals.json
+python3 apps/roads/tools/fetch_scats.py --sites                  # raw/victorian_traffic_signals.csv
+$PY apps/roads/tools/fetch_osm.py                                # raw/osm_drive.graphml, raw/osm_tram.geojson (about 30 s)
+$PY apps/roads/tools/build_network.py                            # about 2 s
+
+# Vehicle flows -> flows.json
+python3 apps/roads/tools/fetch_scats.py --range 2026-08-01..2026-09-27   # raw/cbd_VSDATA_*.csv: about 270 MB, 30 min; days already fetched are skipped
+python3 apps/roads/tools/build_flows.py
+
+# Equipment and transit -> equipment.json, transit.json
+python3 apps/roads/tools/build_equipment.py                      # catalogue is inline in the script
+python3 apps/roads/tools/fetch_gtfs.py                           # raw/gtfs/3.zip (tram), 4.zip (metro bus): about 105 MB
+$PY apps/roads/tools/build_transit.py                            # about 20 s
+
+# Walking -> walk.json, peds.json
+$PY apps/roads/tools/fetch_osm.py --walk                         # raw/osm_walk.graphml; add --overpass <mirror> if the main server refuses
 curl -sS -G "$B/pedestrian-counting-system-monthly-counts-per-hour/exports/csv" --data-urlencode "where=sensing_date>=date'2026-08-01' and sensing_date<=date'2026-09-27'" -o apps/roads/raw/peds.csv
 curl -sS "$B/pedestrian-counting-system-sensor-locations/exports/csv" -o apps/roads/raw/ped_sensors.csv
-apps/roads/.venv/bin/python apps/roads/tools/build_walk.py       # → public/cbd/walk.json、peds.json（约 5 秒）
-```
+$PY apps/roads/tools/build_walk.py                               # about 5 s
 
-`walk.json` 用 OSM（09-29 查：CBD 人行道 77 km 是单独画的 `footway=sidewalk`，只挂在道路 `sidewalk=*` 标签上的只有 3 km，所以不用 City of Melbourne 的 Pedestrian Network）。节点 5198、路段 6802（人行道 1948、人行横道 988、小路 1808、沿车行道 1844、步行街 214）。人行道 92% 挂上了车行道，其中 82% 在那个方向的左边。
-
-`peds.json`：bbox 内 71 个传感器（70 个挂上人行道），2026-08-01..09-27，工作日 39 天、周末 18 天。核对：Swanston St `Swa148_T` 工作日 17 点平均 1938 人（PRD-2 参考 09-27 周六 17 点 1626）；最忙的是 Collins St `Col620_T` 17 点 3299 人。
-
-真实矢量底图（T35，给网页 CITY 层当底图的水域 / 绿地 / 用地 / 铁路）：
-
-```bash
-python3 apps/roads/tools/fetch_vectormap.py                      # → public/cbd/vectormap.json（6 块瓦片，约 10 秒）
-```
-
-数据来自 OpenFreeMap 公共实例的 OpenMapTiles 矢量瓦片（`.pbf`，免 key、无请求上限），构建期拉下来解码成 lat/lon 存进仓库，网页运行时只取这一个同源文件、不连任何瓦片服务器（瓦片源记在文件的 `tile_source` 里）。只用标准库，不要 venv。核对（09-30，z14）：336 个面（水 25 / 草地 208 / 运动场 21 / 公共设施 23 / 用地 38 / 林地 14 / 公园 5）+ 328 条线（电车 146 / 铁路 175 / 河道 7），雅拉河最大的一块 17.1 万 m²、落在 bbox 南侧，铁路总长 54 km（Flinders St 车场那片多条股道各记一条）。
-
-| method | 怎么算 | 条数 |
-|---|---|---|
-| `sensor` | 传感器挂的那条人行道，8 周分小时平均 | 67 |
-| `street_interp` | 同名街道 800 m 内最近的传感器 | 1825 |
-| `class_default` | 所挨车行道等级的传感器中位数；不挨车行道的小路取全部传感器 25 分位 | 4910 |
-
-`equipment.json`：16 种设备（护栏 3、静态标志 9、VMS 2、箭头板 1、行人临时信号灯 1）。规格抄自 RPM Hire 官网产品页（每项 `url`，2026-09-29 查）；**`qty`、`day_rate_aud` 全是假设**（官网没有公开价格），列在每项的 `assumed` 里。标志编号只填查实的 T1-1、T2-16，其余 `null`。RPM 官网没有静态标志牌的产品页。
-
-VMS 每行 **10** 个字符（`chars_per_line`），和 T5 的 `readSigns()` / `/api/read` 一致（超了回 400）。RPM 官网同一页前后不一致：FAQ 写「12-13 characters per line up to 4 lines」，文案指南写「Up to 10 characters per line (including any spaces)」「Ideally, 3 lines of text and 8 characters per line」、每屏停 2 秒（闪烁 3 秒）——取 10，推荐值放在 `lines_recommended` / `chars_recommended` / `seconds_per_screen`。第一版误取了 FAQ 的 12，@jinmingq 在 #14 指出（09-29）。
-
-`flows.json` 里每条路段的 `method`：
-
-| method | 怎么算 | 准不准 |
-|---|---|---|
-| `detector_map` | 站点在 `build_flows.py` 的 `DETECTOR_MAP` 里、进口朝向对得上：直接用那几个检测器之和 | 最准；目前只有 2921 |
-| `site_split` | 终点是有 SCATS 数据的路口：车道数 × 该路口「车道检测器」的平均每小时流量（信号灯检测器基本一车道一个；车道检测器 = 日流量 ≥ 路口最大检测器的 50%） | 量级对；比实测车道偏低约 1/3 |
-| `street_interp` | 同名街道上下游相邻路段的每车道流量平均 × 本段车道数，沿街传 | 中 |
-| `class_default` | 同道路等级已测路段每车道流量的中位数 × 车道数 | 最粗；多是没信号灯的小街和没名字的转弯匝道 |
-
-核对（09-29，8 月 1 日–9 月 27 日，工作日 38 天、周末 18 天）：
-- 2921 东行进口（`detector_map`，7 号检测器）工作日 16–18 点 400–453 辆 / 小时，sim 实测约 450
-- 工作日 17 点每车道流量中位数：`detector_map` 431、`site_split` 277、`street_interp` 296、`class_default` 282
-- 工作日高峰 v/c 中位数 0.25、95 分位 0.57；超过通行能力的路段 5 条
-- 测试守住的：`site_split` 和 `detector_map` 每车道中位数相差不超过 2 倍；超过通行能力 1.2 倍的路段 ≤ 5%
-
-换街区：三条都加同一个 `--bbox 南,西,北,东`，`build_network.py` 再加 `--area <名>`。
-
-- 先看数据长什么样：`python3 apps/roads/tools/fetch_scats.py --day 2026-09-22`（远程只抽一天 CBD 的 SCATS 数据，约 4.6 MB，存到 `apps/roads/raw/`）
-- 站点表：`python3 apps/roads/tools/fetch_scats.py --sites`
-- 某个路口的检测器配置表：`python3 apps/roads/tools/fetch_scats.py --sheet 2921`
-
-## 怎么测
-
-`bash apps/roads/test.sh`。`public/cbd/` 下的文件还没生成时只做骨架检查；文件一出现，PRD 第 7 节的校验自动生效。
-
-## 临街建筑 buildings.json（T11，需求见 issue #21）
-
-```bash
-B=https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets
+# Buildings -> buildings.json
 curl -sS -G "$B/2018-building-footprints/exports/geojson" --data-urlencode "where=in_bbox(geo_point_2d, -37.8235, 144.9480, -37.8060, 144.9760)" -o apps/roads/raw/com_footprints_2018.geojson
 curl -sS -G "$B/buildings-with-name-age-size-accessibility-and-bicycle-facilities/exports/csv" --data-urlencode "where=year(census_year)=2024 and latitude>=-37.8235 and latitude<=-37.8060 and longitude>=144.9480 and longitude<=144.9760" --data-urlencode "select=census_year,building_name,predominant_space_use,number_of_floors_above_ground,latitude,longitude" -o apps/roads/raw/com_buildings_clue.csv
-apps/roads/.venv/bin/python -u apps/roads/tools/fetch_buildings.py   # 第一次拉 OSM（逐行打印在试哪台服务器），之后只用 raw/ 重算；--refresh 重新拉
+$PY -u apps/roads/tools/fetch_buildings.py                       # first run downloads OSM buildings (prints each server it tries); --refresh downloads again
+
+# Vector basemap -> vectormap.json
+python3 apps/roads/tools/fetch_vectormap.py                      # 6 z14 tiles, about 10 s
+
+# Weather back-test -> weather_hourly.json, weather_backtest.json
+#   First download the BoM files by hand into raw/: IDCJDW3033.202608.csv and IDCJDW3033.202609.csv from
+#   https://www.bom.gov.au/climate/dwo/2026MM/text/IDCJDW3033.2026MM.csv (BoM does not allow automated downloads).
+#   Also needs the SCATS range and raw/peds.csv from above.
+python3 apps/roads/tools/fetch_weather.py                        # date window defaults to the traffic data in raw/
+python3 apps/roads/tools/backtest_weather.py                     # about 20 s
 ```
 
-结果（09-29）：2508 栋，910 KB；用途 office 395、residential 488、public 301、retail 200、education 98、hotel 90、parking 35、other 901（36%；只用 OSM 时 1898、76%）；用途来源 OSM 610、普查 997、没有 901；2065 栋有 30 m 内的临街路段（每栋最多记 4 条）。
+Handy for exploring: `fetch_scats.py --day 2026-09-22` pulls one day of CBD SCATS rows (about 4.6 MB) out of the statewide monthly archive, and `fetch_scats.py --sheet 2921` extracts one junction's detector configuration sheet.
 
-- 来源：OSM `building=*`（轮廓、名字、用途，ODbL）+ City of Melbourne「2018 Building Footprints」（高度，CC BY，5923 块）+ City of Melbourne「Building information」CLUE 普查 2024 年（用途、地上层数，CC BY）
-- 用途：OSM 标签能判断的优先（`amenity` / `shop` / 具体的 `building` 值）；OSM 只有 `building=yes` 这类判成 other 的，用代表点落在楼内的普查记录的 `predominant_space_use`（多条取最多的），按 `CLUE_USE` 关键词映射。`Student Accommodation` 归住宅、`Commercial Accommodation` 归酒店；空置、在建、仓储、设备间、批发、制造留在 other。OSM 没有楼层数的也用普查的 `number_of_floors_above_ground` 补
-- **高度优先级和 issue #21 写的不同：市政实测 → OSM `height` → OSM 楼层 × 3.2 → 默认 12 m。** 原因：CBD 高楼在 OSM 里外轮廓的 `height` 常只是裙楼、塔楼另画成 `building:part`——Eureka Tower OSM 20 m、市政 298 m（实际约 297 m）；Rialto Towers OSM 20 m、市政 249 m（实际约 251 m）。297 栋两边都有高度的楼，相对差中位数 14%，差 2.5 倍以上的 24 栋基本都是这种裙楼 / 塔楼情况
-- 市政高度 = 代表点落在这栋 OSM 楼里的各部分 `footprint_max_elevation` 最大值 − `structure_min_elevation`（楼顶海拔 − 地面海拔）；市政数据是 2018 年的，之后新建的楼走 OSM 或默认值
-- 高度来源：市政 2108、OSM height 30、OSM 楼层 32、默认 338（非默认 87%）
-- 跨 bbox 边界的楼不要（验收要求所有点在 bbox 内）；只取外轮廓，天井不要；轮廓抽稀约 0.5 m
-- 测试单独放 `tests/test_buildings.py`（不并进 `test_roads.py`，免得和 T7 的 PR #14 冲突）
+**Another district.** Pass the same `--bbox S,W,N,E` to `fetch_scats.py`, `fetch_osm.py`, `build_network.py`, `build_transit.py`, `fetch_buildings.py` and `fetch_vectormap.py`, and the same `--area <name>` to every script that writes `public/<area>/` (`build_flows.py` and `build_walk.py` take only `--area`). Check the output sizes first: walk and peds are already close to the 2 MB budget.
 
-## 天气回测（T31，需求见 `docs/arch/T31-weather-backtest-PRD.md`）
+## Methods
+
+### Road network (`build_network.py`)
+
+- Lanes, speed and bike lanes are computed per segment on the **unsimplified** OSMnx graph, because OSM tags are per way and turn into lists after simplification. Lanes per direction come from `lanes` on one-way roads, otherwise `lanes:forward` / `lanes:backward`, otherwise half the total rounded up, otherwise a road-class default (2 for primary and above, 1 otherwise). Missing `maxspeed` defaults to 40 km/h.
+- Bike lanes are read by side under left-hand traffic: forward traffic looks at `cycleway:left`, reverse traffic at `cycleway:right`; one-way roads count both.
+- The graph is then simplified to junction-to-junction links: lanes take the minimum along the link (the bottleneck), free-flow times are summed, and a link has a bike lane when more than half its length does. `speed_kmh` is therefore the time-weighted equivalent speed `len_m / t0_s` and need not be an integer.
+- Only the largest strongly connected component is kept, so the engine always finds a detour: the default bbox has 904 nodes after simplification and 99 are dropped (dead ends at the bbox edge).
+- Each SCATS site snaps to the nearest node within 30 m. Capacity is `cap_vph = lanes × 1800 × g`, where `g = 0.5` when the end node has a signal within 30 m (SCATS `INT` / `POS`, or OSM `traffic_signals`) and 0.9 otherwise. Flashing-amber crossings (`FLASH PX`) do not count as signals.
+- A link is tagged `tram` when at least 50% of its length lies within 12 m of OSM tram track.
+
+### Vehicle flows (`build_flows.py`)
+
+Eight weeks of 15-minute SCATS counts (1 Aug to 27 Sep 2026; 31 Aug is missing upstream and the 25 Sep public holiday is excluded; 38 weekdays and 18 weekend days used) are averaged into weekday and weekend hourly profiles. Negative counts mean a fault, and any hour with a faulty slot is dropped. Each link gets the best method available:
+
+| `method` | How the flow is produced | Links |
+|---|---|---|
+| `detector_map` | The site and approach heading are in `DETECTOR_MAP`: the sum of those detectors, from the configuration sheet. Most accurate; site 2921 only | 2 |
+| `site_split` | The link ends at a junction with SCATS data: lanes × the mean hourly flow of that junction's lane detectors | 384 |
+| `street_interp` | Mean per-lane flow of adjacent upstream and downstream links on the same named street × lanes, propagated along the street | 679 |
+| `class_default` | Median per-lane flow of measured links of the same road class × lanes. Coarsest; mostly minor unsignalised streets and unnamed turning slips | 448 |
+
+**Which detectors count as lanes.** SCATS detectors cannot be told apart by flow alone. At site 2921, detector 1 is the Swanston St bike counter and logs about 5,500 a day, as many as a traffic lane. Splitting the junction total by lanes would count bikes and trams as cars and overestimate by 2–3 times, while averaging every detector would pull per-lane flow down to about 40% of measured, because tram and push-button detectors carry little. A detector therefore counts as a lane only if its weekday daily count is at least 50% of the junction's busiest detector and at least 300.
+
+Checks on 29 Sep: the 2921 eastbound approach (`detector_map`, detector 7) carries 400–453 veh/h between 16:00 and 18:00 on weekdays, against about 450 in `apps/sim`. Median per-lane weekday flow at 17:00 is 431 (`detector_map`), 277 (`site_split`), 296 (`street_interp`) and 282 (`class_default`). Weekday peak v/c has a median of 0.25 and a 95th percentile of 0.57; 5 links exceed capacity.
+
+### Transit (`build_transit.py`)
+
+- Service days are a normal weekday (Tue 29 Sep 2026) and a Saturday (3 Oct 2026), computed from `calendar.txt` and `calendar_dates.txt`. Only trips that stop inside the bbox are kept, grouped by mode, route number and direction.
+- For each group the most common shape is clipped to the bbox and sampled every 10 m. Each sample matches a directed link within 15 m whose bearing differs by at most 45°, and a link needs at least 2 hits, which avoids false matches at junctions. Unmatched length is reported as `offnet_m`.
+- Trips per hour use the departure time at the first stop inside the bbox. Each stop attaches to the nearest link within 30 m, otherwise `road_link: null`.
+- Result: 90.6% of route length matched. 98% of the 285 links used by tram routes were already tagged `tram` in `network.json`, an independent check of the tram tagging. Route 96 has 1.3–1.6 km off the road network, which is the tram-only Bourke St Mall. Routes 30, 35 and 86 run on La Trobe St; route 19 runs 13 trips an hour and route 96 runs 10 in the weekday peak. 12 stops have no road link within 30 m, mostly on tram-only sections.
+
+### Walking network and pedestrian volumes (`build_walk.py`)
+
+- OSM was chosen over the City of Melbourne Pedestrian Network because CBD sidewalks are mapped as separate ways: 77 km of `footway=sidewalk`, against 3 km recorded only as `sidewalk=*` tags on roads (checked 29 Sep).
+- Indoor corridors, parking aisles and driveways (about 700 links) are dropped: roadworks do not affect them, and dropping them keeps `peds.json` under 2 MB. The graph is made undirected, simplified where `kind` changes, and cut to its largest connected component.
+- `kind`: sidewalk 1,948, crossing 988, path 1,808, other (walking along a roadway) 1,844, mall 214. Crossings are `signal`, `zebra` or `uncontrolled`.
+- Each sidewalk attaches to a parallel road link within 25 m. Under the Australian keep-left rule a sidewalk belongs to the direction of travel it lies to the left of (`side: "left"`, found by cross product); a one-way road with no reverse link can give `right`. Crossings attach to the link they cross. 92% of sidewalks attach to a roadway, and 82% of those are on the left of that direction.
+- Pedestrian volumes come from 71 sensors in the bbox (70 attached to a walking link), 1 Aug to 27 Sep 2026, 39 weekdays and 18 weekend days:
+
+| `method` | How the volume is produced | Links |
+|---|---|---|
+| `sensor` | The walking link a sensor is attached to (within 40 m): 8-week hourly mean | 67 |
+| `street_interp` | The nearest sensor on the same named street, within 800 m | 1,825 |
+| `class_default` | Median of the sensors beside the same road class; links not beside a roadway take the 25th percentile of all sensors | 4,910 |
+
+Checks: Swanston St sensor `Swa148_T` averages 1,938 people at 17:00 on weekdays (the phase-2 spec quotes 1,626 for Saturday 27 Sep at 17:00); the busiest is Collins St `Col620_T` with 3,299 at 17:00.
+
+### Buildings (`fetch_buildings.py`)
+
+- Outlines, names and uses come from OSM `building=*`, fetched directly from Overpass with a hard timeout per server and failover across four servers. Heights come from the City of Melbourne 2018 Building Footprints (5,923 parts), and use and floor counts from the CLUE census 2024.
+- **Height priority: measured municipal height, then OSM `height`, then OSM `building:levels` × 3.2 m, then a 12 m default.** For CBD towers the `height` on the OSM outer outline is often only the podium, with the tower drawn as a separate `building:part`: Eureka Tower is 20 m in OSM and 298 m in the City of Melbourne data (actual about 297 m); Rialto Towers is 20 m in OSM and 249 m (actual about 251 m). Across the 297 buildings with both heights the median relative difference is 14%, and the 24 that differ by more than 2.5 times are mostly this podium-and-tower case. The municipal height is the highest `footprint_max_elevation` of the parts inside the OSM outline minus `structure_min_elevation`; buildings built after 2018 fall back to OSM or the default.
+- Height sources: municipal 2,108, OSM height 30, OSM levels 32, default 338 (87% not default).
+- Use: OSM tags win where they are specific (`amenity`, `shop`, a specific `building` value). For buildings OSM leaves as `other` (for example `building=yes`), the census records inside the outline give the most common `predominant_space_use`, mapped by keyword in `CLUE_USE`: student accommodation counts as residential and commercial accommodation as hotel; vacant, under construction, storage, plant rooms, wholesale and manufacturing stay `other`. Census floor counts fill missing OSM levels.
+- Result: 2,508 buildings. Uses: other 901 (36%; 1,898 or 76% with OSM alone), residential 491, office 404, public 297, retail 194, education 94, hotel 93, parking 34. 2,065 buildings have a frontage link within 30 m (at most 4 recorded each).
+- Buildings that cross the bbox edge are dropped (every point must be inside the bbox), only outer rings are kept, and outlines are simplified to about 0.5 m.
+
+### Equipment (`build_equipment.py`)
+
+16 items: barriers 3, static signs 9, VMS 2, arrow board 1, portable pedestrian signals 1. Specifications are copied from RPM Hire product pages (each item's `url`, checked 29 Sep 2026). **`qty` and `day_rate_aud` are all assumptions**, because RPM Hire publishes no prices; each item lists them in `assumed`. Sign codes are filled in only where verified (T1-1 Roadwork Ahead, T2-16 End Roadwork) and are `null` otherwise. RPM Hire has no product page for static signs, so their `url` is `null`.
+
+VMS lines hold **10** characters (`chars_per_line`), matching the sign-reading limit in `apps/api` `readSigns()` / `/api/read` (longer lines get a 400). The RPM Hire page contradicts itself: its FAQ says "12-13 characters per line up to 4 lines", while its message guide says "Up to 10 characters per line (including any spaces)", ideally 3 lines of 8 characters, 2 seconds per screen (3 when flashing). The guide's 10 is used, and its recommendations are kept in `lines_recommended`, `chars_recommended` and `seconds_per_screen`.
+
+### Vector basemap (`fetch_vectormap.py`)
+
+OpenMapTiles vector tiles (`.pbf`) from the OpenFreeMap public instance (no key, no request cap) are downloaded at build time and decoded to lat/lon by a minimal protobuf / Mapbox Vector Tile decoder written for this script (varint, zigzag, cursor geometry). At run time the page fetches only this one same-origin file and contacts no tile server. The snapshot used is recorded in `tile_source`. Output order is fixed so re-runs diff cleanly.
+
+At z14 (checked 30 Sep) the file holds 336 polygons (water 25, grass 208, sport 21, civic 23, urban 38, wood 14, park 5, aeroway 1, sand 1) and 328 lines (tram 146, rail 175, waterway 7). The largest Yarra River polygon is 171,000 m² and lies in the south of the bbox; total rail length is 54 km, because each track in the Flinders St yards is a separate line.
+
+### Weather back-test (`fetch_weather.py`, `backtest_weather.py`)
+
+The web app's illustrative micro-simulation uses invented weather multipliers (`WXP` in `apps/web/src/js/4-sim.js`). This study measured what rain actually did to CBD traffic between 1 Aug and 27 Sep 2026, excluding the school-holiday week of 21–27 Sep. Spec: [docs/hackathon/specs/T31-weather-backtest-PRD.md](../../docs/hackathon/specs/T31-weather-backtest-PRD.md).
+
+**Design.** A wet hour (model precipitation ≥ 0.1 mm/h, confirmed by BoM) is compared with the median of dry hours for the same sensor, day of week and hour. Each day contributes the baseline-weighted median log ratio, days are averaged, and 95% intervals come from resampling days (2,000 draws). Cells with fewer than 3 days get no number. A placebo test treats randomly chosen dry days as fake wet days, each left out of its own baseline, and repeats the draw 25 times.
+
+**Results** (daytime 07:00–19:00, ratio to the dry baseline):
+
+| Mode | Wet (≥ 0.1 mm/h, 13 days) | Rain (≥ 1 mm/h, 4 days) |
+|---|---|---|
+| Cars, 540 CBD lane detectors | 0.997 [0.989, 1.005] | 0.998 [0.985, 1.015] |
+| Bikes, 4 detectors at site 2921 | 0.924 [0.861, 0.986] | 0.965 [0.838, 1.079] |
+| Pedestrians, 5 City of Melbourne counters | 0.875 [0.813, 0.933] | 0.681 [0.50, 0.911] |
+
+- Car volumes do not change measurably in rain. The capacity proxy (busiest 15-minute flow in the weekday morning peak at the top 10% of CBD lane detectors) is 0.979 [0.971, 0.986], an upper bound on the effect.
+- The bike placebo averages 0.966, so the method reads bikes about 3% low; the real bike effect is about −5%.
+- Pedestrians fall by about 12% in any rain and by about a third in heavier rain. On Monday 10 Aug (24.4 mm at BoM) the morning peak saw pedestrians at 0.44, bikes at 0.78 and cars at 1.00.
+- Against `WXP`: the storm `rate` of 0.9 is too strong for cars (measured 0.998); for bikes and pedestrians 0.9 lies inside the wide rain intervals, so one shared `rate` cannot express the difference between modes. The storm capacity factor `T` of 1.4 (capacity × 0.71) is far stronger than the measured × 0.98. In model-only fog, car volumes are 3% higher, because fog falls on calm, clear, cold mornings; this is not causal. There was no flood, heat or high-wind sample in these 8 weeks.
+
+**Caveats.**
+
+- Open-Meteo's grid point is about 3 km north-west of the CBD (-37.786, 144.940), and model rain timing is unreliable. The 33 hours where the model reports rain but BoM has under 0.2 mm for that 24 h period count as false alarms (for example the morning of 19 Aug) and are not used as wet hours.
+- Traffic hour h is matched to Open-Meteo time T = h + 1, because precipitation at T is the previous hour's total. Checking with the bike rain effect, T = h, h + 1 and h + 2 all fall within each other's intervals, so the data cannot say which alignment is best.
+- Baselines are split by day of week. With a weekday / weekend split only, the placebo read 4–11% low, because fully dry days included more Sundays and Mondays run about 6% below Tuesday to Thursday.
+- SCATS has counts only, no speed or occupancy, so the speed, deceleration and wobble parts of `WXP` cannot be tested, and the capacity proxy mixes "fewer cars" with "slower cars".
+- `car` uses all 540 CBD lane detectors chosen by the flow heuristic, not checked lane by lane. `car_2921` uses the 3 detectors checked against the configuration sheet and agrees.
+
+## Schema notes
+
+Formats for `network.json`, `flows.json`, `signals.json`, `transit.json`, `walk.json` and `peds.json` are specified in [module interfaces](../../docs/reference/interfaces.md) and in the original specs ([`PRD.md`](PRD.md) section 5, [`PRD-2.md`](PRD-2.md) section 3). The tests in `tests/` are the executable contract for all 11 files. Fields may be added at any time; renaming or removing a field, or changing a unit, needs a `version` bump and a matching change in every consumer.
+
+- **Ids.** Nodes `n<osm node id>`; links `l<from osm id>_<to osm id>[_<key>]`; walking nodes `w<osm id>` and links `wl<a>_<b>[_<key>]`; stops `st_<gtfs id>` (tram) or `sb_<gtfs id>` (bus); routes `tram_<number>` / `bus_<number>`; buildings `w<osm way id>` or `r<osm relation id>`.
+- **Profiles.** Every 24-value array is indexed by hour (0 = 00:00–01:00) under `days.wd` / `days.we` (or `trips.wd` / `trips.we`), with non-negative numbers.
+- **`buildings.json`.** `buildings[]` = `{id, name, use, height_m, levels, height_src, footprint[[lat, lon]], frontage[{link, dist_m}]}`. `use` ∈ `retail / office / residential / education / public / parking / hotel / other`; `height_src` ∈ `com / osm_height / osm_levels / default`. The format began as the draft in issue #21 section 5. No other fields are allowed (a test guards against personal data).
+- **`equipment.json`.** `items[]` = `{id, category, name, effect, applies_to, …specifications, qty, day_rate_aud, assumed[], url}`. `category` ∈ `barrier / sign / vms / arrow_board / ped_signal`; `effect` ∈ `close / route_vehicles / route_peds / warn / message / control_crossing`. Barriers have `unit_len_m`; VMS have `lines` and `chars_per_line` (must stay 10).
+- **`vectormap.json`.** Top-level keys are exactly `version, area, bbox, generated, zoom, tile_source, sources, assumptions, polygons, lines`. `polygons[]` = `{kind, polys: [[ring of [lat, lon]], …]}` (first ring outer, the rest holes, not closed); `lines[]` = `{kind, pts: [[[lat, lon], …], …]}`. Polygon kinds and line kinds (`waterway, rail, transit`) are written in a fixed order.
+- **Weather files.** `weather_hourly.json` keeps the Open-Meteo `hourly` arrays plus `grid`, `units`, `notes` and the traffic-data coverage it was built against. `weather_backtest.json` holds `results`, `capacity_proxy`, `placebo`, `cases`, `wxp_compare` and an `audit` block listing every baseline, wet, rain, fog and false-alarm hour, so the tests can recompute the classification independently.
+
+## Testing
 
 ```bash
-python3 apps/roads/tools/fetch_weather.py       # Open-Meteo 逐小时天气 → public/cbd/weather_hourly.json（免费、不要 key；日期默认按 raw/ 里的交通数据定）
-python3 apps/roads/tools/backtest_weather.py    # → public/cbd/weather_backtest.json（约 20 秒）
+bash apps/roads/test.sh     # Python 3.9+, standard library only; 104 assertions on the committed files
 ```
 
-前置：SCATS 原始数据（`fetch_scats.py --range 2026-08-01..2026-09-27`）、行人计数 `raw/peds.csv`（见上面 T7 的 curl），以及 **BoM 逐日观测手动下载**到 `raw/`（`IDCJDW3033.202608.csv`、`IDCJDW3033.202609.csv`，浏览器打开 `https://www.bom.gov.au/climate/dwo/2026MM/text/IDCJDW3033.2026MM.csv`；BoM 不支持自动抓取，© Commonwealth of Australia，不提交）。
+The four test files validate the committed JSON rather than re-running the pipeline:
 
-**结论**（2026-08-01..09-27，剔除 09-21..09-27 学校假期周；BoM 核过的湿小时 vs 同一星期几同一小时的晴天中位数）：
-- 车：下雨（≥ 0.1 mm/h，13 天）白天车流 **0.997 [0.989, 1.005]**，≥ 1 mm/h（4 天）0.998——8 周里看不出变化；饱和进口高峰最大 15 分钟流量早高峰 0.979 [0.971, 0.986]（上限）
-- 自行车（2921 的 4 个检测器）：0.924 [0.861, 0.986]；安慰剂平均 0.966，方法对自行车约偏低 3%，所以实际约 −5%
-- 行人（5 个计数器）：0.875 [0.813, 0.933]；≥ 1 mm/h 时 0.681 [0.50, 0.91]；08-10 周一早高峰（BoM 24.4 mm）行人 0.44、自行车 0.78、车 1.00
-- 页面 `WXP`：雷暴 `rate .9` 对车过强、对行人偏弱，一个共用的 `rate` 表达不了；`T 1.4`（通行能力 ×0.71）远强于实测（×0.98）；雾（仅模型）车流反而 +3%（雾多在无风晴冷的早上，不是因果）；内涝、高温、大风这 8 周没有样本
+- **Contract and referential integrity**: unique ids, every `from` / `to`, `road_link`, `walk_link`, route and stop reference exists, 24 non-negative values per profile, `coverage` totals add up, file sizes under 2 MB (`scripts/check.sh` also enforces this for every JSON file under `public/`).
+- **Connectivity**: the largest strongly connected component holds at least 90% of road nodes (iterative Kosaraju), and the walking network is at least 90% connected (union-find).
+- **Calibration and domain sanity**: `site_split` and `detector_map` per-lane medians within 2 times of each other; at most 5% of links above 1.2 times capacity; La Trobe St flows of 100–2,000 veh/h at 17:00; at least 80% of tram-route links tagged `tram`; a pedestrian peak of 500–10,000 per hour; Eureka Tower and Rialto Towers at least 200 m; the Yarra in the south of the bbox; plausible rail lengths; VMS 10 characters per line.
+- **Reverse assertions**: no keys or tokens, no personal-data fields, no external URL in `vectormap.json` other than the tile source; the weather test recomputes dry baseline hours from `weather_hourly.json` and checks that excluded days never leak into any result.
 
-口径和坑：
-- 数据：天气 Open-Meteo `ecmwf_ifs`（**Weather data by Open-Meteo.com**，CC BY 4.0）；核对 BoM 墨尔本 Olympic Park；车流 DataVic SCATS；行人 City of Melbourne
-- Open-Meteo 格点在 CBD 西北约 3 km（-37.786, 144.940）；模型的雨点时间对不准：模型报雨但 BoM 那 24 h < 0.2 mm 的 33 小时算误报（例 08-19 早上），不当雨天用
-- 时间对齐：交通第 h 小时对 Open-Meteo T = h+1（T 的降水是前一小时累计）；拿自行车雨天效应核对，T = h / h+1 / h+2 三种差别在区间内，核不出哪种更对
-- 基线按**星期几**分：只分工作日 / 周末时安慰剂偏低 4–11%（全天晴的日子里周日多，周一比周二到周四低约 6%）；安慰剂用「留一天」基线，和真雨天对称
-- 每天取基线加权中位数的 log 比，再对天平均；95% 区间按天重抽样 2,000 次；`n_days < 3` 不给数
-- 没有速度、占有率数据：`WXP` 的 `v` `ped` `bike` `b` `wob`（速度 / 减速 / 摇摆）测不了；通行能力近似把「车少了」和「开慢了」混在一起，只当上限
-- `car` 用全 CBD 540 个车道检测器（按流量启发式挑，没逐个核车道）；`car_2921` 用配置表核过的 3 个检测器，结论一致
+When a file is absent the matching checks are skipped and only the skeleton is checked. `test.sh` gives each file 90 s and always ends with `N passed, M failed`, which `scripts/check.sh` parses.
 
-## 对外接口
+## Known limitations
 
-静态文件，格式见 `docs/contract.md`「路网数据文件」一节（和 `PRD.md` 第 5 节一致）。线上和本地都从 `/roads/public/cbd/<文件>` 读。`buildings.json` 格式是 issue #21 第 5 节的草案 v1，契约那一行由 lead 加。
+- `detector_map` covers only site 2921. `site_split` reads about a third below measured per-lane flow; mapping more junctions from their configuration sheets would fix that.
+- 193 links have no street name (mostly turning slips), so they cannot use `street_interp`.
+- 27 of the 151 signal sites have no node within 30 m (17 pedestrian signals `POS`, 5 flashing crossings `FLASH PX`, 5 junctions `INT`) and have `node: null`.
+- Dual carriageways with a central median (for example La Trobe St, with trams in the middle) are two one-way roads in OSM, so one junction is 2–4 nodes. They all carry the same site number; the short connectors between them are not approaches and are interpolated.
+- Detector 3 at site 2921 (Swanston St southbound left turn) cannot be matched: the OSM drive network has no link entering the junction southbound on Swanston St.
+- `walk.json` and `peds.json` are close to the 2 MB budget (1.7 and 1.8 MB). For a larger area, `peds.json` could store a table of distinct curves plus a reference per link (there are only 77 distinct curves).
+- The PTV GTFS bundle stores each sub-feed compressed, so a sub-feed cannot be read by Range and must be downloaded whole (tram 14 MB, bus 87 MB). Sub-feed 3 is tram and 4 is metropolitan bus, confirmed by `route_type` in `routes.txt`.
 
-## 外部 API
+## Implementation notes
 
-不调接口，全是提前下载的公开数据，来源和坑见 `PRD.md` 第 6 节。不需要任何 key。
+- OSMnx 2.x takes the bbox as `(west, south, east, north)`; this repo's `--bbox` is `south,west,north,east`, and the scripts convert.
+- OSMnx writes its Overpass cache to `cache/` in the current directory by default, which would land outside the module when run from the repo root. `fetch_osm.py` pins it to `raw/osm_cache/`.
+- The main Overpass server sometimes refuses connections and mirrors time out at 180 s. `fetch_osm.py` raises the timeout to 300 s and takes `--overpass <url>`; `fetch_buildings.py` tries each server once with a hard timeout.
+- `fetch_scats.py` reads remote ZIP members through a seekable HTTP Range wrapper. The buffer must be large (4 MB): every read is one HTTPS request, and at 64 KB one day took about 2 minutes instead of a few seconds. `fetch_gtfs.py` reuses the same reader. Both write to `.part` first and rename, so an interrupted run never leaves half a file.
+- Do not name a directory `data/`: the repository `.gitignore` ignores every `data/`.
 
-⚠️ **许可**：`public/cbd/` 下的 `network.json`、`walk.json`、`buildings.json`、`vectormap.json` 由 OpenStreetMap 衍生（`vectormap.json` 还带 OpenMapTiles 的 schema，图层数据来自 OpenFreeMap），按 **ODbL 1.0 share-alike** 分发，**不是 MIT**（署名「© OpenStreetMap contributors」；矢量底图另加「© OpenMapTiles / OpenFreeMap」）。要再分发这些文件，得连许可一起给。其余数据和代码的许可见 `docs/submission.md` 与根 `README.md`。
+## Module layout
 
-## 结构
-
-| 文件 | 一句话 |
+| Path | Purpose |
 |---|---|
-| `PRD.md` | T3 的需求说明 |
-| `public/cbd/` | 生成的 `network.json`、`flows.json`、`signals.json` |
-| `tools/fetch_scats.py` | 远程抽 SCATS 一天 / 站点表 / 单个路口配置表 |
-| `tools/fetch_osm.py` | 拉 OSM 机动车路网（不简化）和电车轨道到 `raw/` |
-| `tools/build_network.py` | 生成 `network.json` + `signals.json` |
-| `tools/build_flows.py` | 生成 `flows.json`（只用标准库） |
-| `tools/build_equipment.py` | 生成 `equipment.json`（设备清单和来源写在脚本里） |
-| `tools/fetch_gtfs.py` | 从 GTFS 总包里只抽电车、市区巴士两个子包 |
-| `tools/build_transit.py` | 生成 `transit.json`：线路走向对到有向路段、每小时班次、站点 |
-| `tools/fetch_weather.py` | Open-Meteo 逐小时天气 → `weather_hourly.json`（只用标准库） |
-| `tools/backtest_weather.py` | 天气回测 → `weather_backtest.json`（只用标准库） |
-| `tests/test_weather.py` | 天气两个文件的校验和反向断言 |
-| `tools/build_walk.py` | 生成 `walk.json` + `peds.json`：人行道挂车行道和左右、传感器挂人行道、插值 |
-| `tools/fetch_vectormap.py` | 拉 OpenFreeMap 的 OpenMapTiles 矢量瓦片，解码出真实矢量底图图层 → `vectormap.json`（只用标准库，含最小 MVT 解码器） |
-| `requirements.txt` | 只有 osmnx（带 networkx、geopandas、shapely） |
-| `tests/test_roads.py` | 三个文件的校验 |
-| `tests/test_vectormap.py` | `vectormap.json` 的校验（kind 枚举 / 坐标范围 / 几何有效性）与反向断言 |
-| `raw/` | 原始数据（已 gitignore，不提交） |
+| `README.md` | This file |
+| `PRD.md` | Original phase-1 spec from the hackathon (network, flows, signals); historical record |
+| `PRD-2.md` | Original phase-2 spec by @jinmingq (equipment, transit, walking, pedestrians); historical record |
+| `requirements.txt` | `osmnx>=2.0,<3` (brings networkx, geopandas, shapely, requests) |
+| `test.sh` | Runs `tests/test_*.py` with a 90 s limit each |
+| `tools/fetch_scats.py` | SCATS days or ranges, the signal site list, or one junction's configuration sheet, read remotely by HTTP Range |
+| `tools/fetch_osm.py` | OSM drive network (unsimplified) and tram tracks, or the walking network with `--walk` |
+| `tools/build_network.py` | `network.json` + `signals.json` |
+| `tools/build_flows.py` | `flows.json` (standard library only) |
+| `tools/fetch_gtfs.py` | Extracts the tram and metropolitan bus sub-feeds from the PTV GTFS bundle |
+| `tools/build_transit.py` | `transit.json`: routes map-matched to directed links, hourly trips, stops |
+| `tools/build_walk.py` | `walk.json` + `peds.json`: sidewalk-to-road attachment and side, sensor attachment, imputation |
+| `tools/fetch_buildings.py` | `buildings.json`: OSM outlines, municipal heights, census use, frontage links |
+| `tools/build_equipment.py` | `equipment.json` from the inline catalogue |
+| `tools/fetch_vectormap.py` | `vectormap.json`: OpenFreeMap tiles decoded by a built-in MVT decoder |
+| `tools/fetch_weather.py` | `weather_hourly.json` from Open-Meteo (standard library only) |
+| `tools/backtest_weather.py` | `weather_backtest.json` (standard library only) |
+| `tests/test_roads.py` | Network, flows, signals, equipment, transit, walk and peds |
+| `tests/test_buildings.py` | `buildings.json`, including landmark and personal-data checks |
+| `tests/test_vectormap.py` | `vectormap.json`: schema, kind order, geometry validity, external-URL check |
+| `tests/test_weather.py` | Both weather files, with independent recomputation of the dry baseline |
+| `public/cbd/` | The 11 generated JSON files (plus an empty `.gitkeep`) |
+| `raw/` | Raw downloads (gitignored, not committed) |
 
-## 本模块固定模式
+## History
 
-- 区域用 `--bbox` 参数传，不写死
-- 路段 id 从 OSM id 派生，重跑时保持稳定
-- 目录别叫 `data/`（仓库 `.gitignore` 忽略所有 `data/`）
-
-- OSMnx 2.x 的 bbox 是 `(西, 南, 东, 北)`，本仓库 `--bbox` 是 `南,西,北,东`，脚本里转换
-- OSMnx 默认把 Overpass 缓存写到**当前目录**的 `cache/`，在仓库根跑会越界（`check [3]` ❌）→ `fetch_osm.py` 已固定到 `raw/osm_cache/`
-- 车道、自行车道在**不简化**的图上逐段算好再简化（简化后标签会混成列表）；澳洲靠左，双向路正向看 `cycleway:left`、反向看 `cycleway:right`
-
-## 已知问题
-
-- 只保留最大强连通块：CBD 默认 bbox 简化后 904 个节点，裁掉 99 个 bbox 边上开不出去的（09-29 13:50）
-- `speed_kmh` 是路段内多个限速按时间加权的等效速度（`len_m / t0_s`），不一定是整数
-- 路段车道数取沿途最小值（瓶颈）；约 190 条路段没有街名（多是转弯匝道）
-- 151 个信号灯站点里 27 个在 30 米内没有节点（17 个行人灯 POS、5 个闪黄灯、5 个路口 INT），`node` 为 `null`
-- SCATS 检测器不能按流量大小区分车 / 自行车 / 电车：2921 的 1 号是 Swanston 自行车检测器，一天 5500 次，和车道一样多 → `site_split` 用「车道检测器平均 × 车道数」，不用「路口总量按车道分摊」（后者会把自行车、电车全算成车，高估 2–3 倍）；也不能把所有检测器一起平均（电车、行人按钮流量小，会把每车道流量拉低到实测的 40%）
-- GTFS 总包里的子包是压缩存放的，不能再往里 Range，只能整个子包下（电车 14 MB、巴士 87 MB）；子包编号 3 电车、4 市区巴士，按 `routes.txt` 的 `route_type` 核对过
-- Overpass 主站偶尔拒连、镜像 180 秒读超时：`fetch_osm.py` 超时已放到 300 秒，可用 `--overpass` 换镜像（09-29 kumi 超时，主站重试成功）
-- `walk.json`、`peds.json` 离 2 MB 上限不远（1.7 / 1.8 MB；`apps/<模块>/public/` 下的 .json 上限 2MB 见 D-0929-1430，其余文件仍 1MB）：已去掉室内通道、停车场过道、私家车道（约 700 条）；换更大的街区要先看体积，超了的备选是 peds 改成「曲线表 + 路段引用」（只有 77 种不同曲线）
-- `fetch_scats.py` 远程读 zip 时缓冲要大（4 MB）：每次读都是一次 HTTPS Range 请求，64 KB 时一天要 2 分钟，4 MB 时几秒
-- 双向有中央隔离带的路（如 La Trobe，电车在中间）在 OSM 里是两条单行道，一个路口由 2–4 个节点组成；这些节点都标同一个站点号，节点之间的连接段不算进口，走插值
-- 2921 的 3 号检测器（Swanston 南行左转）挂不上：OSM 机动车路网里没有 Swanston 从北往南进这个路口的路段
+Built during the FEIT Hackathon Festival, 29–30 Sep 2026: the road network and 8 weeks of SCATS flows (PR #9), the phase-2 spec (#12, @jinmingq), equipment, transit and walking data (#14), buildings (#33, #40), the weather back-test (#92) and the vector basemap (#111, @Unzzip). `PRD.md` and `PRD-2.md` are kept as the original planning documents.

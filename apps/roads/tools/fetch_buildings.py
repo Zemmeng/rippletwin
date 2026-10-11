@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""用途：CBD 建筑轮廓 + 高度 + 用途 + 临街路段 → public/<area>/buildings.json（任务 T11，需求见 issue #21）。
+"""Purpose: CBD building footprints + height + use + frontage links -> public/<area>/buildings.json (issue #21).
 
-用法：
+Usage:
   apps/roads/.venv/bin/python apps/roads/tools/fetch_buildings.py [--bbox S,W,N,E] [--area cbd] [--refresh]
-      第一次（或 --refresh）从 OSM 拉 building=* 存到 raw/osm_buildings.gpkg，之后只用本地文件重算
-前置：public/<area>/network.json（tools/build_network.py）；
-      可选 raw/com_footprints_2018.geojson（市政 2018 建筑轮廓，补 OSM 缺的高度；下载命令见 README）
-      可选 raw/com_buildings_clue.csv（市政 CLUE 普查 2024，OSM 判成 other 的楼用它补用途和楼层数；下载命令见 README）
-高度优先级：市政 2018 轮廓实测 → OSM height → OSM building:levels × 3.2 → 默认 12 m（height_src 记来源）
-      （和 issue #21 写的顺序不同：OSM 外轮廓的 height 常只是裙楼，见 build() 里的注释和 README）
-退出码：0 成功；1 所有 Overpass 服务器都失败，或缺 network.json
-依赖：osmnx 2.x 装好的 requests、geopandas、shapely（下载不经过 osmnx）
-数据许可证：ODbL，页面要写「© OpenStreetMap contributors」。
-坑：Overpass 主站时常拒连、镜像常回 504：每台只试一次、硬超时，按 OVERPASS 顺序换；进度逐行打印。
+      the first run (or --refresh) downloads building=* from OSM into raw/osm_buildings.gpkg; later runs rebuild from the local file only
+Prerequisites: public/<area>/network.json (tools/build_network.py);
+      optional raw/com_footprints_2018.geojson (City of Melbourne 2018 building footprints, fills heights missing in OSM; download command in the README)
+      optional raw/com_buildings_clue.csv (City of Melbourne CLUE census 2024, fills use and floor count for buildings OSM classes as other; download command in the README)
+Height priority: City of Melbourne 2018 measured footprints -> OSM height -> OSM building:levels x 3.2 -> default 12 m (height_src records the source)
+      (a different order from issue #21: the height on an OSM outer outline is often only the podium; see the comment in build() and the README)
+Exit code: 0 success; 1 every Overpass server failed, or network.json is missing
+Dependencies: requests, geopandas and shapely as installed with osmnx 2.x (the download does not go through osmnx)
+Data licence: ODbL; pages must show "© OpenStreetMap contributors".
+Gotcha: the main Overpass server often refuses connections and mirrors often return 504, so each server is tried once with a hard timeout, in OVERPASS order; progress is printed line by line.
 """
 import argparse, os, sys, warnings
 
@@ -20,21 +20,21 @@ warnings.filterwarnings('ignore')
 
 MOD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BBOX = (-37.8235, 144.9480, -37.8060, 144.9760)
-M_PER_LEVEL = 3.2        # 只有楼层数时每层按多少米
-DEFAULT_HEIGHT = 12.0    # OSM 和市政数据都没有高度时
-FRONTAGE_M = 30          # 临街：楼离路段中心线多远以内
-FRONTAGE_MAX = 4         # 每栋楼最多记几条临街路段（控制体积）
-SIMPLIFY_DEG = 0.000005  # 轮廓抽稀约 0.5 米
-TIMEOUT_S = 120          # 每台 Overpass 服务器最多等多久
+M_PER_LEVEL = 3.2        # metres per floor when only the floor count is known
+DEFAULT_HEIGHT = 12.0    # when neither OSM nor the City of Melbourne data has a height
+FRONTAGE_M = 30          # frontage: maximum distance from the building to a link centreline
+FRONTAGE_MAX = 4         # maximum frontage links per building (keeps the file small)
+SIMPLIFY_DEG = 0.000005  # footprint simplification, about 0.5 m
+TIMEOUT_S = 120          # how long to wait for each Overpass server
 KEEP_TAGS = ['name', 'building', 'height', 'building:levels', 'amenity', 'shop', 'office', 'tourism']
-# private.coffee 和 kumi 是同一台机器（193.219.97.30），09-29 常回 504 → 排最后
+# private.coffee and kumi are the same machine (193.219.97.30) and often returned 504 on 29 Sep, so they go last
 OVERPASS = ['https://overpass-api.de/api', 'https://maps.mail.ru/osm/tools/overpass/api',
             'https://overpass.private.coffee/api', 'https://overpass.kumi.systems/api']
 
 
 def fetch(bbox, raw):
-    """→ raw/osm_buildings.gpkg。直接发 Overpass 请求，每台服务器只试一次、硬超时 TIMEOUT_S 秒。
-    不用 ox.features_from_bbox：它请求前会查 /status 按服务器给的时间排队，遇 504 还会无限重试，外面看就是卡住。"""
+    """-> raw/osm_buildings.gpkg. Sends the Overpass request directly; each server is tried once with a hard TIMEOUT_S timeout.
+    Not ox.features_from_bbox: it checks /status and waits for the slot the server gives, and retries forever on 504, which looks like a hang."""
     import requests
     import geopandas as gpd
     from shapely.geometry import LineString, Polygon
@@ -45,17 +45,17 @@ def fetch(bbox, raw):
          % (TIMEOUT_S, s, w, n, e, s, w, n, e))
     data = None
     for url in OVERPASS:
-        print('·  试 %s（最多 %d 秒）…' % (url, TIMEOUT_S), flush=True)
+        print('·  trying %s (up to %d s)…' % (url, TIMEOUT_S), flush=True)
         try:
             r = requests.post(url + '/interpreter', data={'data': q}, timeout=TIMEOUT_S + 30,
                               headers={'User-Agent': 'hackathon-roads/1.0 (T11 buildings)'})
             if r.status_code != 200:
-                print('   HTTP %d，换下一台' % r.status_code, flush=True); continue
+                print('   HTTP %d, trying the next server' % r.status_code, flush=True); continue
             data = r.json(); break
         except Exception as ex:
-            print('   失败：%s，换下一台' % str(ex)[:120], flush=True)
+            print('   failed: %s, trying the next server' % str(ex)[:120], flush=True)
     if data is None:
-        print('❌ 所有 Overpass 服务器都失败'); sys.exit(1)
+        print('❌ every Overpass server failed'); sys.exit(1)
     rows = []
     for el in data.get('elements', []):
         tags = el.get('tags', {})
@@ -64,7 +64,7 @@ def fetch(bbox, raw):
             if len(pts) < 4 or pts[0] != pts[-1]:
                 continue
             geom = Polygon(pts)
-        else:  # multipolygon：把 outer 成员拼成环
+        else:  # multipolygon: join the outer members into rings
             lines = [LineString([(g['lon'], g['lat']) for g in m['geometry']])
                      for m in el.get('members', []) if m.get('role') == 'outer' and len(m.get('geometry', [])) >= 2]
             polys = list(polygonize(unary_union(lines))) if lines else []
@@ -77,12 +77,12 @@ def fetch(bbox, raw):
     B = gpd.GeoDataFrame(rows, geometry='geometry', crs=4326)
     p = os.path.join(raw, 'osm_buildings.gpkg')
     B.to_file(p, driver='GPKG')
-    print('✅ OSM 建筑 %d 个（%s）→ %s' % (len(B), url, p), flush=True)
+    print('✅ %d OSM buildings (%s) → %s' % (len(B), url, p), flush=True)
     return p
 
 
 def num(v):
-    """'24'、'24 m'、'24.5;30' → 24.0；解析不了返回 None。"""
+    """'24', '24 m', '24.5;30' -> 24.0; None if it cannot be parsed."""
     try:
         x = float(str(v).split(';')[0].replace('m', '').strip())
         return x if x > 0 else None
@@ -91,7 +91,7 @@ def num(v):
 
 
 def use_of(r):
-    """OSM 标签 → issue #21 第 5 节的 use 枚举。"""
+    """OSM tags -> the use enum from section 5 of issue #21."""
     g = lambda k: str(r.get(k) or '').lower()
     b, am, tour = g('building'), g('amenity'), g('tourism')
     if b == 'parking' or am in ('parking', 'parking_entrance'):
@@ -115,11 +115,11 @@ def use_of(r):
     return 'other'
 
 
-# 市政 CLUE 普查 predominant_space_use → use。按关键词匹配（不写死完整取值），先匹配先赢；没匹配上的原值会在运行时打印出来核对
+# City of Melbourne CLUE census predominant_space_use -> use. Matched by keyword (not by full value), first match wins; unmatched values are printed at run time for checking
 CLUE_USE = [('parking', ('car park', 'parking')),
             ('hotel', ('hotel', 'hostel', 'serviced apartment', 'motel', 'commercial accommodation')),
             ('education', ('education', 'school', 'university')),
-            # Student Accommodation 是学生公寓，归住宅（别让 student 把它拉进 education）
+            # Student Accommodation is student housing, so residential (do not let 'student' pull it into education)
             ('residential', ('residential', 'apartment', 'house', 'townhouse', 'dwelling', 'accommodation')),
             ('retail', ('retail', 'shop', 'hospitality', 'restaurant', 'food')),
             ('office', ('office', 'commercial', 'business')),
@@ -136,7 +136,7 @@ def clue_use(v):
 
 
 def load_clue(raw, xy):
-    """raw/com_buildings_clue.csv（最新一年普查、bbox 内）→ [(Point, use 或 None, 原值, 地上层数)]；没有文件返回 []。"""
+    """raw/com_buildings_clue.csv (latest census year, inside the bbox) -> [(Point, use or None, raw value, floors above ground)]; [] if the file is absent."""
     import csv
     from shapely.geometry import Point
     p = os.path.join(raw, 'com_buildings_clue.csv')
@@ -162,7 +162,7 @@ def build(bbox, raw, area):
 
     np_ = os.path.join(MOD, 'public', area, 'network.json')
     if not os.path.exists(np_):
-        print('❌ 没有 %s：先跑 tools/build_network.py' % np_); sys.exit(1)
+        print('❌ %s not found: run tools/build_network.py first' % np_); sys.exit(1)
     net = json.load(open(np_, encoding='utf-8'))
     s, w, n, e = bbox
     lat0, lon0 = (s + n) / 2, (w + e) / 2
@@ -173,7 +173,7 @@ def build(bbox, raw, area):
     B = B[B['element'].isin(['way', 'relation'])]
     area_box = box(w, s, e, n)
 
-    # 市政 2018 轮廓：每行是一栋楼的一部分；高 = 各部分楼顶最高 − 楼的地面（structure_min_elevation）
+    # City of Melbourne 2018 footprints: each row is part of a building; height = highest roof of the parts - the building's ground level (structure_min_elevation)
     com = []
     cp = os.path.join(raw, 'com_footprints_2018.geojson')
     if os.path.exists(cp):
@@ -202,7 +202,7 @@ def build(bbox, raw, area):
             continue
         geom = geom if geom.is_valid else geom.buffer(0)
         if not area_box.contains(geom):
-            continue  # 跨 bbox 边界的楼不要（验收要求所有点都在 bbox 内）
+            continue  # drop buildings that cross the bbox edge (acceptance requires every point inside the bbox)
         poly = max(geom.geoms, key=lambda x: x.area) if geom.geom_type == 'MultiPolygon' else geom
         poly = Polygon(poly.exterior).simplify(SIMPLIFY_DEG)
         ring = [(round(la, 5), round(lo, 5)) for lo, la in poly.exterior.coords][:-1]
@@ -211,8 +211,8 @@ def build(bbox, raw, area):
             continue
         pxy = Polygon([xy(la, lo) for la, lo in ring])
         levels = num(r.get('building:levels'))
-        # 市政实测优先：CBD 高楼在 OSM 里外轮廓的 height 常常只是裙楼（塔楼另画成 building:part），
-        # 例 Eureka Tower OSM 20 m、市政 298 m（实际约 297 m）；Rialto OSM 20 m、市政 249 m（实际约 251 m）
+        # Measured municipal heights first: for CBD towers the height on the OSM outer outline is often only the podium (the tower is a separate building:part),
+        # e.g. Eureka Tower OSM 20 m, City of Melbourne 298 m (actual about 297 m); Rialto OSM 20 m, City of Melbourne 249 m (actual about 251 m)
         h, src = None, None
         if com_tree is not None:
             hits = [com[i][1] for i in com_tree.query(pxy, predicate='contains')]
@@ -232,7 +232,7 @@ def build(bbox, raw, area):
                 near[seg_link[i]] = d
         frontage = [{'link': lid, 'dist_m': round(d, 1)} for lid, d in sorted(near.items(), key=lambda kv: kv[1])[:FRONTAGE_MAX]]
         name = r.get('name')
-        # 用途：OSM 能判断的优先；OSM 只有 building=yes 之类判成 other 的，用市政普查落在楼内的记录（多条取最多的用途）
+        # Use: OSM wins where it can tell; buildings OSM classes as other (e.g. only building=yes) take the census records inside them (most common use if several)
         use = use_of(r)
         if use != 'other':
             use_src['osm'] += 1
@@ -263,7 +263,7 @@ def build(bbox, raw, area):
                        'City of Melbourne CLUE Building information, census 2024 (CC BY)'],
            'assumptions': {'m_per_level': M_PER_LEVEL, 'default_height_m': DEFAULT_HEIGHT, 'frontage_m': FRONTAGE_M,
                            'frontage_max': FRONTAGE_MAX, 'simplify_deg': SIMPLIFY_DEG,
-                           'com_height': '市政 2018 轮廓：落在楼内的各部分 footprint_max_elevation 最大值 − structure_min_elevation'},
+                           'com_height': 'City of Melbourne 2018 footprints: max footprint_max_elevation of the parts inside the building − structure_min_elevation'},
            'buildings': out}
     p = os.path.join(MOD, 'public', area, 'buildings.json')
     with open(p, 'w', encoding='utf-8') as f:
@@ -271,19 +271,19 @@ def build(bbox, raw, area):
     uses = {}
     for x in out:
         uses[x['use']] = uses.get(x['use'], 0) + 1
-    print('✅ buildings.json：%d 栋；高度来源 %s；用途 %s（来自 OSM %d、普查 %d、没有 %d）；有临街路段 %d；%d KB'
+    print('✅ buildings.json: %d buildings; height sources %s; uses %s (from OSM %d, census %d, none %d); %d with frontage links; %d KB'
           % (len(out), src_cnt, uses, use_src['osm'], use_src['clue'], use_src['none'],
              sum(1 for x in out if x['frontage']), os.path.getsize(p) // 1024))
     if unmapped:
-        print('·  普查里没映射上的用途原值（核对 CLUE_USE）：%s' % sorted(unmapped.items(), key=lambda kv: -kv[1])[:15])
+        print('·  census use values with no mapping (check CLUE_USE): %s' % sorted(unmapped.items(), key=lambda kv: -kv[1])[:15])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--bbox', default=','.join(map(str, DEFAULT_BBOX)), help='南,西,北,东')
+    ap.add_argument('--bbox', default=','.join(map(str, DEFAULT_BBOX)), help='south,west,north,east')
     ap.add_argument('--area', default='cbd')
     ap.add_argument('--raw', default=os.path.join(MOD, 'raw'))
-    ap.add_argument('--refresh', action='store_true', help='重新从 OSM 拉')
+    ap.add_argument('--refresh', action='store_true', help='download from OSM again')
     a = ap.parse_args()
     bbox = tuple(float(x) for x in a.bbox.split(','))
     os.makedirs(a.raw, exist_ok=True)

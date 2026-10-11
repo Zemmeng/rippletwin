@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""用途：把 raw/ 里的 OSM 路网 + SCATS 站点表整理成 public/<area>/network.json 和 signals.json（格式见 PRD 第 5 节）。
+"""Purpose: turn the OSM network and SCATS site list in raw/ into public/<area>/network.json and signals.json (format: PRD section 5).
 
-用法：
+Usage:
   apps/roads/.venv/bin/python apps/roads/tools/build_network.py [--bbox S,W,N,E] [--area cbd]
-前置：先跑 tools/fetch_osm.py（raw/osm_drive.graphml、raw/osm_tram.geojson）
-      和 tools/fetch_scats.py --sites（raw/victorian_traffic_signals.csv）
-退出码：0 成功；1 缺原始文件
-做法：
-  1. 在「不简化」的路网上逐段算这个方向的车道、限速、有没有自行车道（OSM 标签是按 way 记的，简化后会混成列表）
-  2. 简化成「路口到路口」的路段；车道取最小值（瓶颈），自由流时间逐段相加，自行车道按长度占比过半算有
-  3. 只保留最大强连通块：bbox 边上开不出去的断头路会让 T4 找不到绕行路线
-  4. SCATS 站点匹配 30 米内最近的节点；终点 30 米内有信号灯（SCATS 路口 / 行人灯，或 OSM traffic_signals）的路段按 0.5 绿信比算通行能力
-  5. 电车：路段有一半以上长度在电车轨道 12 米内就标 tram
+Prerequisites: run tools/fetch_osm.py (raw/osm_drive.graphml, raw/osm_tram.geojson)
+      and tools/fetch_scats.py --sites (raw/victorian_traffic_signals.csv) first
+Exit code: 0 success; 1 raw input files missing
+Method:
+  1. On the unsimplified network, compute per segment the lanes in this direction, the speed limit and whether there is a bike lane (OSM tags are per way and become lists after simplification)
+  2. Simplify to junction-to-junction links: lanes take the minimum (bottleneck), free-flow times are summed, and a link has a bike lane if more than half its length does
+  3. Keep only the largest strongly connected component: dead ends at the bbox edge that cannot be driven out of would leave the engine without a detour
+  4. Snap each SCATS site to the nearest node within 30 m; links whose end node has a signal within 30 m (SCATS junction / pedestrian signal, or OSM traffic_signals) get capacity at a 0.5 green ratio
+  5. Trams: a link is tagged tram when more than half its length lies within 12 m of tram track
 """
 import argparse, csv, datetime, json, math, os, sys, warnings
 from zoneinfo import ZoneInfo
@@ -22,16 +22,16 @@ import osmnx as ox
 
 MOD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BBOX = (-37.8235, 144.9480, -37.8060, 144.9760)
-SAT_FLOW = 1800          # 每车道每小时饱和流量（辆）
-GREEN_SIGNAL = 0.5       # 终点是信号灯路口时的绿信比
-GREEN_FREE = 0.9         # 终点不是信号灯时的折减
-DEFAULT_SPEED = 40       # CBD 常见限速
-MATCH_M = 30             # 信号灯匹配节点的距离上限
-TRAM_M = 12              # 离电车轨道多近算「这条路上有电车」
-SIMPLIFY_DEG = 0.00003   # 折线抽稀容差（约 3 米），network.json 要压到 500 KB 以内
+SAT_FLOW = 1800          # saturation flow per lane per hour (vehicles)
+GREEN_SIGNAL = 0.5       # green ratio when the end node is a signalised junction
+GREEN_FREE = 0.9         # reduction factor when the end node is not signalised
+DEFAULT_SPEED = 40       # common CBD speed limit
+MATCH_M = 30             # maximum distance when snapping a signal to a node
+TRAM_M = 12              # how close to tram track counts as "this road carries trams"
+SIMPLIFY_DEG = 0.00003   # polyline simplification tolerance (about 3 m), to keep network.json under 500 KB
 BIKE_VALUES = {'lane', 'track', 'separate', 'opposite_lane', 'opposite_track'}
 HW_RANK = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'unclassified', 'residential', 'living_street']
-SIGNAL_TYPES = {'INT', 'POS'}  # FLASH PX 是闪黄灯人行横道，不按信号灯折减
+SIGNAL_TYPES = {'INT', 'POS'}  # FLASH PX is a flashing-amber pedestrian crossing, not reduced like a signal
 
 
 def first(v):
@@ -39,7 +39,7 @@ def first(v):
 
 
 def as_int(v):
-    """OSM 的 lanes 可能是 '2'、'2;3'、列表；取第一个能解析的正整数。"""
+    """OSM lanes may be '2', '2;3' or a list; return the first positive integer that parses."""
     for x in (v if isinstance(v, list) else [v]):
         try:
             n = int(str(x).split(';')[0].strip())
@@ -75,7 +75,7 @@ def truthy(v):
 
 
 def annotate_segments(G):
-    """在不简化的图上逐段写入：dir_lanes（这个方向的车道）、t0（秒）、bike_len（有自行车道的长度）。"""
+    """On the unsimplified graph, write per segment: dir_lanes (lanes in this direction), t0 (seconds), bike_len (length with a bike lane)."""
     for u, v, d in G.edges(data=True):
         oneway, rev = truthy(d.get('oneway')), truthy(d.get('reversed'))
         lanes = None
@@ -88,7 +88,7 @@ def annotate_segments(G):
         d['dir_lanes'] = lanes or default_lanes(d.get('highway'))
         spd = as_speed(d.get('maxspeed')) or DEFAULT_SPEED
         d['t0'] = d['length'] / (spd / 3.6)
-        # 澳洲靠左行驶：正向车流在 way 的左侧，反向在右侧；单行道两侧都算
+        # Australia drives on the left: forward traffic is on the way's left side, reverse on the right; one-way roads count both sides
         sides = ['cycleway', 'cycleway:both']
         sides += ['cycleway:left', 'cycleway:right'] if oneway else (['cycleway:right'] if rev else ['cycleway:left'])
         bike = any(str(first(d.get(k))) in BIKE_VALUES for k in sides)
@@ -115,7 +115,7 @@ def dist_m(la1, lo1, la2, lo2):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--bbox', default=','.join(map(str, DEFAULT_BBOX)), help='南,西,北,东')
+    ap.add_argument('--bbox', default=','.join(map(str, DEFAULT_BBOX)), help='south,west,north,east')
     ap.add_argument('--area', default='cbd')
     ap.add_argument('--raw', default=os.path.join(MOD, 'raw'))
     a = ap.parse_args()
@@ -123,7 +123,7 @@ def main():
     need = ['osm_drive.graphml', 'osm_tram.geojson', 'victorian_traffic_signals.csv']
     miss = [f for f in need if not os.path.exists(os.path.join(a.raw, f))]
     if miss:
-        print('❌ raw/ 里缺 %s：先跑 tools/fetch_osm.py 和 tools/fetch_scats.py --sites' % miss); sys.exit(1)
+        print('❌ raw/ is missing %s: run tools/fetch_osm.py and tools/fetch_scats.py --sites first' % miss); sys.exit(1)
 
     G = ox.load_graphml(os.path.join(a.raw, 'osm_drive.graphml'))
     osm_signals = [(d['y'], d['x']) for _, d in G.nodes(data=True) if d.get('highway') == 'traffic_signals']
@@ -133,7 +133,7 @@ def main():
     before = S.number_of_nodes()
     S = S.subgraph(max(nx.strongly_connected_components(S), key=len)).copy()
 
-    # 电车：投影到米制坐标后比较
+    # Trams: compare after projecting to metric coordinates
     import geopandas as gpd
     from shapely.geometry import LineString
     trams = gpd.read_file(os.path.join(a.raw, 'osm_tram.geojson')).to_crs(32755)
@@ -142,12 +142,12 @@ def main():
     sites = load_sites(os.path.join(a.raw, 'victorian_traffic_signals.csv'), bbox)
     nodes_xy = {n: (d['y'], d['x']) for n, d in S.nodes(data=True)}
     node_signal, signal_nodes = {}, set()
-    for st in sites:  # 站点 → 最近节点
+    for st in sites:  # site -> nearest node
         best = min(nodes_xy, key=lambda n: dist_m(st['lat'], st['lon'], *nodes_xy[n]))
         dm = dist_m(st['lat'], st['lon'], *nodes_xy[best])
         st['node'] = 'n%s' % best if dm <= MATCH_M else None
         st['dist_m'] = round(dm, 1)
-    for n, (la, lo) in nodes_xy.items():  # 节点 → 30 米内最近的站点
+    for n, (la, lo) in nodes_xy.items():  # node -> nearest site within 30 m
         near = [(dist_m(la, lo, st['lat'], st['lon']), st) for st in sites]
         near = [x for x in near if x[0] <= MATCH_M]
         if near:
@@ -189,7 +189,7 @@ def main():
         'sources': ['© OpenStreetMap contributors (ODbL)', 'Victorian traffic signals, DTP (CC BY 4.0)'],
         'assumptions': {'sat_flow_vph_per_lane': SAT_FLOW, 'green_ratio_signal': GREEN_SIGNAL, 'green_ratio_free': GREEN_FREE,
                         'default_speed_kmh': DEFAULT_SPEED, 'signal_match_m': MATCH_M, 'tram_buffer_m': TRAM_M,
-                        'speed_kmh_note': '路段含多个限速时取按时间加权的等效速度（len_m / t0_s）'},
+                        'speed_kmh_note': 'where a link has several speed limits, this is the time-weighted equivalent speed (len_m / t0_s)'},
         'nodes': nodes, 'links': links,
     }
     with open(os.path.join(out, 'network.json'), 'w', encoding='utf-8') as f:
@@ -197,11 +197,11 @@ def main():
     sig = {'version': 1, 'sites': sorted(sites, key=lambda x: int(x['site']) if x['site'].isdigit() else 0)}
     with open(os.path.join(out, 'signals.json'), 'w', encoding='utf-8') as f:
         json.dump(sig, f, ensure_ascii=False, separators=(',', ':'))
-    print('✅ network.json：节点 %d（简化后 %d，裁掉 %d 个不强连通的）、路段 %d（电车 %d、自行车道 %d、终点信号灯 %d）'
+    print('✅ network.json: %d nodes (%d after simplification, %d not strongly connected removed), %d links (tram %d, bike lane %d, signalised end %d)'
           % (len(nodes), before, before - len(nodes), len(links), sum(l['tram'] for l in links),
              sum(l['bike_lane'] for l in links), sum(1 for l in links if l['cap_vph'] < l['lanes'] * SAT_FLOW * GREEN_FREE)))
-    print('✅ signals.json：站点 %d，匹配到节点 %d' % (len(sites), sum(1 for s in sites if s['node'])))
-    print('   大小：network %d KB · signals %d KB' % (os.path.getsize(os.path.join(out, 'network.json')) // 1024,
+    print('✅ signals.json: %d sites, %d matched to nodes' % (len(sites), sum(1 for s in sites if s['node'])))
+    print('   size: network %d KB · signals %d KB' % (os.path.getsize(os.path.join(out, 'network.json')) // 1024,
                                                    os.path.getsize(os.path.join(out, 'signals.json')) // 1024))
 
 

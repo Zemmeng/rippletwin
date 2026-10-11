@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
-"""用途：生成 public/<area>/walk.json（行人路网，不分方向）和 peds.json（行人流量，格式对齐 flows.json）。格式见 PRD-2 §3C。
+"""Purpose: generate public/<area>/walk.json (undirected walking network) and peds.json (pedestrian volumes, same layout as flows.json). Format: PRD-2 section 3C.
 
-用法：
+Usage:
   apps/roads/.venv/bin/python apps/roads/tools/build_walk.py [--area cbd] [--from 2026-08-01] [--to 2026-09-27]
-前置：raw/osm_walk.graphml（tools/fetch_osm.py --walk）、raw/peds.csv + raw/ped_sensors.csv（README 里的 curl）、
+Prerequisites: raw/osm_walk.graphml (tools/fetch_osm.py --walk), raw/peds.csv + raw/ped_sensors.csv (the curl commands in the README),
       public/<area>/network.json
-退出码：0 成功；1 缺输入文件
-做法：
+Exit code: 0 success; 1 input files missing
+Method:
   walk.json
-    0. 去掉室内通道（highway=corridor）、停车场过道和私家车道（service=parking_aisle / driveway / drive-through）
-    1. OSM 行人路网转成无向图，按 highway / footway 变化处保留端点再简化；只留最大连通块
-    2. kind：footway=sidewalk → sidewalk；footway=crossing 或 highway=crossing → crossing；
-       highway=pedestrian → mall；footway / path / steps / cycleway → path；其余（沿车行道走）→ other
-    3. crossing：crossing=traffic_signals → signal；zebra → zebra；其余 → uncontrolled
-    4. road_link + side：sidewalk / other 找 ROAD_M 米内朝向平行的机动车路段；
-       澳洲靠左，人行道挂在「它在左边」的那个方向上（side=left）；单行道只有一个方向时可能是 right；
-       crossing 挂它横穿的路段（side=null）
+    0. Drop indoor corridors (highway=corridor), parking aisles and driveways (service=parking_aisle / driveway / drive-through)
+    1. Convert the OSM walking network to an undirected graph, keep endpoints where highway / footway changes, then simplify; keep only the largest connected component
+    2. kind: footway=sidewalk -> sidewalk; footway=crossing or highway=crossing -> crossing;
+       highway=pedestrian -> mall; footway / path / steps / cycleway -> path; everything else (walking along a roadway) -> other
+    3. crossing: crossing=traffic_signals -> signal; zebra -> zebra; everything else -> uncontrolled
+    4. road_link + side: sidewalk / other links look for a parallel road link within ROAD_M metres;
+       Australia drives on the left, so a sidewalk is attached to the direction it lies to the left of (side=left); on a one-way road with only one direction it may be right;
+       a crossing is attached to the link it crosses (side=null)
   peds.json
-    sensor         传感器挂最近的人行道（SENSOR_M 米内），8 周按工作日 / 周末分小时平均
-    street_interp  同名街道上的人行道，用同街最近传感器（STREET_M 米内）
-    class_default  其余：按所挨道路的等级取传感器中位数；不挨车行道的（小路、广场）取全部传感器的 25 分位
+    sensor         each sensor is attached to the nearest sidewalk (within SENSOR_M metres); 8-week hourly means for weekdays / weekends
+    street_interp  sidewalks on a street with the same name use the nearest sensor on that street (within STREET_M metres)
+    class_default  the rest: median of sensors by the class of the adjacent road; links not beside a roadway (paths, plazas) take the 25th percentile of all sensors
 """
 import argparse, collections, csv, datetime, json, math, os, statistics, sys, warnings
 
@@ -31,10 +31,10 @@ from shapely.geometry import LineString, Point
 
 MOD = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOLIDAYS = {'2026-09-25'}
-ROAD_M = 25        # 人行道离车行道中心线多远以内算「挨着」
-SENSOR_M = 40      # 传感器挂人行道的距离上限
-STREET_M = 800     # 同街插值用多远以内的传感器
-PARALLEL = 30      # 朝向差多少度以内算平行
+ROAD_M = 25        # how close to a roadway centreline a sidewalk must be to count as beside it
+SENSOR_M = 40      # maximum distance when attaching a sensor to a sidewalk
+STREET_M = 800     # how far away a same-street sensor can be for interpolation
+PARALLEL = 30      # bearing difference (degrees) that still counts as parallel
 SIMPLIFY_DEG = 0.00003
 DROP_SERVICE = {'parking_aisle', 'driveway', 'drive-through'}
 
@@ -97,14 +97,14 @@ def main():
     need = [os.path.join(a.raw, f) for f in ('osm_walk.graphml', 'peds.csv', 'ped_sensors.csv')] + [os.path.join(out_dir, 'network.json')]
     miss = [p for p in need if not os.path.exists(p)]
     if miss:
-        print('❌ 缺 %s' % miss); sys.exit(1)
+        print('❌ missing %s' % miss); sys.exit(1)
     net = json.load(open(os.path.join(out_dir, 'network.json'), encoding='utf-8'))
     s, w, n, e = net['bbox']
     P = Proj((s + n) / 2, (w + e) / 2)
 
-    # ---- 行人路网 ----
+    # ---- walking network ----
     G = ox.load_graphml(os.path.join(a.raw, 'osm_walk.graphml'))
-    # 室内通道、停车场过道、私家车道：路面施工影响不到，也不是行人绕行路线；去掉后 peds.json 才能压到 2 MB 以内
+    # Indoor corridors, parking aisles and driveways: roadworks do not affect them and they are not pedestrian detours; dropping them keeps peds.json under 2 MB
     G.remove_edges_from([(u, v, k) for u, v, k, d in G.edges(keys=True, data=True)
                          if 'corridor' in vals(d.get('highway')) or set(vals(d.get('service'))) & DROP_SERVICE])
     G.remove_nodes_from([x for x in list(G.nodes) if G.degree(x) == 0])
@@ -116,7 +116,7 @@ def main():
     before = U.number_of_nodes()
     U = U.subgraph(max(nx.connected_components(U), key=len)).copy()
 
-    # 车行道索引：分段存（路段 id、朝向）
+    # Roadway index: stored per segment (link id, bearing)
     segs, meta = [], []
     for l in net['links']:
         pts = [P.xy(*p) for p in l['geometry']]
@@ -127,7 +127,7 @@ def main():
     road = {l['id']: l for l in net['links']}
 
     def attach(geom_xy, kind):
-        """→ (road_link, side)"""
+        """-> (road_link, side)"""
         line = LineString(geom_xy)
         mid = line.interpolate(0.5, normalized=True)
         (x1, y1), (x2, y2) = geom_xy[0], geom_xy[-1]
@@ -137,7 +137,7 @@ def main():
             lid, sb, sx, sy = meta[i]
             para = min(adiff(b, sb), adiff(b, (sb + 180) % 360))
             if kind == 'crossing':
-                if para < 90 - PARALLEL:  # 人行横道要大致垂直于车行道
+                if para < 90 - PARALLEL:  # a crossing must be roughly perpendicular to the roadway
                     continue
             elif para > PARALLEL:
                 continue
@@ -149,7 +149,7 @@ def main():
         lid, sb, sx, sy = meta[best[1]]
         if kind == 'crossing':
             return lid, None
-        # 叉积 > 0：人行道在这段车行道的左边
+        # cross product > 0: the sidewalk is to the left of this roadway segment
         ex, ey = math.cos(math.radians(sb)), math.sin(math.radians(sb))
         left = ex * (mid.y - sy) - ey * (mid.x - sx) > 0
         if left:
@@ -176,10 +176,10 @@ def main():
         wl_geom[lid] = LineString(xy)
     walk = {'version': 1, 'area': a.area, 'bbox': net['bbox'],
             'sources': ['© OpenStreetMap contributors (ODbL)'],
-            'assumptions': {'road_m': ROAD_M, 'parallel_deg': PARALLEL, 'side_rule': '澳洲靠左：人行道挂在它位于左边的那个方向'},
+            'assumptions': {'road_m': ROAD_M, 'parallel_deg': PARALLEL, 'side_rule': 'Australia drives on the left: a sidewalk is attached to the direction of travel it lies to the left of'},
             'nodes': nodes_out, 'links': links_out}
 
-    # ---- 行人流量 ----
+    # ---- pedestrian volumes ----
     sensors = {}
     for r in csv.DictReader(open(os.path.join(a.raw, 'ped_sensors.csv'), encoding='utf-8-sig'), delimiter=';'):
         try:
@@ -220,7 +220,7 @@ def main():
             for k in ('wd', 'we'):
                 flows[k][wl] = prof[sid][k]
             method[wl] = 'sensor'
-    # 同街插值
+    # same-street interpolation
     placed = [x for x in sens_out if x['walk_link']]
     street_of = lambda wl: (road.get(link_by[wl]['road_link']) or {}).get('name') if link_by[wl]['road_link'] else None
     by_street = collections.defaultdict(list)
@@ -240,7 +240,7 @@ def main():
             for k in ('wd', 'we'):
                 flows[k][lid] = prof[best['id']][k]
             method[lid] = 'street_interp'
-    # 按道路等级默认
+    # road-class defaults
     by_cls = collections.defaultdict(list)
     for x in placed:
         rl = link_by[x['walk_link']]['road_link']
@@ -257,11 +257,11 @@ def main():
         method[lid] = 'class_default'
     n_meas = sum(1 for m in method.values() if m == 'sensor')
     peds = {'version': 1, 'unit': 'ped/h',
-            'period': '%s..%s（去掉公众假期 %s）' % (a.d_from, a.d_to, ', '.join(sorted(HOLIDAYS))),
+            'period': '%s..%s (excluding the public holiday %s)' % (a.d_from, a.d_to, ', '.join(sorted(HOLIDAYS))),
             'days_used': {k: len(v) for k, v in days.items()},
             'sources': ['City of Melbourne Pedestrian Counting System (CC BY)'],
             'assumptions': {'sensor_m': SENSOR_M, 'street_m': STREET_M,
-                            'class_default': '所挨道路等级的传感器中位数；不挨车行道的取全部传感器 25 分位'},
+                            'class_default': 'median of sensors on the adjacent road class; links not beside a roadway take the 25th percentile of all sensors'},
             'sensors': sens_out,
             'days': {k: {lid: [round(v) for v in flows[k][lid]] for lid in link_by} for k in ('wd', 'we')},
             'method': {lid: method[lid] for lid in link_by},
@@ -272,11 +272,11 @@ def main():
             json.dump(obj, f, ensure_ascii=False, separators=(',', ':'))
     cnt = collections.Counter(x['kind'] for x in links_out)
     mc = collections.Counter(method.values())
-    print('✅ walk.json：节点 %d（裁掉 %d 个不连通的）、路段 %d（%s）；挂上车行道 %d；%d KB'
-          % (len(nodes_out), before - len(nodes_out), len(links_out), '、'.join('%s %d' % kv for kv in cnt.most_common()),
+    print('✅ walk.json: %d nodes (%d disconnected removed), %d links (%s); %d attached to a roadway; %d KB'
+          % (len(nodes_out), before - len(nodes_out), len(links_out), ', '.join('%s %d' % kv for kv in cnt.most_common()),
              sum(1 for x in links_out if x['road_link']), os.path.getsize(os.path.join(out_dir, 'walk.json')) // 1024))
-    print('✅ peds.json：传感器 %d（挂上人行道 %d）；%s；工作日 %d 天、周末 %d 天；%d KB'
-          % (len(sens_out), len(placed), '、'.join('%s %d' % kv for kv in mc.most_common()), len(days['wd']), len(days['we']),
+    print('✅ peds.json: %d sensors (%d attached to a sidewalk); %s; %d weekdays, %d weekend days; %d KB'
+          % (len(sens_out), len(placed), ', '.join('%s %d' % kv for kv in mc.most_common()), len(days['wd']), len(days['we']),
              os.path.getsize(os.path.join(out_dir, 'peds.json')) // 1024))
 
 

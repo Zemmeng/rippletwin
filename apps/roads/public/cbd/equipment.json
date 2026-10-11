@@ -1,9 +1,9 @@
 {
  "version": 1,
  "sources": [
-  "RPM Hire 官网产品页（类型、规格），2026-09-29 查",
-  "TfNSW 标志登记（T1-1、T2-16）",
-  "数量和日租价为假设，官网没有公开价格"
+  "RPM Hire product pages (types, specifications), checked 2026-09-29",
+  "TfNSW sign register (T1-1, T2-16)",
+  "Quantities and day rates are assumptions; RPM Hire publishes no prices"
  ],
  "categories": [
   "barrier",
@@ -44,7 +44,7 @@
    },
    "rating": "MASH TL1/TL2",
    "max_speed_kmh": 70,
-   "note": "官网：适合 50 km/h 以下道路，最高 70；表面光滑，对行人和骑车人更友好",
+   "note": "RPM Hire: suited to roads up to 50 km/h, maximum 70; smooth surface, friendlier to pedestrians and cyclists",
    "qty": 200,
    "day_rate_aud": 4,
    "url": "https://www.rpmhire.com.au/products/water-filled-barriers/",
@@ -73,7 +73,7 @@
     "base": 16
    },
    "rating": null,
-   "note": "导向用塑料隔板，被撞后回弹；不是防撞护栏",
+   "note": "plastic guidance panels that spring back when hit; not a crash barrier",
    "qty": 300,
    "day_rate_aud": 2,
    "url": "https://www.rpmhire.com.au/products/klemmfix/",
@@ -98,7 +98,7 @@
    "weight_kg_per_m": 90,
    "rating": "NCHRP350 TL-3/TL-4, MASH TL-3",
    "max_speed_kmh": 100,
-   "note": "另有 12 m 一节；最小变形 13 cm",
+   "note": "also available in 12 m sections; minimum deflection 13 cm",
    "qty": 40,
    "day_rate_aud": 20,
    "url": "https://www.rpmhire.com.au/products/steel-barriers/",
@@ -244,7 +244,7 @@
    "qty": 20,
    "day_rate_aud": 5,
    "url": null,
-   "note": "自行车并入车道；effect 表里没有「骑车人改道」，先用 warn + applies_to 区分",
+   "note": "bicycles merge into the traffic lane; the effect list has no \"reroute cyclists\", so warn + applies_to is used for now",
    "assumed": [
     "qty",
     "day_rate_aud"
@@ -263,7 +263,7 @@
    "qty": 30,
    "day_rate_aud": 5,
    "url": null,
-   "note": "模型里不起作用，只为清单完整；effect 占位用 warn",
+   "note": "has no effect in the model; listed for completeness, with warn as a placeholder effect",
    "assumed": [
     "qty",
     "day_rate_aud"
@@ -289,7 +289,7 @@
     1.62
    ],
    "power": "solar + battery",
-   "note": "官网文案指南：每行最多 10 个字符（含空格）、每屏最多 4 行；最好 3 行 × 8 字；每屏停 2 秒（闪烁 3 秒）。同页 FAQ 写 12–13 字，以 10 为准",
+   "note": "RPM Hire message guide: up to 10 characters per line (including spaces), up to 4 lines per screen; ideally 3 lines × 8 characters; 2 seconds per screen (3 seconds when flashing). The FAQ on the same page says 12–13 characters; 10 is used",
    "qty": 4,
    "day_rate_aud": 150,
    "url": "https://www.rpmhire.com.au/products/variable-message-signs/",
@@ -318,7 +318,7 @@
     2.73
    ],
    "power": "solar + battery",
-   "note": "比 A class 字大、看得远，字数规则同 A class（每行最多 10 字、最好 3 行 × 8 字）",
+   "note": "larger characters than A class, legible from further away; same character rules as A class (up to 10 per line, ideally 3 lines × 8)",
    "qty": 2,
    "day_rate_aud": 200,
    "url": "https://www.rpmhire.com.au/products/variable-message-signs/",
@@ -346,7 +346,7 @@
    ],
    "lamps": 15,
    "power": "solar + battery",
-   "note": "官网：VicRoads / RMS 认可",
+   "note": "RPM Hire: VicRoads / RMS approved",
    "qty": 4,
    "day_rate_aud": 100,
    "url": "https://www.rpmhire.com.au/products/arrow-boards/",
@@ -367,7 +367,7 @@
    "lantern_mm": 200,
    "standard": "AS 4191:2015",
    "power": "solar + battery",
-   "note": "一套含主机和从机，无线联动；通讯中断时闪黄",
+   "note": "one set is a primary and a secondary unit linked wirelessly; flashes amber if the link is lost",
    "qty": 3,
    "day_rate_aud": 250,
    "url": "https://www.rpmhire.com.au/products/pedestrian-portable-traffic-lights/",

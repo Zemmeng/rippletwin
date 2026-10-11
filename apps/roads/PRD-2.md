@@ -1,40 +1,42 @@
-# T3 第二期 PRD：行人、公交、设备库存
+# T3 phase 2 PRD: pedestrians, public transport, equipment inventory
 
-> 负责人：@louisxie316-dotcom · 模块：`apps/roads/` · 分支：lead 分配任务号后开 `louisxie316-dotcom/roads/T<n>-…` · 对应 issue #11
-> 写于 2026-09-29 13:55（@jinmingq 整理）。接在 `PRD.md`（第一期，PR #9）之后做。新文件格式是草案，定稿后由 lead 写进 `docs/contract.md`。
+*Original hackathon PRD (phase 2), written on 29 Sep 2026 during the FEIT Hackathon Festival. Translated from the original Chinese; superseded details are kept as they were, with later outcomes noted in brackets. For the module as built, see [README.md](README.md).*
+
+> Owner: @louisxie316-dotcom · Module: `apps/roads/` · Branch: `louisxie316-dotcom/roads/T<n>-…` once the lead assigns a task number · Issue #11
+> Written 2026-09-29 13:55 (compiled by @jinmingq). Follows `PRD.md` (phase 1, PR #9). The new file formats are drafts; once final, the lead adds them to `docs/contract.md` (now [docs/reference/interfaces.md](../../docs/reference/interfaces.md)).
 >
-> **EN:** Phase 2 of T3. PR #9 covers vehicle traffic. The brief also names **pedestrians, public transport** and the **equipment inventory (barriers, signage, VMS)** — none of which has data yet. Please produce `equipment.json`, `transit.json`, `walk.json` + `peds.json` (P0), linked to `network.json` link ids. Same rules as `PRD.md` §9.
+> **Summary (English in the original):** Phase 2 of T3. PR #9 covers vehicle traffic. The brief also names **pedestrians, public transport** and the **equipment inventory (barriers, signage, VMS)**, none of which has data yet. Please produce `equipment.json`, `transit.json`, `walk.json` + `peds.json` (P0), linked to `network.json` link ids. Same rules as `PRD.md` §9.
 
-## 1. 为什么要补
+## 1. Why this is needed
 
-题目原文：*"…knock-on effects on surrounding **traffic, pedestrians, and public transport** … using typical traffic **equipment inventory (barriers, signage, VMS boards)**…"*
+The challenge text: *"…knock-on effects on surrounding **traffic, pedestrians, and public transport** … using typical traffic **equipment inventory (barriers, signage, VMS boards)**…"*
 
-PR #9 已经把「车流」做完了。另外两类影响（行人、公共交通）和设备库存目前**没有任何数据**：T4 算不了行人和公交受的影响，T2 的设备面板也没有设备清单。`PRD.md` §4 里写的「行人路网、公交线路（后面单独开任务）」就是这一单。
+PR #9 has finished "vehicle traffic". The other two kinds of impact (pedestrians, public transport) and the equipment inventory currently have **no data at all**: T4 cannot compute the impact on pedestrians and public transport, and T2's equipment panel has no equipment list. The "walking network, public transport routes (a separate task later)" in `PRD.md` §4 is this task.
 
-## 2. 总规矩（和 `PRD.md` §9 一样，只多一条）
+## 2. Ground rules (same as `PRD.md` §9, with one addition)
 
-- 只改 `apps/roads/`；脚本放 `tools/*.py`，一条命令能重跑，范围用 `--bbox`，不写死
-- 原始数据放 `raw/`（已 gitignore），产物放 `public/cbd/`，**每个文件 < 2 MB**；不要 key，不花钱
-- 🆕 **所有新文件都要挂到 `network.json` 的路段 id 上**（字段 `road_link`）。T4 封掉一段路时，要能直接查到这段路上的人行道、电车 / 公交线路和站点
-- 时段和 `flows.json` 对齐：2026-08-01..09-27，工作日 `wd` / 周末 `we` 各 24 个数（下标 = 小时）
-- 估出来的数都标 `method`，假设写进 `assumptions`，README 写清楚
+- Change only `apps/roads/`; scripts go in `tools/*.py`, re-runnable with one command, with the area passed as `--bbox`, not hard-coded
+- Raw data goes in `raw/` (gitignored), outputs in `public/cbd/`, **each file < 2 MB**; no keys, no cost
+- New: **every new file must link to `network.json` link ids** (field `road_link`). When T4 closes a stretch of road, it must be able to look up the sidewalks, tram / bus routes and stops on that stretch directly
+- Periods align with `flows.json`: 2026-08-01..09-27, 24 numbers each for weekdays `wd` and weekends `we` (index = hour)
+- Every estimated number is labelled with a `method`, assumptions go in `assumptions`, and the README explains them
 
-## 3. P0：必须做（题目点名的三样）
+## 3. P0: must do (the three things the challenge names)
 
-| # | 文件 | 给谁用 | 预计 |
+| # | File | For | Estimate |
 |---|---|---|---|
-| A | `equipment.json` 设备库存 | T2 设备面板、T4 算设备效果、T5 VMS 字数 | 1h |
-| B | `transit.json` 电车和公交 | T4 公交影响、T2 画线路和站点 | 2h |
-| C | `walk.json` + `peds.json` 行人 | T4 行人绕行、T2 画人行道 | 2–3h |
+| A | `equipment.json` equipment inventory | T2 equipment panel, T4 equipment effects, T5 VMS character count | 1h |
+| B | `transit.json` trams and buses | T4 public transport impact, T2 drawing routes and stops | 2h |
+| C | `walk.json` + `peds.json` pedestrians | T4 pedestrian detours, T2 drawing sidewalks | 2–3h |
 
-### A. `equipment.json`：设备库存
+### A. `equipment.json`: equipment inventory
 
-题目的输入就是「常见设备库存」，用户靠它描述施工方案。每类设备都要说清楚**它在模型里起什么作用**。
+The challenge's input is "a typical equipment inventory", which users rely on to describe a works plan. Each kind of equipment must state clearly **what it does in the model**.
 
 ```json
 {
   "version": 1,
-  "sources": ["RPM Hire 官网产品页（类型、规格）", "数量和日租价为假设"],
+  "sources": ["RPM Hire product pages (types, specifications)", "Quantities and day rates are assumptions"],
   "items": [
     { "id": "barrier_water", "category": "barrier", "name": "Water-filled barrier",
       "effect": "close", "can_close": ["lane", "footpath", "bike_lane"], "unit_len_m": 2.0,
@@ -49,20 +51,20 @@ PR #9 已经把「车流」做完了。另外两类影响（行人、公共交�
   ]
 }
 ```
-（示例里的数字只是占位，按官网规格填）
+(The numbers in the example are placeholders only; fill them from the product page specifications.)
 
 - `category` ∈ `barrier / sign / vms / arrow_board / ped_signal`
-- `effect` 先用这 6 个值，要加先跟 T4 说：`close`（护栏围住 `can_close` 里的东西）、`route_vehicles`（车辆绕行指示）、`route_peds`（行人改道）、`warn`（前方施工一类的提前警告）、`message`（VMS 自由文案）、`control_crossing`（行人临时信号灯）
-- **最少要有**：护栏 1–2 种；静态标志 5–6 种（Roadwork ahead、Lane closed、Detour 左 / 右 / 直行、Footpath closed use other side、Bike lane closed / Bicycles merge、End roadwork）；VMS；箭头板；行人临时信号灯。标志有标准编号（AS 1742.3 / AGTTM）就填 `code`
-- 规格（护栏单节长度、VMS 几行、每行几个字）从 RPM 官网产品页抄：[设备总目录](https://www.rpmhire.com.au/) · [VMS](https://www.rpmhire.com.au/products/variable-message-signs/) · [箭头板](https://www.rpmhire.com.au/products/arrow-boards/) · [行人临时信号灯](https://www.rpmhire.com.au/products/pedestrian-portable-traffic-lights/) · [注水护栏](https://www.rpmhire.com.au/products/water-filled-barriers/)。官网**没有公开价格**：`qty` 和 `day_rate_aud` 用假设值，并列进 `assumed`
-- 只记类型、规格和链接，**不要复制官网的图片和大段文字**
+- `effect` starts with these 6 values; tell T4 before adding more: `close` (the barrier encloses what is in `can_close`), `route_vehicles` (vehicle detour direction), `route_peds` (pedestrian diversion), `warn` (advance warnings such as roadwork ahead), `message` (free VMS text), `control_crossing` (portable pedestrian signals)
+- **Minimum list**: 1–2 kinds of barrier; 5–6 static signs (Roadwork ahead, Lane closed, Detour left / right / straight ahead, Footpath closed use other side, Bike lane closed / Bicycles merge, End roadwork); VMS; arrow board; portable pedestrian signals. Where a sign has a standard code (AS 1742.3 / AGTTM), fill in `code`
+- Copy the specifications (barrier section length, VMS lines, characters per line) from the RPM Hire product pages: [catalogue](https://www.rpmhire.com.au/) · [VMS](https://www.rpmhire.com.au/products/variable-message-signs/) · [arrow boards](https://www.rpmhire.com.au/products/arrow-boards/) · [portable pedestrian signals](https://www.rpmhire.com.au/products/pedestrian-portable-traffic-lights/) · [water-filled barriers](https://www.rpmhire.com.au/products/water-filled-barriers/). The site **publishes no prices**: use assumed values for `qty` and `day_rate_aud` and list them in `assumed`
+- Record only types, specifications and links; **do not copy the site's images or long passages of text**
 
-### B. `transit.json`：电车和公交
+### B. `transit.json`: trams and buses
 
-CBD 最关键的一点：**电车不能绕行**（在轨道上）。T4 要靠这份数据判断三件事：施工碰到电车线就是「线路中断」；电车和汽车混行的路段，拥堵会传到电车上；公交可以绕行，但会跳过站点。
+The key point in the CBD: **trams cannot detour** (they run on rails). T4 relies on this data to decide three things: works that touch a tram line mean "line interrupted"; on links where trams share the road with cars, congestion carries over to the trams; buses can detour but skip stops.
 
-- 数据：[DataVic「GTFS Schedule」](https://discover.data.vic.gov.au/dataset/gtfs-schedule)（CC BY 4.0，09-26 更新）。总包 275 MB，里面按交通方式各有一个 `google_transit.zip`，按 PTV 惯例 `3/` 是电车（18 MB）、`4/` 是市区巴士（104 MB），解压后看 `routes.txt` 确认。服务器支持 HTTP Range，可以照 `fetch_scats.py` 的做法只抽 `3/` 和 `4/`。火车不受路面施工影响，不做
-- 选一个普通工作日和一个周六（避开公众假期），日期写进 `service_dates`
+- Data: [DataVic "GTFS Schedule"](https://discover.data.vic.gov.au/dataset/gtfs-schedule) (CC BY 4.0, updated 09-26). The full bundle is 275 MB and contains one `google_transit.zip` per mode; by PTV convention `3/` is tram (18 MB) and `4/` is metropolitan bus (104 MB); check `routes.txt` after unzipping. The server supports HTTP Range, so you can follow `fetch_scats.py` and extract only `3/` and `4/`. Trains are not affected by roadworks, so leave them out
+- Pick one normal weekday and one Saturday (avoiding public holidays) and record the dates in `service_dates`
 
 ```json
 {
@@ -73,7 +75,7 @@ CBD 最关键的一点：**电车不能绕行**（在轨道上）。T4 要靠这
     { "id": "tram_96", "mode": "tram", "short": "96", "name": "…",
       "dirs": [ { "dir": 0, "headsign": "…", "links": ["l12", "l13"], "offnet_m": 0,
                   "stops": ["s1001", "s1002"],
-                  "trips": { "wd": [0, 0, "…共 24 个"], "we": ["…共 24 个"] },
+                  "trips": { "wd": [0, 0, "…24 in total"], "we": ["…24 in total"] },
                   "geometry": [[-37.81, 144.96]] } ] }
   ],
   "stops": [ { "id": "s1001", "name": "…", "lat": -37.81, "lon": 144.96, "road_link": "l12", "routes": ["tram_96"] } ],
@@ -81,14 +83,16 @@ CBD 最关键的一点：**电车不能绕行**（在轨道上）。T4 要靠这
 }
 ```
 
-- `links`：把 `shapes.txt` 的走向按顺序对到 `network.json` 的有向路段上（距离 15 m 内、方向一致）
-- `offnet_m`：对不上机动车路网的长度，比如 Swanston St、Bourke St Mall 这类只走电车的段。这些段保留 `geometry` 给 T2 画，不用硬塞进 `links`
-- `trips`：每小时、每个方向的班次数；`stops[].road_link`：站点所在的路段
-- 平均载客人数放进 P1-E
+*[As built, `routes[]` carry `id`, `mode`, `short` and `dirs` with no `name`; `stops[]` also carry `mode`, and stop ids are `st_<gtfs id>` / `sb_<gtfs id>`.]*
 
-### C. `walk.json` + `peds.json`：行人
+- `links`: map the `shapes.txt` alignment, in order, onto the directed links of `network.json` (within 15 m, same direction)
+- `offnet_m`: length that cannot be matched to the drivable network, for example tram-only sections such as Swanston St and Bourke St Mall. Keep `geometry` for these sections so T2 can draw them; do not force them into `links`
+- `trips`: trips per hour per direction; `stops[].road_link`: the link the stop is on
+- Average passengers per vehicle belongs to P1-E
 
-**`walk.json`**：行人路网，不分方向。
+### C. `walk.json` + `peds.json`: pedestrians
+
+**`walk.json`**: the walking network, undirected.
 
 ```json
 {
@@ -101,72 +105,74 @@ CBD 最关键的一点：**电车不能绕行**（在轨道上）。T4 要靠这
 }
 ```
 
-- 首选 OSMnx `network_type="walk"`。**先看 CBD 里人行道是不是单独画成了线**：如果大多只是道路上的 `sidewalk=*` 标签，就改用 City of Melbourne 的 [Pedestrian Network](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-network/)（CC BY）。选了哪个写进 README
-- `kind` ∈ `sidewalk / crossing / path / mall / other`；`crossing` ∈ `signal / zebra / uncontrolled / null`
-- `road_link` + `side`：这段人行道挨着哪条有向路段、在它的左边还是右边。澳洲靠左行驶，所以双向路上挨着某个行车方向的人行道一般在那条有向路段的左边。T4 封「人行道」时就靠这个找到要断开的行人路段
-- id 从 OSM id 派生，重跑保持稳定
+- First choice is OSMnx `network_type="walk"`. **First check whether CBD sidewalks are drawn as separate lines**: if most exist only as `sidewalk=*` tags on roads, switch to the City of Melbourne [Pedestrian Network](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-network/) (CC BY). Record the choice in the README
+- `kind` ∈ `sidewalk / crossing / path / mall / other`; `crossing` ∈ `signal / zebra / uncontrolled / null`
+- `road_link` + `side`: which directed link this sidewalk runs beside, and whether it is on that link's left or right. Australia drives on the left, so on a two-way road the sidewalk beside one direction of traffic is usually on the left of that directed link. When T4 closes a "footpath", this is how it finds the walking links to cut
+- Derive ids from OSM ids so they stay stable across re-runs
 
-**`peds.json`**：行人流量，格式和 `flows.json` 对齐。
+**`peds.json`**: pedestrian volumes, in the same layout as `flows.json`.
 
 ```json
 {
   "version": 1, "unit": "ped/h",
-  "period": "2026-08-01..2026-09-27（同 flows.json）",
+  "period": "2026-08-01..2026-09-27 (same as flows.json)",
   "sensors": [ { "id": "45", "name": "Swa148_T", "lat": -37.8141, "lon": 144.9661, "walk_link": "wl88", "road_link": "l12" } ],
-  "days": { "wd": { "wl88": [0, 0, "…共 24 个"] }, "we": { "…": [] } },
+  "days": { "wd": { "wl88": [0, 0, "…24 in total"] }, "we": { "…": [] } },
   "method": { "wl88": "sensor" },
   "coverage": { "links": 0, "measured": 0, "estimated": 0 }
 }
 ```
 
-- 数据：City of Melbourne 的 [Pedestrian Counting System（counts per hour）](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-counting-system-monthly-counts-per-hour/) 和 [Sensor Locations](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-counting-system-sensor-locations/)，都是 CC BY。09-29 核对过，数据已经更新到 09-28
-- 直接用 API 导出这 8 周的数据，约 13 万行，不用下全量：
+- Data: the City of Melbourne [Pedestrian Counting System (counts per hour)](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-counting-system-monthly-counts-per-hour/) and [Sensor Locations](https://data.melbourne.vic.gov.au/explore/dataset/pedestrian-counting-system-sensor-locations/), both CC BY. Checked on 09-29: the data is updated to 09-28
+- Export these 8 weeks directly from the API, about 130,000 rows; no need to download everything:
   ```
   curl -G "https://data.melbourne.vic.gov.au/api/explore/v2.1/catalog/datasets/pedestrian-counting-system-monthly-counts-per-hour/exports/csv" \
     --data-urlencode "where=sensing_date>=date'2026-08-01' and sensing_date<=date'2026-09-27'" -o apps/roads/raw/peds.csv
   ```
-- 列：`location_id, sensing_date, hourday, direction_1, direction_2, pedestriancount, sensor_name, location`。`pedestriancount` = 两个方向之和（抽查过几行）。CBD 附近这 8 周有数的传感器约 96 个
-- `method` ∈ `sensor / street_interp / class_default`，意思和 `flows.json` 的一样
+- Columns: `location_id, sensing_date, hourday, direction_1, direction_2, pedestriancount, sensor_name, location`. `pedestriancount` = the sum of both directions (spot-checked on a few rows). About 96 sensors near the CBD have data for these 8 weeks
+- `method` ∈ `sensor / street_interp / class_default`, with the same meaning as in `flows.json`
 
-## 4. P1：加分，P0 做完再做
+## 4. P1: bonus, after P0 is done
 
-- **D. 路人比例要有依据**：T5 的 4 类路人比例（通勤 50%、本地人 25%、游客 10%、送货 15%）目前是拍脑袋的。能找到的依据：送货比例用 [Historical AADT](https://discover.data.vic.gov.au/dataset/historical-annual-average-daily-traffic-volume) 的重型车占比（到 2019 年，只覆盖主干道）。其余三类找得到公开来源就用，找不到就在 README 写「无来源，保留假设」。先和认领 T5 的人对一下，谁找都行
-- **E. `params.json` 折算参数**：出行时间价值和车辆载客率用 [ATAP PV2 · Travel time](https://www.atap.gov.au/parameter-values/road-transport/3-travel-time)；电车和巴士每车平均载客人数用 [Monthly average patronage by day type and by mode](https://discover.data.vic.gov.au/dataset/monthly-average-patronage-by-day-type-and-by-mode) 除以班次数估算，写明方法。T4 用它把车·分钟换成人·分钟，pitch 用它把延误换成澳元
-- **F. 车流校正**：就是 PR #9 写的下一步，多对几个路口的检测器配置表（`detector_map`），修正「每车道比实测偏低约 1/3」
-- **G. `rules.json` 摆放规则**：提前警告距离、渐变段长度、行人临时通道最小宽度。来源 AGTTM / AS 1742.3，找得到原表就填，找不到写假设。T2 用它检查设备摆得合不合规
+*[None of D, F or G was delivered in `apps/roads`: `DETECTOR_MAP` still covers only site 2921 and there is no `rules.json`. Item E (value of time, car occupancy) was picked up in `apps/params` (T12).]*
 
-## 5. P2：有时间再做
+- **D. Evidence for the road-user mix**: T5's four road-user shares (commuter 50%, local 25%, tourist 10%, delivery 15%) are currently guesses. Possible evidence: the delivery share from the heavy-vehicle share in [Historical AADT](https://discover.data.vic.gov.au/dataset/historical-annual-average-daily-traffic-volume) (to 2019, arterial roads only). For the other three, use public sources if any can be found; otherwise write "no source, assumption kept" in the README. Check with whoever takes T5 first; either side can do the search
+- **E. Conversion parameters in `params.json`**: value of travel time and vehicle occupancy from [ATAP PV2 · Travel time](https://www.atap.gov.au/parameter-values/road-transport/3-travel-time); average passengers per tram and bus estimated from [Monthly average patronage by day type and by mode](https://discover.data.vic.gov.au/dataset/monthly-average-patronage-by-day-type-and-by-mode) divided by the number of services, with the method written down. T4 uses it to convert vehicle-minutes into person-minutes, and the pitch uses it to convert delay into Australian dollars
+- **F. Flow correction**: the next step already noted in PR #9: map more junctions' detector configuration sheets (`detector_map`) to fix "per lane about 1/3 below measured"
+- **G. `rules.json` placement rules**: advance warning distances, taper lengths, minimum width of temporary pedestrian paths. Source AGTTM / AS 1742.3; fill from the original tables if they can be found, otherwise write down the assumptions. T2 uses it to check whether equipment is placed compliantly
 
-- 轮椅：City of Melbourne 的 [Footpath steepness](https://data.melbourne.vic.gov.au/explore/dataset/footpath-steepness/)，标出太陡、轮椅走不了的绕行
-- 自行车：SCATS 里有的检测器是自行车专用的（见 `PRD.md` §6），整理出来就是骑车的流量
+## 5. P2: if there is time
 
-## 6. 验收（加进 `tests/test_roads.py`，`bash apps/roads/test.sh` 全绿才算过）
+- Wheelchairs: the City of Melbourne [Footpath steepness](https://data.melbourne.vic.gov.au/explore/dataset/footpath-steepness/), to flag detours too steep for a wheelchair
+- Bikes: some SCATS detectors are bike-only (see `PRD.md` §6); collecting them gives cycling volumes
 
-1. 每个新文件：`version` 是整数，文件 < 2 MB
-2. 引用完整：所有 `road_link`、`routes[].dirs[].links` 都是 `network.json` 里真有的路段；`walk_link`、`stops`、`routes` 之间的引用都存在
-3. `peds.json` 和 `transit.json` 的每个 24 小时数组：长度 24，数都非负
-4. `equipment.json`：id 唯一；`category` 和 `effect` 在上面的取值里；`barrier` 有 `unit_len_m > 0`；`vms` 有 `lines` 和 `chars_per_line`；每项都有 `qty ≥ 0`，假设过的字段都列进了 `assumed`
-5. `walk.json` 连通：最大连通块 ≥ 90% 节点
-6. 常识检查：
-   - La Trobe St 的路段上至少挂着一条电车线路；电车线路用到的路段里，≥ 80% 在 `network.json` 里 `tram = true`（顺便验证 PR #9 的电车标记）
-   - 所有传感器工作日最忙的那个小时，最大值在 500–10000 人 / 小时之间。参考：Swanston St 的 `Swa148_T` 09-27 17 点是 1626 人
+## 6. Acceptance (add to `tests/test_roads.py`; passes only when `bash apps/roads/test.sh` is all green)
 
-## 7. 时间盒（建议，lead 可以调）
+1. Every new file: `version` is an integer, file < 2 MB
+2. Referential integrity: every `road_link` and `routes[].dirs[].links` entry is a real link in `network.json`; references between `walk_link`, `stops` and `routes` all exist
+3. Every 24-hour array in `peds.json` and `transit.json`: length 24, all numbers non-negative
+4. `equipment.json`: unique ids; `category` and `effect` take the values above; `barrier` has `unit_len_m > 0`; `vms` has `lines` and `chars_per_line`; every item has `qty ≥ 0`, and every assumed field is listed in `assumed`
+5. `walk.json` connectivity: the largest connected component has ≥ 90% of nodes
+6. Sanity checks:
+   - At least one tram route runs on a La Trobe St link; of the links used by tram routes, ≥ 80% have `tram = true` in `network.json` (which also verifies PR #9's tram flags)
+   - The maximum over all sensors of the busiest weekday hour lies between 500 and 10,000 people per hour. Reference: Swanston St `Swa148_T` had 1,626 at 17:00 on 09-27
 
-| 时间 | 交出什么 |
+## 7. Time boxes (suggested; the lead can adjust)
+
+| Time | What to hand over |
 |---|---|
-| PR #9 合进 main 后 | 从 main 开新分支 `louisxie316-dotcom/roads/T<n>-…`，先交 A（`equipment.json`），T2 马上能做设备面板 |
-| 21:00 集成点 | B（`transit.json`） |
-| 周三 09:00 集成点 | C（`walk.json` + `peds.json`）；PR 转正式，`check.sh --quick` 全绿 |
-| 周三中午前 | P1 能做多少做多少 |
+| After PR #9 is merged into main | Branch `louisxie316-dotcom/roads/T<n>-…` from main and deliver A (`equipment.json`) first, so T2 can build the equipment panel straight away |
+| 21:00 integration point | B (`transit.json`) |
+| Wednesday 09:00 integration point | C (`walk.json` + `peds.json`); mark the PR ready, `check.sh --quick` all green |
+| Before Wednesday noon | As much of P1 as possible |
 
-## 8. 不做
+## 8. Out of scope
 
-- 行为参数本身（T5）、延误和绕行计算（T4）、界面（T2）
-- GTFS Realtime、PTV Timetable API：要 key，演示也用不上实时数据
+- The behaviour parameters themselves (T5), delay and detour calculations (T4), the interface (T2)
+- GTFS Realtime, PTV Timetable API: they need a key, and the demo does not need real-time data
 
-## 变更记录
+## Change log
 
-| 时间 | 谁 | 改了什么 |
+| Time | Who | What changed |
 |---|---|---|
-| 09-29 13:55 | @jinmingq | 初版（内容同 issue #11） |
+| 09-29 13:55 | @jinmingq | First version (same content as issue #11) |
